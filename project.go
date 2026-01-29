@@ -333,7 +333,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 
 	var pullRequest *github.PullRequest
 
-	logger.Debug("searching for any existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
+	logger.Debug("searching for any existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID, "state", mergeRequest.State, "source_branch", mergeRequest.SourceBranch)
 	sourceBranches := []string{mergeRequest.SourceBranch, sourceBranchForClosedMergeRequest}
 	branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
 	query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", p.githubPath[0], p.githubPath[1], branchQuery)
@@ -378,13 +378,20 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 	}
 
 	if strings.EqualFold(mergeRequest.State, "opened") {
-		if _, err = p.repo.Branch(mergeRequest.SourceBranch); err != nil {
-			if errors.Is(err, git.ErrBranchNotFound) && skipInvalidMergeRequests {
+		// Use Reference() instead of Branch() to properly handle branch names containing slashes
+		branchRef := plumbing.NewBranchReferenceName(mergeRequest.SourceBranch)
+		logger.Debug("checking for source branch in local mirror", "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch, "ref_name", branchRef.String())
+
+		if ref, err := p.repo.Reference(branchRef, false); err != nil {
+			logger.Debug("branch lookup failed", "merge_request_id", mergeRequest.IID, "error", err, "error_type", fmt.Sprintf("%T", err))
+			if errors.Is(err, plumbing.ErrReferenceNotFound) && skipInvalidMergeRequests {
 				logger.Info("skipping invalid merge request as source branch does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 				return false, nil
 			} else {
 				return false, fmt.Errorf("checking source branch for merge request: %v", err)
 			}
+		} else {
+			logger.Debug("branch found successfully", "merge_request_id", mergeRequest.IID, "ref", ref.Name().String(), "hash", ref.Hash())
 		}
 	}
 
