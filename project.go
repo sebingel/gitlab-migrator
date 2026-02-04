@@ -428,7 +428,11 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 		logger.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
 		startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
 		if err != nil {
-			return false, fmt.Errorf("loading start commit: %v", err)
+			if skipInvalidMergeRequests {
+				logger.Info("skipping invalid merge request as start commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[0].ShortID, "error", err)
+				return false, nil
+			}
+			return false, fmt.Errorf("loading start commit %s: %v", mergeRequestCommits[0].ShortID, err)
 		}
 
 		if startCommit.NumParents() == 0 {
@@ -470,6 +474,16 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 
 		endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
 		logger.Trace("creating source branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
+
+		// Validate that the end commit exists before attempting checkout
+		if _, err = object.GetCommit(p.repo.Storer, endHash); err != nil {
+			if skipInvalidMergeRequests {
+				logger.Info("skipping invalid merge request as end commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, "error", err)
+				return false, nil
+			}
+			return false, fmt.Errorf("loading end commit %s: %v", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err)
+		}
+
 		if err = worktree.Checkout(&git.CheckoutOptions{
 			Create: true,
 			Force:  true,
