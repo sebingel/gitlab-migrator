@@ -35,7 +35,7 @@ const (
 
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, renameMasterToMain, skipInvalidMergeRequests, trimGithubBranches bool
-var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch string
+var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch, storageType, storageDir string
 var logOutput, logDirectory string
 var mergeRequestsAge int
 
@@ -219,6 +219,8 @@ func main() {
 	flag.StringVar(&renameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
 	flag.StringVar(&logOutput, "log-output", "", "comma-separated log targets: console, file, or console,file (default: console)")
 	flag.StringVar(&logDirectory, "log-directory", "", "directory for session log files (defaults to ./logs in executable directory)")
+	flag.StringVar(&storageType, "storage-type", "memory", "git storage type: 'memory' or 'filesystem' (use filesystem for large repositories)")
+	flag.StringVar(&storageDir, "storage-dir", "", "directory for filesystem storage (only used when -storage-type=filesystem, defaults to temp directory)")
 
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
 
@@ -287,6 +289,11 @@ func main() {
 
 	if renameMasterToMain && renameTrunkBranch != "" {
 		logger.Error("cannot specify -rename-master-to-main and -rename-trunk-branch together")
+		os.Exit(1)
+	}
+
+	if storageType != "memory" && storageType != "filesystem" {
+		logger.Error("storage-type must be either 'memory' or 'filesystem'")
 		os.Exit(1)
 	}
 
@@ -651,7 +658,7 @@ func performMigration(ctx context.Context, projects []Project) error {
 					break
 				}
 
-				proj, err := newProject(slugs)
+				proj, err := newProject(slugs, storageType, storageDir)
 				if err != nil {
 					errCount++
 					sendErr(err)

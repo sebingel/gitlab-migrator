@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -14,19 +16,26 @@ import (
 	"time"
 
 	"github.com/go-git/go-billy/v5/memfs"
+	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	plumbingcache "github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/xanzy/go-gitlab"
 )
 
-func newProject(slugs []string) (*project, error) {
+func newProject(slugs []string, sType, sDir string) (*project, error) {
 	var err error
-	p := &project{}
+	p := &project{
+		storageType: sType,
+		storageDir:  sDir,
+	}
 	p.log = logger.Named(slugs[0])
 
 	p.gitlabPath, p.githubPath, err = parseProjectSlugs(slugs)
@@ -61,6 +70,50 @@ type project struct {
 	defaultBranch string
 	gitlabPath    []string
 	githubPath    []string
+	storageType   string // "memory" or "filesystem"
+	storageDir    string // directory for filesystem storage
+	storagePath   string // path to cleanup for filesystem storage
+}
+
+func (p *project) createGitStorage() (storage.Storer, error) {
+	if p.storageType == "filesystem" {
+		var baseDir string
+		if p.storageDir != "" {
+			baseDir = p.storageDir
+		} else {
+			baseDir = os.TempDir()
+		}
+
+		// Create unique directory for this project
+		tempDir, err := os.MkdirTemp(baseDir, fmt.Sprintf("gitlab-migrator-%s-%s-*", p.gitlabPath[0], p.gitlabPath[1]))
+		if err != nil {
+			return nil, fmt.Errorf("creating storage directory: %v", err)
+		}
+
+		p.storagePath = tempDir
+		p.log.Debug("using filesystem storage", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "path", tempDir)
+
+		gitDir := filepath.Join(tempDir, ".git")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			return nil, fmt.Errorf("creating .git directory: %v", err)
+		}
+
+		fs := osfs.New(gitDir)
+		storage := filesystem.NewStorage(fs, plumbingcache.NewObjectLRUDefault())
+		return storage, nil
+	}
+
+	p.log.Debug("using memory storage", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
+	return memory.NewStorage(), nil
+}
+
+func (p *project) cleanupStorage() {
+	if p.storagePath != "" {
+		p.log.Debug("cleaning up filesystem storage", "path", p.storagePath)
+		if err := os.RemoveAll(p.storagePath); err != nil {
+			p.log.Warn("failed to cleanup storage directory", "path", p.storagePath, "error", err)
+		}
+	}
 }
 
 func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted bool) error {
@@ -139,11 +192,20 @@ func (p *project) migrate(ctx context.Context) error {
 	cloneUrl.User = url.UserPassword("oauth2", gitlabToken)
 	cloneUrlWithCredentials := cloneUrl.String()
 
+	// Create git storage (memory or filesystem based on configuration)
+	storage, err := p.createGitStorage()
+	if err != nil {
+		return fmt.Errorf("creating git storage: %v", err)
+	}
+
+	// Ensure cleanup on exit
+	defer p.cleanupStorage()
+
 	// In-memory filesystem for worktree operations
 	fs := memfs.New()
 
 	p.log.Debug("cloning repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", p.project.HTTPURLToRepo)
-	p.repo, err = git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
+	p.repo, err = git.CloneContext(ctx, storage, fs, &git.CloneOptions{
 		URL:        cloneUrlWithCredentials,
 		Auth:       nil,
 		RemoteName: "gitlab",
