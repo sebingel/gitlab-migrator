@@ -37,7 +37,7 @@ var loop, report bool
 var deleteExistingRepos, enablePullRequests, renameMasterToMain, skipInvalidMergeRequests, trimGithubBranches bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch, storageType, storageDir string
 var logOutput, logDirectory string
-var mergeRequestsAge int
+var mergeRequestsAge, pushBatchSize int
 
 var (
 	cache          *objectCache
@@ -223,6 +223,7 @@ func main() {
 	flag.StringVar(&storageDir, "storage-dir", "", "directory for filesystem storage (only used when -storage-type=filesystem, defaults to temp directory)")
 
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
+	flag.IntVar(&pushBatchSize, "push-batch-size", math.MaxInt, "number of branches to push per batch (default: unlimited, use smaller values like 50-100 for large repos)")
 
 	flag.Parse()
 
@@ -294,6 +295,11 @@ func main() {
 
 	if storageType != "memory" && storageType != "filesystem" {
 		logger.Error("storage-type must be either 'memory' or 'filesystem'")
+		os.Exit(1)
+	}
+
+	if pushBatchSize <= 0 {
+		logger.Error("push-batch-size must be greater than 0")
 		os.Exit(1)
 	}
 
@@ -658,7 +664,7 @@ func performMigration(ctx context.Context, projects []Project) error {
 					break
 				}
 
-				proj, err := newProject(slugs, storageType, storageDir)
+				proj, err := newProject(slugs, storageType, storageDir, pushBatchSize)
 				if err != nil {
 					errCount++
 					sendErr(err)

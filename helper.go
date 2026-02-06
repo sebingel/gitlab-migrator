@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v5/config"
 	"github.com/google/go-github/v74/github"
 	"github.com/xanzy/go-gitlab"
 )
@@ -205,4 +206,23 @@ func unmarshalResp(resp *http.Response, model interface{}) error {
 	resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
 
 	return nil
+}
+
+// chunkRefSpecs splits a slice of RefSpecs into chunks of the specified size.
+// Returns a slice of slices, where each inner slice contains at most chunkSize items.
+func chunkRefSpecs(items []config.RefSpec, chunkSize int) [][]config.RefSpec {
+	if chunkSize <= 0 {
+		return [][]config.RefSpec{items}
+	}
+
+	var chunks [][]config.RefSpec
+	for i := 0; i < len(items); i += chunkSize {
+		end := i + chunkSize
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[i:end])
+	}
+
+	return chunks
 }

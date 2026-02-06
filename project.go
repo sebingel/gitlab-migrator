@@ -30,11 +30,12 @@ import (
 	"github.com/xanzy/go-gitlab"
 )
 
-func newProject(slugs []string, sType, sDir string) (*project, error) {
+func newProject(slugs []string, sType, sDir string, batchSize int) (*project, error) {
 	var err error
 	p := &project{
-		storageType: sType,
-		storageDir:  sDir,
+		storageType:   sType,
+		storageDir:    sDir,
+		pushBatchSize: batchSize,
 	}
 	p.log = logger.Named(slugs[0])
 
@@ -73,6 +74,7 @@ type project struct {
 	storageType   string // "memory" or "filesystem"
 	storageDir    string // directory for filesystem storage
 	storagePath   string // path to cleanup for filesystem storage
+	pushBatchSize int    // number of branches per push batch
 }
 
 func (p *project) createGitStorage() (storage.Storer, error) {
@@ -260,17 +262,24 @@ func (p *project) migrate(ctx context.Context) error {
 		return fmt.Errorf("parsing branches: %v", err)
 	}
 
-	p.log.Debug("force-pushing branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "count", len(refSpecs))
-	if err = p.repo.PushContext(ctx, &git.PushOptions{
-		RemoteName: "github",
-		Force:      true,
-		RefSpecs:   refSpecs,
-		//Prune:      true, // causes error, attempts to delete main branch
-	}); err != nil {
-		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		} else {
-			return fmt.Errorf("pushing to github repo: %v", err)
+	// Push branches in batches
+	batches := chunkRefSpecs(refSpecs, p.pushBatchSize)
+	p.log.Debug("force-pushing branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecs), "batches", len(batches), "batch_size", p.pushBatchSize)
+
+	for batchNum, batch := range batches {
+		p.log.Debug("pushing branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
+
+		if err = p.repo.PushContext(ctx, &git.PushOptions{
+			RemoteName: "github",
+			Force:      true,
+			RefSpecs:   batch,
+			//Prune:      true, // causes error, attempts to delete main branch
+		}); err != nil {
+			if errors.Is(err, git.NoErrAlreadyUpToDate) {
+				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
+			} else {
+				return fmt.Errorf("pushing branch batch %d/%d to github: %v", batchNum+1, len(batches), err)
+			}
 		}
 	}
 
@@ -294,17 +303,24 @@ func (p *project) migrate(ctx context.Context) error {
 			}
 		}
 
-		p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "count", len(refSpecs))
-		if err = p.repo.PushContext(ctx, &git.PushOptions{
-			RemoteName: "github",
-			Force:      true,
-			RefSpecs:   refSpecsToDelete,
-			//Prune:      true, // causes error, attempts to delete main branch
-		}); err != nil {
-			if errors.Is(err, git.NoErrAlreadyUpToDate) {
-				p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-			} else {
-				return fmt.Errorf("pushing to github repo: %v", err)
+		// Trim branches in batches
+		batches := chunkRefSpecs(refSpecsToDelete, p.pushBatchSize)
+		p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
+
+		for batchNum, batch := range batches {
+			p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
+
+			if err = p.repo.PushContext(ctx, &git.PushOptions{
+				RemoteName: "github",
+				Force:      true,
+				RefSpecs:   batch,
+				//Prune:      true, // causes error, attempts to delete main branch
+			}); err != nil {
+				if errors.Is(err, git.NoErrAlreadyUpToDate) {
+					p.log.Debug("batch already up-to-date", "batch", batchNum+1)
+				} else {
+					return fmt.Errorf("trimming branch batch %d/%d: %v", batchNum+1, len(batches), err)
+				}
 			}
 		}
 	}
