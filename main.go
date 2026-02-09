@@ -6,12 +6,15 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +35,7 @@ const (
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, renameMasterToMain, skipInvalidMergeRequests, trimGithubBranches bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch string
+var logOutput, logFile string
 var mergeRequestsAge int
 
 var (
@@ -57,6 +61,80 @@ type GitHubError struct {
 	DocumentationURL string `json:"documentation_url"`
 }
 
+func createLogWriter(logOutput, logFile string) (io.Writer, *os.File, error) {
+	// Default to console if empty
+	if logOutput == "" {
+		logOutput = "console"
+	}
+
+	// Parse comma-separated targets
+	targets := strings.Split(logOutput, ",")
+	hasConsole := false
+	hasFile := false
+
+	for _, target := range targets {
+		switch strings.TrimSpace(strings.ToLower(target)) {
+		case "console":
+			hasConsole = true
+		case "file":
+			hasFile = true
+		default:
+			return nil, nil, fmt.Errorf("invalid log target: %s (valid: console, file)", target)
+		}
+	}
+
+	// Handle different combinations
+	if hasConsole && hasFile {
+		// Both console and file
+		if logFile == "" {
+			// Generate default filename in executable directory
+			exePath, err := os.Executable()
+			if err != nil {
+				return nil, nil, fmt.Errorf("getting executable path: %v", err)
+			}
+			exeDir := filepath.Dir(exePath)
+			logFile = filepath.Join(exeDir, fmt.Sprintf("gitlab-migrator-%s.log",
+				time.Now().Format("2006-01-02-150405")))
+		}
+
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening log file: %v", err)
+		}
+
+		// Print log file location for user awareness
+		fmt.Fprintf(os.Stderr, "Logging to file: %s\n", logFile)
+
+		return io.MultiWriter(os.Stderr, f), f, nil
+
+	} else if hasFile {
+		// File only
+		if logFile == "" {
+			exePath, err := os.Executable()
+			if err != nil {
+				return nil, nil, fmt.Errorf("getting executable path: %v", err)
+			}
+			exeDir := filepath.Dir(exePath)
+			logFile = filepath.Join(exeDir, fmt.Sprintf("gitlab-migrator-%s.log",
+				time.Now().Format("2006-01-02-150405")))
+		}
+
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening log file: %v", err)
+		}
+
+		// Print log file location to stderr before switching to file-only
+		fmt.Fprintf(os.Stderr, "Logging to file: %s\n", logFile)
+
+		return io.Writer(f), f, nil
+
+	} else {
+		// Console only (default)
+		return os.Stderr, nil, nil
+	}
+}
+
 func main() {
 	var err error
 
@@ -80,13 +158,6 @@ func main() {
 		}
 	}()
 
-	logger = hclog.New(&hclog.LoggerOptions{
-		Name:  "gitlab-migrator",
-		Level: hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
-	})
-
-	cache = newObjectCache()
-
 	var showVersion bool
 	var mergeRequestsAgeRaw string
 	fmt.Printf(fmt.Sprintf("gitlab-migrator %s\n", version))
@@ -109,6 +180,8 @@ func main() {
 	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-repo)")
 	flag.StringVar(&mergeRequestsAgeRaw, "merge-requests-max-age", "", "optional maximum age in days of merge requests to migrate")
 	flag.StringVar(&renameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
+	flag.StringVar(&logOutput, "log-output", "", "comma-separated log targets: console, file, or console,file (default: console)")
+	flag.StringVar(&logFile, "log-file", "", "path to log file (auto-generated if not specified when using file output)")
 
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
 
@@ -117,6 +190,32 @@ func main() {
 	if showVersion {
 		return
 	}
+
+	// Validate log flag combination
+	if logFile != "" && !strings.Contains(strings.ToLower(logOutput), "file") {
+		fmt.Fprintf(os.Stderr, "Error: -log-file requires -log-output to include 'file' (e.g. -log-output=file or -log-output=console,file)\n")
+		os.Exit(1)
+	}
+
+	// Create log writer based on flags
+	logWriter, logFileHandle, err := createLogWriter(logOutput, logFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error setting up logging: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Ensure log file is closed on exit
+	if logFileHandle != nil {
+		defer logFileHandle.Close()
+	}
+
+	logger = hclog.New(&hclog.LoggerOptions{
+		Name:   "gitlab-migrator",
+		Level:  hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
+		Output: logWriter,
+	})
+
+	cache = newObjectCache()
 
 	githubToken = os.Getenv("GITHUB_TOKEN")
 	if githubToken == "" {
