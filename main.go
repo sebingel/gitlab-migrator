@@ -33,7 +33,7 @@ const (
 	defaultGitlabDomain = "gitlab.com"
 )
 
-var loop, report bool
+var loop, report, detailedReport bool
 var deleteExistingRepos, enablePullRequests, renameMasterToMain, skipInvalidMergeRequests, trimGithubBranches bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch, storageType, storageDir string
 var logOutput, logDirectory string
@@ -65,7 +65,7 @@ type GitHubError struct {
 	DocumentationURL string `json:"documentation_url"`
 }
 
-func createLogWriter(logOutput, logDirectory string) (io.Writer, *os.File, error) {
+func createLogWriter(logOutput, logDirectory, sessionID string) (io.Writer, *os.File, error) {
 	// Default to console if empty
 	if logOutput == "" {
 		logOutput = "console"
@@ -126,36 +126,30 @@ func createLogWriter(logOutput, logDirectory string) (io.Writer, *os.File, error
 			}
 		}
 
-		// Generate session-specific filename with atomic creation
-		var f *os.File
-		var err error
-		var fullPath string
-		maxRetries := 10
+		// Create session-specific filename using provided sessionID with collision retry
+		fullPath := filepath.Join(targetDir, sessionID+"-gitlab-migrator.log")
 
-		for i := 0; i < maxRetries; i++ {
-			sessionID := time.Now().Format("2006-01-02-150405")
-			fullPath = filepath.Join(targetDir, sessionID+"-gitlab-migrator.log")
-
-			// O_EXCL = fail if file exists (atomic check+create)
-			f, err = os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
-			if err == nil {
-				break // Successfully created unique file
-			}
-
-			if !os.IsExist(err) {
-				// Real error (permissions, disk full, etc.)
+		// O_EXCL = fail if file exists (atomic check+create)
+		f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
+		if err != nil {
+			if os.IsExist(err) {
+				// File exists, try with counter suffix
+				for i := 2; i <= 10; i++ {
+					fullPath = filepath.Join(targetDir, fmt.Sprintf("%s-%d-gitlab-migrator.log", sessionID, i))
+					f, err = os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
+					if err == nil {
+						break
+					}
+					if !os.IsExist(err) {
+						return nil, nil, fmt.Errorf("opening log file: %v", err)
+					}
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to generate unique log filename after retries")
+				}
+			} else {
 				return nil, nil, fmt.Errorf("opening log file: %v", err)
 			}
-
-			// File exists, retry with new timestamp
-			if i == maxRetries-1 {
-				return nil, nil, fmt.Errorf("failed to generate unique log filename after %d attempts", maxRetries)
-			}
-
-			time.Sleep(time.Second)
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("opening log file: %v", err)
 		}
 
 		// Print log file location
@@ -201,6 +195,7 @@ func main() {
 
 	flag.BoolVar(&loop, "loop", false, "continue migrating until canceled")
 	flag.BoolVar(&report, "report", false, "report on primitives to be migrated instead of beginning migration")
+	flag.BoolVar(&detailedReport, "detailed-report", false, "write detailed migration report to reports/ directory")
 
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
@@ -237,8 +232,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Generate session ID for both logs and reports
+	sessionID := time.Now().Format("2006-01-02-150405")
+
 	// Create log writer based on flags
-	logWriter, logFileHandle, err := createLogWriter(logOutput, logDirectory)
+	logWriter, logFileHandle, err := createLogWriter(logOutput, logDirectory, sessionID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error setting up logging: %v\n", err)
 		os.Exit(1)
@@ -256,6 +254,9 @@ func main() {
 	})
 
 	cache = newObjectCache()
+
+	// Create result collector for migration reporting
+	collector := newResultCollector()
 
 	githubToken = os.Getenv("GITHUB_TOKEN")
 	if githubToken == "" {
@@ -539,7 +540,7 @@ func main() {
 	if report {
 		printReport(ctx, projects)
 	} else {
-		if err = performMigration(ctx, projects); err != nil {
+		if err = performMigration(ctx, projects, collector, sessionID); err != nil {
 			sendErr(err)
 			os.Exit(1)
 		} else if errCount > 0 {
@@ -642,7 +643,7 @@ func reportProject(_ context.Context, slugs []string) (*Report, error) {
 	}, nil
 }
 
-func performMigration(ctx context.Context, projects []Project) error {
+func performMigration(ctx context.Context, projects []Project, collector *ResultCollector, sessionID string) error {
 	concurrency := maxConcurrency
 	if len(projects) < maxConcurrency {
 		concurrency = len(projects)
@@ -652,6 +653,16 @@ func performMigration(ctx context.Context, projects []Project) error {
 
 	var wg sync.WaitGroup
 	queue := make(chan Project, concurrency*2)
+	resultChan := make(chan ProjectResult, concurrency*2)
+
+	// Launch collector goroutine
+	collectorDone := make(chan bool)
+	go func() {
+		for result := range resultChan {
+			collector.addProjectResult(result)
+		}
+		close(collectorDone)
+	}()
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -668,13 +679,34 @@ func performMigration(ctx context.Context, projects []Project) error {
 				if err != nil {
 					errCount++
 					sendErr(err)
+					// Send failure result
+					gitlabPath, githubPath, parseErr := parseProjectSlugs(slugs)
+					if parseErr != nil {
+						gitlabPath = []string{"unknown", "unknown"}
+						githubPath = []string{"unknown", "unknown"}
+					}
+					resultChan <- ProjectResult{
+						GitLabGroup:   gitlabPath[0],
+						GitLabProject: gitlabPath[1],
+						GitHubOwner:   githubPath[0],
+						GitHubRepo:    githubPath[1],
+						Status:        StatusFailed,
+						Error:         err.Error(),
+						StartTime:     time.Now(),
+						EndTime:       time.Now(),
+					}
 					continue
 				}
 
-				if err := proj.migrate(ctx); err != nil {
+				result, err := proj.migrate(ctx)
+				if err != nil {
 					errCount++
 					sendErr(err)
+					result.Status = StatusFailed
+					result.Error = err.Error()
 				}
+
+				resultChan <- result
 			}
 		}()
 	}
@@ -704,6 +736,49 @@ func performMigration(ctx context.Context, projects []Project) error {
 	}
 
 	wg.Wait()
+	close(resultChan)
+	<-collectorDone
+
+	// Finalize report
+	finalReport := collector.finalize()
+
+	// Output detailed report if requested
+	if detailedReport {
+		// Create reports directory in executable directory (same pattern as logs)
+		exePath, err := os.Executable()
+		if err != nil {
+			logger.Error("failed to get executable path for reports", "error", err)
+		} else {
+			exeDir := filepath.Dir(exePath)
+			reportsDir := filepath.Join(exeDir, "reports")
+
+			// Create reports directory if it doesn't exist
+			if err := os.MkdirAll(reportsDir, 0755); err != nil {
+				logger.Error("failed to create reports directory", "error", err)
+			} else {
+				// Write both JSON and Markdown reports with session ID
+				jsonPath := filepath.Join(reportsDir, sessionID+"-migration-report.json")
+				mdPath := filepath.Join(reportsDir, sessionID+"-migration-report.md")
+
+				logger.Info("writing detailed migration reports", "directory", reportsDir, "session", sessionID)
+
+				if err := writeJSONReport(finalReport, jsonPath); err != nil {
+					logger.Error("failed to write JSON report", "error", err, "path", jsonPath)
+				} else {
+					logger.Info("JSON report written", "path", jsonPath)
+				}
+
+				if err := writeMarkdownReport(finalReport, mdPath); err != nil {
+					logger.Error("failed to write Markdown report", "error", err, "path", mdPath)
+				} else {
+					logger.Info("Markdown report written", "path", mdPath)
+				}
+			}
+		}
+	}
+
+	// Always print console summary
+	printSummaryToConsole(finalReport)
 
 	return nil
 }
