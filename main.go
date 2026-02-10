@@ -585,7 +585,7 @@ func performMigration(ctx context.Context, projects []Project) error {
 	}
 
 	if loop {
-		logger.Info(fmt.Sprintf("looping migration until canceled"))
+		logger.Info("looping migration until canceled")
 		for {
 			if err := ctx.Err(); err != nil {
 				break
