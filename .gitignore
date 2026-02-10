@@ -118,3 +118,4 @@ fabric.properties
 *.ps1
 *.csv
 .claude
+logs/

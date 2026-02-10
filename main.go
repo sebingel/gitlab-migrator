@@ -35,7 +35,7 @@ const (
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, renameMasterToMain, skipInvalidMergeRequests, trimGithubBranches bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch string
-var logOutput, logFile string
+var logOutput, logDirectory string
 var mergeRequestsAge int
 
 var (
@@ -61,7 +61,7 @@ type GitHubError struct {
 	DocumentationURL string `json:"documentation_url"`
 }
 
-func createLogWriter(logOutput, logFile string) (io.Writer, *os.File, error) {
+func createLogWriter(logOutput, logDirectory string) (io.Writer, *os.File, error) {
 	// Default to console if empty
 	if logOutput == "" {
 		logOutput = "console"
@@ -83,56 +83,89 @@ func createLogWriter(logOutput, logFile string) (io.Writer, *os.File, error) {
 		}
 	}
 
-	// Handle different combinations
-	if hasConsole && hasFile {
-		// Both console and file
-		if logFile == "" {
-			// Generate default filename in executable directory
+	// Handle file output
+	if hasFile {
+		var targetDir string
+
+		if logDirectory == "" {
+			// Default: use "logs" subdirectory in executable directory
 			exePath, err := os.Executable()
 			if err != nil {
 				return nil, nil, fmt.Errorf("getting executable path: %v", err)
 			}
 			exeDir := filepath.Dir(exePath)
-			logFile = filepath.Join(exeDir, fmt.Sprintf("gitlab-migrator-%s.log",
-				time.Now().Format("2006-01-02-150405")))
-		}
+			targetDir = filepath.Join(exeDir, "logs")
 
-		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-		if err != nil {
-			return nil, nil, fmt.Errorf("opening log file: %v", err)
-		}
-
-		// Print log file location for user awareness
-		fmt.Fprintf(os.Stderr, "Logging to file: %s\n", logFile)
-
-		return io.MultiWriter(os.Stderr, f), f, nil
-
-	} else if hasFile {
-		// File only
-		if logFile == "" {
-			exePath, err := os.Executable()
-			if err != nil {
-				return nil, nil, fmt.Errorf("getting executable path: %v", err)
+			// Create logs directory if it doesn't exist
+			if err := os.MkdirAll(targetDir, 0755); err != nil {
+				return nil, nil, fmt.Errorf("creating default log directory: %v", err)
 			}
-			exeDir := filepath.Dir(exePath)
-			logFile = filepath.Join(exeDir, fmt.Sprintf("gitlab-migrator-%s.log",
-				time.Now().Format("2006-01-02-150405")))
+		} else {
+			// Validate/create provided directory
+			targetDir = logDirectory
+
+			info, err := os.Stat(targetDir)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// Create directory if it doesn't exist
+					if err := os.MkdirAll(targetDir, 0755); err != nil {
+						return nil, nil, fmt.Errorf("creating log directory: %v", err)
+					}
+				} else {
+					return nil, nil, fmt.Errorf("accessing log directory: %v", err)
+				}
+			} else {
+				// Path exists - verify it's a directory
+				if !info.IsDir() {
+					return nil, nil, fmt.Errorf("log directory path is not a directory: %s", targetDir)
+				}
+			}
 		}
 
-		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		// Generate session-specific filename with atomic creation
+		var f *os.File
+		var err error
+		var fullPath string
+		maxRetries := 10
+
+		for i := 0; i < maxRetries; i++ {
+			sessionID := time.Now().Format("2006-01-02-150405")
+			fullPath = filepath.Join(targetDir, sessionID+"-gitlab-migrator.log")
+
+			// O_EXCL = fail if file exists (atomic check+create)
+			f, err = os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
+			if err == nil {
+				break // Successfully created unique file
+			}
+
+			if !os.IsExist(err) {
+				// Real error (permissions, disk full, etc.)
+				return nil, nil, fmt.Errorf("opening log file: %v", err)
+			}
+
+			// File exists, retry with new timestamp
+			if i == maxRetries-1 {
+				return nil, nil, fmt.Errorf("failed to generate unique log filename after %d attempts", maxRetries)
+			}
+
+			time.Sleep(time.Second)
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("opening log file: %v", err)
 		}
 
-		// Print log file location to stderr before switching to file-only
-		fmt.Fprintf(os.Stderr, "Logging to file: %s\n", logFile)
+		// Print log file location
+		fmt.Fprintf(os.Stderr, "Logging to file: %s\n", fullPath)
 
-		return io.Writer(f), f, nil
-
-	} else {
-		// Console only (default)
-		return os.Stderr, nil, nil
+		// Return appropriate writer
+		if hasConsole {
+			return io.MultiWriter(os.Stderr, f), f, nil
+		}
+		return f, f, nil
 	}
+
+	// Console only (default)
+	return os.Stderr, nil, nil
 }
 
 func main() {
@@ -181,7 +214,7 @@ func main() {
 	flag.StringVar(&mergeRequestsAgeRaw, "merge-requests-max-age", "", "optional maximum age in days of merge requests to migrate")
 	flag.StringVar(&renameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
 	flag.StringVar(&logOutput, "log-output", "", "comma-separated log targets: console, file, or console,file (default: console)")
-	flag.StringVar(&logFile, "log-file", "", "path to log file (auto-generated if not specified when using file output)")
+	flag.StringVar(&logDirectory, "log-directory", "", "directory for session log files (defaults to ./logs in executable directory)")
 
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
 
@@ -192,13 +225,13 @@ func main() {
 	}
 
 	// Validate log flag combination
-	if logFile != "" && !strings.Contains(strings.ToLower(logOutput), "file") {
-		fmt.Fprintf(os.Stderr, "Error: -log-file requires -log-output to include 'file' (e.g. -log-output=file or -log-output=console,file)\n")
+	if logDirectory != "" && !strings.Contains(strings.ToLower(logOutput), "file") {
+		fmt.Fprintf(os.Stderr, "Error: -log-directory requires -log-output to include 'file' (e.g. -log-output=file or -log-output=console,file)\n")
 		os.Exit(1)
 	}
 
 	// Create log writer based on flags
-	logWriter, logFileHandle, err := createLogWriter(logOutput, logFile)
+	logWriter, logFileHandle, err := createLogWriter(logOutput, logDirectory)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error setting up logging: %v\n", err)
 		os.Exit(1)
