@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,6 +48,9 @@ var (
 	maxConcurrency int
 	version        = "development"
 )
+
+// Regex patterns compiled once at initialization
+var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
 
 type Project = []string
 
@@ -296,9 +300,9 @@ func main() {
 	retryClient := &retryablehttp.Client{
 		HTTPClient:   cleanhttp.DefaultPooledClient(),
 		Logger:       nil,
-		RetryMax:     8,
+		RetryMax:     15,
 		RetryWaitMin: 30 * time.Second,
-		RetryWaitMax: 300 * time.Second,
+		RetryWaitMax: 900 * time.Second,
 	}
 
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
@@ -317,12 +321,58 @@ func main() {
 		}()
 
 		if resp != nil {
+			var errResp GitHubError
+
+			// Parse error response to detect secondary rate limit
+			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+				_ = unmarshalResp(resp, &errResp)
+			}
+
+			// Check for secondary rate limit (no Retry-After header, needs longer wait)
+			isSecondaryLimit := secondaryRateLimitPattern.MatchString(errResp.Message)
+
 			// Check the Retry-After header
 			if s, ok := resp.Header["Retry-After"]; ok {
 				if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
 					sleep = time.Second * time.Duration(retryAfter)
 					return
 				}
+			}
+
+			// If secondary rate limit without Retry-After, use extended wait
+			if isSecondaryLimit {
+				// Start with 2 minutes, double each retry (2min, 4min, 8min, 16min, ...)
+				// Capped at max (5 minutes default, will be increased)
+				baseWait := 120 * time.Second
+				mult := math.Pow(2, float64(attemptNum))
+				sleep = time.Duration(float64(baseWait) * mult)
+				if sleep > max {
+					sleep = max
+				}
+
+				// Add 0-40% jitter to prevent thundering herd when multiple workers
+				// hit rate limits simultaneously (common with max-concurrency > 1)
+				// IMPORTANT: Only ADD jitter, never subtract! We must never wait less than calculated.
+				jitterPercent := rand.Float64() * 0.4 // Random value in [0, 0.4]
+				jitter := time.Duration(jitterPercent * float64(sleep))
+				sleep += jitter
+
+				// Also jitter the max to prevent thundering herd at max boundary
+				jitteredMax := max + time.Duration(rand.Float64()*0.4*float64(max))
+				if sleep > jitteredMax {
+					sleep = jitteredMax
+				}
+
+				message := errResp.Message
+				if message == "" {
+					message = "(unable to parse error response)"
+				}
+
+				logger.Info("waiting for secondary rate limit recovery",
+					"wait_duration", sleep,
+					"attempt", attemptNum,
+					"message", message)
+				return
 			}
 
 			// Reference:
@@ -375,6 +425,16 @@ func main() {
 			}
 		}
 
+		requestMethod := "unknown"
+		requestUrl := "unknown"
+
+		if req := resp.Request; req != nil {
+			requestMethod = req.Method
+			if req.URL != nil {
+				requestUrl = req.URL.String()
+			}
+		}
+
 		// Token not authorized for org
 		if resp.StatusCode == http.StatusForbidden {
 			if match, err := regexp.MatchString("SAML enforcement", errResp.Message); err != nil {
@@ -385,6 +445,15 @@ func main() {
 					msg += fmt.Sprintf(" - %s", errResp.DocumentationURL)
 				}
 				return false, fmt.Errorf("received 403 with response: %v", msg)
+			}
+
+			// Detect secondary rate limit
+			if secondaryRateLimitPattern.MatchString(errResp.Message) {
+				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
+					"message", errResp.Message,
+					"method", requestMethod,
+					"url", requestUrl)
+				return true, nil
 			}
 		}
 
@@ -398,16 +467,6 @@ func main() {
 			http.StatusBadGateway,
 			http.StatusServiceUnavailable,
 			http.StatusGatewayTimeout,
-		}
-
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
 		}
 
 		for _, status := range retryableStatuses {
