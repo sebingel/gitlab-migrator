@@ -9,7 +9,7 @@ require (
 	github.com/google/go-github/v74 v74.0.0
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-hclog v1.6.3
-	github.com/hashicorp/go-retryablehttp v0.7.7
+	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/xanzy/go-gitlab v0.115.0
 )
 
