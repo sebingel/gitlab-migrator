@@ -802,7 +802,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 			if strings.Contains(err.Error(), "No commits between") {
 				p.log.Debug("skipping merge request as the change is already present in trunk branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
 				result.Status = StatusSkipped
-				result.SkipReason = "no commits between branches"
+				result.SkipReason = fmt.Sprintf("branch '%s' has no new commits relative to '%s'; changes are already present in the target branch", mergeRequest.SourceBranch, mergeRequest.TargetBranch)
 				return result, nil
 			}
 			return result, fmt.Errorf("creating pull request: %v", err)
