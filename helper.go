@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5/config"
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v84/github"
 	"github.com/xanzy/go-gitlab"
 )
 

@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/gofri/go-github-pagination/githubpagination"
-	"github.com/google/go-github/v74/github"
+	"github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
