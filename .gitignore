@@ -115,7 +115,6 @@ fabric.properties
 # End of https://www.toptal.com/developers/gitignore/api/goland+all,go
 
 *.log
-*.ps1
 *.csv
 .claude
 logs/
