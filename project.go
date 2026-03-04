@@ -71,10 +71,10 @@ type project struct {
 	defaultBranch string
 	gitlabPath    []string
 	githubPath    []string
-	storageType   string // "memory" or "filesystem"
-	storageDir    string // directory for filesystem storage
-	storagePath   string // path to cleanup for filesystem storage
-	pushBatchSize int    // number of branches per push batch
+	storageType   string        // "memory" or "filesystem"
+	storageDir    string        // directory for filesystem storage
+	storagePath   string        // path to cleanup for filesystem storage
+	pushBatchSize int           // number of branches per push batch
 	result        ProjectResult // Track migration results
 }
 
@@ -159,7 +159,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		return p.result, fmt.Errorf("parsing clone URL: %v", err)
 	}
 
-	p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1])
+	p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !noForce)
 
 	p.log.Debug("checking for existing repository on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1])
 	_, _, err = gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
@@ -278,20 +278,27 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 
 	// Push branches in batches
 	batches := chunkRefSpecs(refSpecs, p.pushBatchSize)
-	p.log.Debug("force-pushing branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecs), "batches", len(batches), "batch_size", p.pushBatchSize)
+	pushMode := "force-pushing"
+	if noForce {
+		pushMode = "pushing"
+	}
+	p.log.Debug(pushMode+" branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecs), "batches", len(batches), "batch_size", p.pushBatchSize)
 
 	for batchNum, batch := range batches {
 		p.log.Debug("pushing branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
 
 		if err = p.repo.PushContext(ctx, &git.PushOptions{
 			RemoteName: "github",
-			Force:      true,
+			Force:      !noForce,
 			RefSpecs:   batch,
 			//Prune:      true, // causes error, attempts to delete main branch
 		}); err != nil {
 			if errors.Is(err, git.NoErrAlreadyUpToDate) {
 				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
 			} else {
+				if noForce {
+					return p.result, fmt.Errorf("pushing branch batch %d/%d to github (hint: remove -no-force if push is rejected due to conflicts): %v", batchNum+1, len(batches), err)
+				}
 				return p.result, fmt.Errorf("pushing branch batch %d/%d to github: %v", batchNum+1, len(batches), err)
 			}
 		}
@@ -326,7 +333,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 
 			if err = p.repo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
-				Force:      true,
+				Force:      true, // force is irrelevant for delete refspecs, always set true
 				RefSpecs:   batch,
 				//Prune:      true, // causes error, attempts to delete main branch
 			}); err != nil {
@@ -339,16 +346,19 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		}
 	}
 
-	p.log.Debug("force-pushing tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 	if err = p.repo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
-		Force:      true,
+		Force:      !noForce,
 		RefSpecs:   []config.RefSpec{"refs/tags/*:refs/tags/*"},
 	}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 		} else {
-			return p.result, fmt.Errorf("pushing to github repo: %v", err)
+			if noForce {
+				return p.result, fmt.Errorf("pushing tags to github repo (hint: remove -no-force if push is rejected due to conflicts): %v", err)
+			}
+			return p.result, fmt.Errorf("pushing tags to github repo: %v", err)
 		}
 	}
 
@@ -669,11 +679,14 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 				config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
 				config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
 			},
-			Force: true,
+			Force: !noForce,
 		}); err != nil {
 			if errors.Is(err, git.NoErrAlreadyUpToDate) {
 				p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			} else {
+				if noForce {
+					return result, fmt.Errorf("pushing temporary branches to github (hint: remove -no-force if push is rejected due to conflicts): %v", err)
+				}
 				return result, fmt.Errorf("pushing temporary branches to github: %v", err)
 			}
 		}
@@ -690,7 +703,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
 					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
 				},
-				Force: true,
+				Force: true, // force is irrelevant for delete refspecs, always set true
 			}); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)

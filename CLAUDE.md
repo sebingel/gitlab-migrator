@@ -77,7 +77,7 @@ gitlab-migrator -github-user=mytokenuser -projects-csv=projects.csv -migrate-pul
 
 ## Important Considerations
 
-- **Destructive Operation**: Uses force mirror push - do not run after work begins in target repo
+- **Destructive Operation**: Uses force mirror push by default - use `-no-force` for repos where work has already begun
 - **API Rate Limits**: GitHub has strict rate limits; tool handles via retryable HTTP
 - **Concurrency**: Default 4 workers, adjustable via `-max-concurrency`
 - **CSV Format**: `gitlab-group/project,github-org/repo` (no headers)
