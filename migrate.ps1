@@ -33,7 +33,7 @@ $arguments = @(
     "-gitlab-domain", $GitLabDomain,
     "-github-domain", $GitHubDomain,
     "-projects-csv", $ProjectsCsv,
-    "-migrate-pull-requests",
+#     "-migrate-pull-requests",
     "-skip-invalid-merge-requests",
     "-trim-branches-on-github",
     "-log-output", "console,file"
@@ -53,7 +53,7 @@ if ($LogDirectory) {
 $arguments += "-detailed-report"
 # $arguments += "-storage-type", "filesystem"
 # $arguments += "-storage-dir", "C:\temp\migration"
-# $arguments += "-no-force"
+$arguments += "-no-force"
 # $arguments += "-push-batch-size", "100"
 # $arguments += "-report"
 # $arguments += "-rename-trunk-branch", "main"
