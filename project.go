@@ -446,6 +446,17 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			continue
 		}
 
+		if skipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
+			results = append(results, MergeRequestResult{
+				GitLabMRID:    mergeRequest.IID,
+				GitLabMRTitle: mergeRequest.Title,
+				GitLabState:   mergeRequest.State,
+				Status:        StatusSkipped,
+				SkipReason:    "open merge request skipped (-skip-open-merge-requests)",
+			})
+			continue
+		}
+
 		mrResult, err := p.migrateMergeRequest(ctx, mergeRequest)
 		if err != nil {
 			sendErr(err)

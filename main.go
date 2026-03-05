@@ -34,7 +34,7 @@ const (
 )
 
 var loop, report, detailedReport bool
-var deleteExistingRepos, enablePullRequests, noForce, renameMasterToMain, skipInvalidMergeRequests, trimGithubBranches bool
+var deleteExistingRepos, enablePullRequests, noForce, renameMasterToMain, skipInvalidMergeRequests, skipOpenMergeRequests, trimGithubBranches bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch, storageType, storageDir string
 var logOutput, logDirectory string
 var mergeRequestsAge, pushBatchSize int
@@ -201,6 +201,7 @@ func main() {
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)")
 	flag.BoolVar(&skipInvalidMergeRequests, "skip-invalid-merge-requests", false, "when true, will log and skip invalid merge requests instead of raising an error")
+	flag.BoolVar(&skipOpenMergeRequests, "skip-open-merge-requests", false, "skip open merge requests during migration (only migrate closed/merged MRs)")
 	flag.BoolVar(&noForce, "no-force", false, "use regular push instead of force push (safe for repos where work has already begun)")
 	flag.BoolVar(&trimGithubBranches, "trim-branches-on-github", false, "when true, will delete any branches on GitHub that are no longer present in GitLab")
 	flag.BoolVar(&showVersion, "version", false, "output version information")
@@ -637,10 +638,20 @@ func reportProject(_ context.Context, slugs []string) (*Report, error) {
 		opts.Page = resp.NextPage
 	}
 
+	mrCount := len(mergeRequests)
+	if skipOpenMergeRequests {
+		mrCount = 0
+		for _, mr := range mergeRequests {
+			if mr != nil && !strings.EqualFold(mr.State, "opened") {
+				mrCount++
+			}
+		}
+	}
+
 	return &Report{
 		GroupName:          gitlabPath[0],
 		ProjectName:        gitlabPath[1],
-		MergeRequestsCount: len(mergeRequests),
+		MergeRequestsCount: mrCount,
 	}, nil
 }
 
