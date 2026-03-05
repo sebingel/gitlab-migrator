@@ -119,15 +119,24 @@ func (p *project) cleanupStorage() {
 	}
 }
 
+// sanitizeDescription strips all control characters from a string,
+// replacing them with spaces. GitHub rejects descriptions containing control chars.
+var controlCharRegex = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+
+func sanitizeDescription(s string) string {
+	return controlCharRegex.ReplaceAllString(s, " ")
+}
+
 func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted bool) error {
 	if repoDeleted {
 		p.log.Warn("recreating GitHub repository", "owner", p.githubPath[0], "repo", p.githubPath[1])
 	} else {
 		p.log.Debug("repository not found on GitHub, proceeding to create", "owner", p.githubPath[0], "repo", p.githubPath[1])
 	}
+	description := sanitizeDescription(p.project.Description)
 	newRepo := github.Repository{
 		Name:          pointer(p.githubPath[1]),
-		Description:   &p.project.Description,
+		Description:   &description,
 		Homepage:      &homepage,
 		DefaultBranch: &p.defaultBranch,
 		Private:       pointer(true),
@@ -188,7 +197,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	}
 
 	p.log.Debug("updating repository settings", "owner", p.githubPath[0], "repo", p.githubPath[1])
-	description := regexp.MustCompile("\r|\n").ReplaceAllString(p.project.Description, " ")
+	description := sanitizeDescription(p.project.Description)
 	updateRepo := github.Repository{
 		Name:              pointer(p.githubPath[1]),
 		Description:       &description,
