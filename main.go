@@ -702,7 +702,7 @@ func performMigration(ctx context.Context, projects []Project, collector *Result
 				result, err := proj.migrate(ctx)
 				if err != nil {
 					errCount++
-					sendErr(err)
+					proj.log.Error(err.Error())
 					result.Status = StatusFailed
 					result.Error = err.Error()
 				}
