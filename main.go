@@ -39,6 +39,10 @@ var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProje
 var logOutput, logDirectory string
 var mergeRequestsAge, pushBatchSize int
 
+var prepareMode bool
+var prepareCloneURL, prepareTargetURL, prepareLargeFiles string
+var prepareBatchCount int
+
 var (
 	cache          *objectCache
 	errCount       int
@@ -222,6 +226,12 @@ func main() {
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
 	flag.IntVar(&pushBatchSize, "push-batch-size", math.MaxInt, "number of branches to push per batch (default: unlimited, use smaller values like 50-100 for large repos)")
 
+	flag.BoolVar(&prepareMode, "prepare", false, "prepare mode: clone, clean large files, push to new remote (unattended)")
+	flag.StringVar(&prepareCloneURL, "prepare-clone-url", "", "source repository clone URL (required with -prepare)")
+	flag.StringVar(&prepareTargetURL, "prepare-target-url", "", "target repository push URL (required with -prepare)")
+	flag.StringVar(&prepareLargeFiles, "prepare-large-files", "", "how to handle files >100MB: 'remove' (git-filter-repo) or 'lfs' (git lfs migrate)")
+	flag.IntVar(&prepareBatchCount, "prepare-batch-count", 0, "override batch count for push (default: auto-calculate 10 batches/GB)")
+
 	flag.Parse()
 
 	if showVersion {
@@ -256,6 +266,35 @@ func main() {
 	})
 
 	cache = newObjectCache()
+
+	// Handle prepare mode early — no API tokens needed
+	if prepareMode {
+		if prepareCloneURL == "" || prepareTargetURL == "" {
+			logger.Error("-prepare requires both -prepare-clone-url and -prepare-target-url")
+			os.Exit(1)
+		}
+		if prepareLargeFiles != "" && prepareLargeFiles != "remove" && prepareLargeFiles != "lfs" {
+			logger.Error("-prepare-large-files must be 'remove' or 'lfs'", "value", prepareLargeFiles)
+			os.Exit(1)
+		}
+		if githubRepo != "" || gitlabProject != "" || projectsCsvPath != "" {
+			logger.Error("-prepare cannot be combined with -github-repo, -gitlab-project, or -projects-csv")
+			os.Exit(1)
+		}
+		if !isAllowedCloneURL(prepareCloneURL) {
+			logger.Error("-prepare-clone-url must use https:// or git@ SSH format", "url", prepareCloneURL)
+			os.Exit(1)
+		}
+		if !isAllowedCloneURL(prepareTargetURL) {
+			logger.Error("-prepare-target-url must use https:// or git@ SSH format", "url", prepareTargetURL)
+			os.Exit(1)
+		}
+		if err := runPrepare(ctx, prepareCloneURL, prepareTargetURL, prepareLargeFiles, prepareBatchCount); err != nil {
+			logger.Error("prepare failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Create result collector for migration reporting
 	collector := newResultCollector()
