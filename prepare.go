@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -152,6 +153,26 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		report.CleanupMethod = "none"
 	}
 
+	// Handle LFS idempotency: if a previous run converted files to LFS pointers
+	// but didn't push LFS objects (e.g. interrupted), detect and push them now.
+	if !needsCleanup && largeFileMode == "lfs" {
+		if lfsConfigured, _ := hasLFSTracking(repoDir); lfsConfigured {
+			logger.Info("LFS tracking detected from previous run, pushing LFS objects")
+			if err := addRemote(ctx, repoDir, "origin", targetURL); err != nil {
+				report.Error = err.Error()
+				return err
+			}
+			if err := executeLFSPush(ctx, repoDir, "origin"); err != nil {
+				report.Error = err.Error()
+				return err
+			}
+			if err := removeRemote(ctx, repoDir, "origin"); err != nil {
+				report.Error = err.Error()
+				return err
+			}
+		}
+	}
+
 	// Configure target remote
 	if err := addRemote(ctx, repoDir, "origin", targetURL); err != nil {
 		report.Error = err.Error()
@@ -297,22 +318,30 @@ func runGitCmdStreaming(ctx context.Context, dir string, args ...string) error {
 	}
 	logger.Info("running git command", "args", args, "dir", dir)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("creating stdout pipe: %v", err)
-	}
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 
 	if err := cmd.Start(); err != nil {
+		pw.Close()
 		return fmt.Errorf("starting git %s: %v", strings.Join(args, " "), err)
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		logger.Info("git", "output", scanner.Text())
-	}
+	// Scan in goroutine so we can close the pipe writer after Wait
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(pr)
+		for scanner.Scan() {
+			logger.Info("git", "output", scanner.Text())
+		}
+	}()
 
-	if err := cmd.Wait(); err != nil {
+	err := cmd.Wait()
+	pw.Close() // unblocks scanner
+	<-scanDone // wait for scanner to finish
+
+	if err != nil {
 		return fmt.Errorf("git %s: %v", strings.Join(args, " "), err)
 	}
 	return nil
@@ -337,6 +366,13 @@ func prepareClone(ctx context.Context, cloneURL string) (string, error) {
 	if repoDir == "" {
 		return "", fmt.Errorf("cannot derive repository directory name from URL: %s", cloneURL)
 	}
+
+	// Resolve to absolute path so all subsequent operations use a stable path
+	absDir, err := filepath.Abs(repoDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving clone directory path: %v", err)
+	}
+	repoDir = absDir
 
 	// Check if directory already exists (idempotent)
 	if info, err := os.Stat(repoDir); err == nil && info.IsDir() {
@@ -432,7 +468,7 @@ func scanLargeFiles(ctx context.Context, repoDir string) ([]largeFile, error) {
 
 	// Wait for both commands to finish
 	if revListErr := revListCmd.Wait(); revListErr != nil {
-		logger.Warn("rev-list exited with error", "error", revListErr)
+		return nil, fmt.Errorf("rev-list failed: %v", revListErr)
 	}
 	if err := catFileCmd.Wait(); err != nil {
 		return nil, fmt.Errorf("cat-file failed: %v", err)
@@ -569,6 +605,10 @@ func pushRepo(ctx context.Context, repoDir, remote, defaultBranch string, batchC
 		return false, 0, directPush(ctx, repoDir, remote)
 	}
 
+	if batchCount != 0 && repoSize <= batchThreshold {
+		logger.Info("batch push forced by -prepare-batch-count override", "size_mb", repoSize/1024/1024, "batch_count", batchCount)
+	}
+
 	// Calculate batch count if not overridden
 	if batchCount == 0 {
 		repoSizeGB := float64(repoSize) / (1024 * 1024 * 1024)
@@ -588,6 +628,8 @@ func directPush(ctx context.Context, repoDir, remote string) error {
 }
 
 // batchPush pushes commits in batches with adaptive retry on push-too-large errors.
+// NOTE: Only the default branch is batched. Other branches are pushed via "git push --all"
+// in a single operation, which may fail for repos with very large non-default branches.
 func batchPush(ctx context.Context, repoDir, remote, branch string, batchCount int) error {
 	// Get commit list
 	out, err := runGitCmd(ctx, repoDir, "rev-list", "--reverse", "--first-parent", branch)
@@ -597,7 +639,7 @@ func batchPush(ctx context.Context, repoDir, remote, branch string, batchCount i
 
 	commits := strings.Split(strings.TrimSpace(out), "\n")
 	if len(commits) == 0 || (len(commits) == 1 && commits[0] == "") {
-		return fmt.Errorf("no commits found on branch %s", branch)
+		return fmt.Errorf("no commits found on branch %s (empty repository? use direct push instead of batch)", branch)
 	}
 
 	batchSize := int(math.Ceil(float64(len(commits)) / float64(batchCount)))
@@ -660,6 +702,24 @@ func batchPush(ctx context.Context, repoDir, remote, branch string, batchCount i
 	}
 
 	return nil
+}
+
+// isAllowedCloneURL validates that a clone URL uses https:// or git@ SSH format.
+func isAllowedCloneURL(url string) bool {
+	return strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "git@")
+}
+
+// hasLFSTracking checks if a repository has LFS filter lines in its attributes.
+func hasLFSTracking(repoDir string) (bool, error) {
+	content, err := os.ReadFile(filepath.Join(repoDir, "info", "attributes"))
+	if err != nil {
+		// Also check .gitattributes in the working tree (though bare repos use info/attributes)
+		content, err = os.ReadFile(filepath.Join(repoDir, ".gitattributes"))
+		if err != nil {
+			return false, nil
+		}
+	}
+	return strings.Contains(string(content), "filter=lfs"), nil
 }
 
 // isPushTooLargeError detects GitHub's push-too-large error from stderr.

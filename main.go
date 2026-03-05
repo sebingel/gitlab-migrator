@@ -280,6 +280,14 @@ func main() {
 			logger.Error("-prepare cannot be combined with -github-repo, -gitlab-project, or -projects-csv")
 			os.Exit(1)
 		}
+		if !isAllowedCloneURL(prepareCloneURL) {
+			logger.Error("-prepare-clone-url must use https:// or git@ SSH format", "url", prepareCloneURL)
+			os.Exit(1)
+		}
+		if !isAllowedCloneURL(prepareTargetURL) {
+			logger.Error("-prepare-target-url must use https:// or git@ SSH format", "url", prepareTargetURL)
+			os.Exit(1)
+		}
 		if err := runPrepare(ctx, prepareCloneURL, prepareTargetURL, prepareLargeFiles, prepareBatchCount); err != nil {
 			logger.Error("prepare failed", "error", err)
 			os.Exit(1)

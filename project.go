@@ -30,6 +30,9 @@ import (
 	"github.com/xanzy/go-gitlab"
 )
 
+// descriptionSanitizeRegex strips all control characters from repository descriptions.
+var descriptionSanitizeRegex = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+
 func newProject(slugs []string, sType, sDir string, batchSize int) (*project, error) {
 	var err error
 	p := &project{
@@ -125,9 +128,10 @@ func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted b
 	} else {
 		p.log.Debug("repository not found on GitHub, proceeding to create", "owner", p.githubPath[0], "repo", p.githubPath[1])
 	}
+	description := descriptionSanitizeRegex.ReplaceAllString(p.project.Description, " ")
 	newRepo := github.Repository{
 		Name:          pointer(p.githubPath[1]),
-		Description:   &p.project.Description,
+		Description:   &description,
 		Homepage:      &homepage,
 		DefaultBranch: &p.defaultBranch,
 		Private:       pointer(true),
@@ -188,7 +192,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	}
 
 	p.log.Debug("updating repository settings", "owner", p.githubPath[0], "repo", p.githubPath[1])
-	description := regexp.MustCompile("\r|\n").ReplaceAllString(p.project.Description, " ")
+	description := descriptionSanitizeRegex.ReplaceAllString(p.project.Description, " ")
 	updateRepo := github.Repository{
 		Name:              pointer(p.githubPath[1]),
 		Description:       &description,
