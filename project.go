@@ -151,6 +151,14 @@ func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted b
 	return nil
 }
 
+// pushErrHint checks push errors for known GitHub error patterns and returns an actionable hint.
+func pushErrHint(err error) string {
+	if err != nil && strings.Contains(err.Error(), "without 'workflow' scope") {
+		return " (hint: add 'workflow' scope to your GitHub token to push workflow files)"
+	}
+	return ""
+}
+
 func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	// Initialize result tracking
 	p.result = ProjectResult{
@@ -306,9 +314,9 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
 			} else {
 				if noForce {
-					return p.result, fmt.Errorf("pushing branch batch %d/%d to github (hint: remove -no-force if push is rejected due to conflicts): %v", batchNum+1, len(batches), err)
+					return p.result, fmt.Errorf("pushing branch batch %d/%d to github (hint: remove -no-force if push is rejected due to conflicts)%s: %v", batchNum+1, len(batches), pushErrHint(err), err)
 				}
-				return p.result, fmt.Errorf("pushing branch batch %d/%d to github: %v", batchNum+1, len(batches), err)
+				return p.result, fmt.Errorf("pushing branch batch %d/%d to github%s: %v", batchNum+1, len(batches), pushErrHint(err), err)
 			}
 		}
 	}
@@ -365,9 +373,9 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 		} else {
 			if noForce {
-				return p.result, fmt.Errorf("pushing tags to github repo (hint: remove -no-force if push is rejected due to conflicts): %v", err)
+				return p.result, fmt.Errorf("pushing tags to github repo (hint: remove -no-force if push is rejected due to conflicts)%s: %v", pushErrHint(err), err)
 			}
-			return p.result, fmt.Errorf("pushing tags to github repo: %v", err)
+			return p.result, fmt.Errorf("pushing tags to github repo%s: %v", pushErrHint(err), err)
 		}
 	}
 
@@ -694,9 +702,9 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 				p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			} else {
 				if noForce {
-					return result, fmt.Errorf("pushing temporary branches to github (hint: remove -no-force if push is rejected due to conflicts): %v", err)
+					return result, fmt.Errorf("pushing temporary branches to github (hint: remove -no-force if push is rejected due to conflicts)%s: %v", pushErrHint(err), err)
 				}
-				return result, fmt.Errorf("pushing temporary branches to github: %v", err)
+				return result, fmt.Errorf("pushing temporary branches to github%s: %v", pushErrHint(err), err)
 			}
 		}
 
