@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -159,6 +160,45 @@ func pushErrHint(err error) string {
 	return ""
 }
 
+// ansiEscapeRegex matches ANSI escape sequences for stripping from sideband output.
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// cleanSidebandOutput strips ANSI escapes and "remote: " prefixes from git sideband output,
+// trims whitespace, and truncates to maxLen.
+func cleanSidebandOutput(raw string, maxLen int) string {
+	cleaned := ansiEscapeRegex.ReplaceAllString(raw, "")
+	lines := strings.Split(cleaned, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimPrefix(line, "remote: ")
+	}
+	result := strings.TrimSpace(strings.Join(lines, "\n"))
+	if maxLen > 0 && len(result) > maxLen {
+		result = result[:maxLen] + "\n... (truncated)"
+	}
+	return result
+}
+
+// pushWithSideband wraps PushContext to capture sideband (progress) output from the remote.
+func (p *project) pushWithSideband(ctx context.Context, opts *git.PushOptions) (string, error) {
+	var buf bytes.Buffer
+	opts.Progress = &buf
+	err := p.repo.PushContext(ctx, opts)
+	sideband := cleanSidebandOutput(buf.String(), 4096)
+	if err == nil && sideband != "" {
+		p.log.Trace("push sideband output", "output", sideband)
+	}
+	return sideband, err
+}
+
+// formatPushError builds an error message that includes the remote's sideband output when available.
+func formatPushError(msg, hint string, err error, sideband string) error {
+	base := fmt.Sprintf("%s%s: %v", msg, hint, err)
+	if sideband != "" {
+		return fmt.Errorf("%s\n--- remote output ---\n%s", base, sideband)
+	}
+	return fmt.Errorf("%s", base)
+}
+
 func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	// Initialize result tracking
 	p.result = ProjectResult{
@@ -304,19 +344,23 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	for batchNum, batch := range batches {
 		p.log.Debug("pushing branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
 
-		if err = p.repo.PushContext(ctx, &git.PushOptions{
+		opts := &git.PushOptions{
 			RemoteName: "github",
 			Force:      !noForce,
 			RefSpecs:   batch,
 			//Prune:      true, // causes error, attempts to delete main branch
-		}); err != nil {
+		}
+		sideband, err := p.pushWithSideband(ctx, opts)
+		if err != nil {
 			if errors.Is(err, git.NoErrAlreadyUpToDate) {
 				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
 			} else {
+				msg := fmt.Sprintf("pushing branch batch %d/%d to github", batchNum+1, len(batches))
+				hint := pushErrHint(err)
 				if noForce {
-					return p.result, fmt.Errorf("pushing branch batch %d/%d to github (hint: remove -no-force if push is rejected due to conflicts)%s: %v", batchNum+1, len(batches), pushErrHint(err), err)
+					hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 				}
-				return p.result, fmt.Errorf("pushing branch batch %d/%d to github%s: %v", batchNum+1, len(batches), pushErrHint(err), err)
+				return p.result, formatPushError(msg, hint, err, sideband)
 			}
 		}
 	}
@@ -348,34 +392,39 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		for batchNum, batch := range batches {
 			p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
 
-			if err = p.repo.PushContext(ctx, &git.PushOptions{
+			trimOpts := &git.PushOptions{
 				RemoteName: "github",
 				Force:      true, // force is irrelevant for delete refspecs, always set true
 				RefSpecs:   batch,
 				//Prune:      true, // causes error, attempts to delete main branch
-			}); err != nil {
+			}
+			sideband, err := p.pushWithSideband(ctx, trimOpts)
+			if err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					p.log.Debug("batch already up-to-date", "batch", batchNum+1)
 				} else {
-					return p.result, fmt.Errorf("trimming branch batch %d/%d: %v", batchNum+1, len(batches), err)
+					return p.result, formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
 				}
 			}
 		}
 	}
 
 	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-	if err = p.repo.PushContext(ctx, &git.PushOptions{
+	tagOpts := &git.PushOptions{
 		RemoteName: "github",
 		Force:      !noForce,
 		RefSpecs:   []config.RefSpec{"refs/tags/*:refs/tags/*"},
-	}); err != nil {
+	}
+	tagSideband, err := p.pushWithSideband(ctx, tagOpts)
+	if err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 		} else {
+			hint := pushErrHint(err)
 			if noForce {
-				return p.result, fmt.Errorf("pushing tags to github repo (hint: remove -no-force if push is rejected due to conflicts)%s: %v", pushErrHint(err), err)
+				hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 			}
-			return p.result, fmt.Errorf("pushing tags to github repo%s: %v", pushErrHint(err), err)
+			return p.result, formatPushError("pushing tags to github repo", hint, err, tagSideband)
 		}
 	}
 
@@ -701,21 +750,24 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 		}
 
 		p.log.Debug("pushing branches for merged/closed merge request", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-		if err = p.repo.PushContext(ctx, &git.PushOptions{
+		mrPushOpts := &git.PushOptions{
 			RemoteName: "github",
 			RefSpecs: []config.RefSpec{
 				config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
 				config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
 			},
 			Force: !noForce,
-		}); err != nil {
+		}
+		mrSideband, err := p.pushWithSideband(ctx, mrPushOpts)
+		if err != nil {
 			if errors.Is(err, git.NoErrAlreadyUpToDate) {
 				p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			} else {
+				hint := pushErrHint(err)
 				if noForce {
-					return result, fmt.Errorf("pushing temporary branches to github (hint: remove -no-force if push is rejected due to conflicts)%s: %v", pushErrHint(err), err)
+					hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 				}
-				return result, fmt.Errorf("pushing temporary branches to github%s: %v", pushErrHint(err), err)
+				return result, formatPushError("pushing temporary branches to github", hint, err, mrSideband)
 			}
 		}
 
@@ -725,21 +777,22 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 				return
 			}
 			p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-			if err := p.repo.PushContext(ctx, &git.PushOptions{
+			cleanupOpts := &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
 					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
 					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
 				},
 				Force: true, // force is irrelevant for delete refspecs, always set true
-			}); err != nil {
+			}
+			sideband, err := p.pushWithSideband(ctx, cleanupOpts)
+			if err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
-					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
+					sendErr(formatPushError("pushing branch deletions to github", "", err, sideband))
 				}
 			}
-
 		}()
 	}
 

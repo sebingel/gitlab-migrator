@@ -172,7 +172,11 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 		fmt.Fprintf(&buf, "**Duration:** %s\n\n", proj.Duration.Round(time.Second))
 
 		if proj.Error != "" {
-			fmt.Fprintf(&buf, "**Error:** %s\n\n", proj.Error)
+			if strings.Contains(proj.Error, "\n") {
+				fmt.Fprintf(&buf, "**Error:**\n\n```\n%s\n```\n\n", proj.Error)
+			} else {
+				fmt.Fprintf(&buf, "**Error:** %s\n\n", proj.Error)
+			}
 		}
 
 		// Branches
@@ -206,7 +210,7 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 						reason = mr.Error
 					}
 					fmt.Fprintf(&buf, "| %d | %s | %s | %s |\n",
-						mr.GitLabMRID, escapeMD(mr.GitLabMRTitle), mr.Status, escapeMD(reason))
+						mr.GitLabMRID, escapeMDCell(mr.GitLabMRTitle), mr.Status, escapeMDCell(reason))
 				}
 			}
 			fmt.Fprintf(&buf, "\n")
@@ -255,6 +259,15 @@ func escapeMD(s string) string {
 	return strings.ReplaceAll(s, "|", "\\|")
 }
 
+// escapeMDCell escapes a string for safe use in a Markdown table cell.
+// Multiline content is truncated to the first line to prevent breaking table layout.
+func escapeMDCell(s string) string {
+	if i := strings.Index(s, "\n"); i >= 0 {
+		s = s[:i] + " [...]"
+	}
+	return strings.ReplaceAll(s, "|", "\\|")
+}
+
 // printSummaryToConsole prints a concise summary of the migration to console
 func printSummaryToConsole(report *MigrationReport) {
 	fmt.Println("\n" + strings.Repeat("=", 80))
@@ -279,7 +292,8 @@ func printSummaryToConsole(report *MigrationReport) {
 			proj.BranchCount, proj.TotalMRs, proj.SuccessfulMRs, proj.FailedMRs, proj.SkippedMRs)
 
 		if proj.Error != "" {
-			fmt.Printf("  Error: %s\n", proj.Error)
+			indented := strings.ReplaceAll(proj.Error, "\n", "\n    ")
+			fmt.Printf("  Error: %s\n", indented)
 		}
 
 		failedComments := 0
