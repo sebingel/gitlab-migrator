@@ -195,7 +195,7 @@ func (p *project) pushWithSideband(ctx context.Context, opts *git.PushOptions) (
 	var buf bytes.Buffer
 	opts.Progress = &buf
 	err := p.repo.PushContext(ctx, opts)
-	sideband := cleanSidebandOutput(buf.String(), 4096)
+	sideband := cleanSidebandOutput(buf.String(), 0)
 	if err == nil && sideband != "" {
 		p.log.Trace("push sideband output", "output", sideband)
 	}
