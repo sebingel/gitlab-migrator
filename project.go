@@ -163,15 +163,27 @@ func pushErrHint(err error) string {
 // ansiEscapeRegex matches ANSI escape sequences for stripping from sideband output.
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-// cleanSidebandOutput strips ANSI escapes and "remote: " prefixes from git sideband output,
-// trims whitespace, and truncates to maxLen.
+// gitProgressLineRegex matches git transfer progress lines that dominate sideband output.
+var gitProgressLineRegex = regexp.MustCompile(`(?i)^(Compressing|Counting|Enumerating|Receiving|Resolving|Writing) (objects|deltas)\b`)
+
+// cleanSidebandOutput strips ANSI escapes, "remote: " prefixes, and git progress lines
+// from git sideband output, trims whitespace, and truncates to maxLen.
 func cleanSidebandOutput(raw string, maxLen int) string {
 	cleaned := ansiEscapeRegex.ReplaceAllString(raw, "")
+	// Normalize \r to \n (sideband uses \r for progress updates) and strip null bytes
+	cleaned = strings.ReplaceAll(cleaned, "\x00", "")
+	cleaned = strings.ReplaceAll(cleaned, "\r\n", "\n")
+	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
 	lines := strings.Split(cleaned, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimPrefix(line, "remote: ")
+	filtered := lines[:0]
+	for _, line := range lines {
+		line = strings.TrimPrefix(line, "remote: ")
+		if gitProgressLineRegex.MatchString(strings.TrimSpace(line)) {
+			continue
+		}
+		filtered = append(filtered, line)
 	}
-	result := strings.TrimSpace(strings.Join(lines, "\n"))
+	result := strings.TrimSpace(strings.Join(filtered, "\n"))
 	if maxLen > 0 && len(result) > maxLen {
 		result = result[:maxLen] + "\n... (truncated)"
 	}
