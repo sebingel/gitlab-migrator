@@ -223,54 +223,60 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		MergeRequests:    make([]MergeRequestResult, 0),
 	}
 
-	cloneUrl, err := url.Parse(p.project.HTTPURLToRepo)
-	if err != nil {
-		return p.result, fmt.Errorf("parsing clone URL: %v", err)
-	}
-
-	p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !noForce)
-
 	p.log.Debug("checking for existing repository on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1])
-	_, _, err = gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
+	_, _, err := gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
 
 	var githubError *github.ErrorResponse
 	if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
 		return p.result, fmt.Errorf("retrieving github repo: %v", err)
 	}
 
-	homepage := fmt.Sprintf("https://%s/%s/%s", gitlabDomain, p.gitlabPath[0], p.gitlabPath[1])
-
-	if err != nil {
-		// Repository not found
-		if err = p.createRepo(ctx, homepage, false); err != nil {
-			return p.result, err
+	if pullRequestsOnly {
+		if err != nil {
+			return p.result, fmt.Errorf("GitHub repository %s/%s not found (-pull-requests-only requires the repository to already exist on GitHub)", p.githubPath[0], p.githubPath[1])
 		}
-	} else if deleteExistingRepos {
-		p.log.Warn("existing repository was found on GitHub, proceeding to delete", "owner", p.githubPath[0], "repo", p.githubPath[1])
-		if _, err = gh.Repositories.Delete(ctx, p.githubPath[0], p.githubPath[1]); err != nil {
-			return p.result, fmt.Errorf("deleting existing github repo: %v", err)
+		p.log.Info("pull-requests-only mode: skipping repository clone and push", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
+	} else {
+		cloneUrl, parseErr := url.Parse(p.project.HTTPURLToRepo)
+		if parseErr != nil {
+			return p.result, fmt.Errorf("parsing clone URL: %v", parseErr)
 		}
 
-		if err = p.createRepo(ctx, homepage, true); err != nil {
-			return p.result, err
-		}
-	}
+		p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !noForce)
 
-	p.log.Debug("updating repository settings", "owner", p.githubPath[0], "repo", p.githubPath[1])
-	description := sanitizeDescription(p.project.Description)
-	updateRepo := github.Repository{
-		Name:              pointer(p.githubPath[1]),
-		Description:       &description,
-		Homepage:          &homepage,
-		AllowAutoMerge:    pointer(true),
-		AllowMergeCommit:  pointer(true),
-		AllowRebaseMerge:  pointer(true),
-		AllowSquashMerge:  pointer(true),
-		AllowUpdateBranch: pointer(true),
-	}
-	if _, _, err = gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
-		return p.result, fmt.Errorf("updating github repo: %v", err)
-	}
+		homepage := fmt.Sprintf("https://%s/%s/%s", gitlabDomain, p.gitlabPath[0], p.gitlabPath[1])
+
+		if err != nil {
+			// Repository not found
+			if err = p.createRepo(ctx, homepage, false); err != nil {
+				return p.result, err
+			}
+		} else if deleteExistingRepos {
+			p.log.Warn("existing repository was found on GitHub, proceeding to delete", "owner", p.githubPath[0], "repo", p.githubPath[1])
+			if _, err = gh.Repositories.Delete(ctx, p.githubPath[0], p.githubPath[1]); err != nil {
+				return p.result, fmt.Errorf("deleting existing github repo: %v", err)
+			}
+
+			if err = p.createRepo(ctx, homepage, true); err != nil {
+				return p.result, err
+			}
+		}
+
+		p.log.Debug("updating repository settings", "owner", p.githubPath[0], "repo", p.githubPath[1])
+		description := sanitizeDescription(p.project.Description)
+		updateRepo := github.Repository{
+			Name:              pointer(p.githubPath[1]),
+			Description:       &description,
+			Homepage:          &homepage,
+			AllowAutoMerge:    pointer(true),
+			AllowMergeCommit:  pointer(true),
+			AllowRebaseMerge:  pointer(true),
+			AllowSquashMerge:  pointer(true),
+			AllowUpdateBranch: pointer(true),
+		}
+		if _, _, err = gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
+			return p.result, fmt.Errorf("updating github repo: %v", err)
+		}
 
 	cloneUrl.User = url.UserPassword("oauth2", gitlabToken)
 	cloneUrlWithCredentials := cloneUrl.String()
@@ -447,6 +453,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	if _, _, err = gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
 		return p.result, fmt.Errorf("setting default branch: %v", err)
 	}
+	} // end else !pullRequestsOnly
 
 	if enablePullRequests {
 		mrResults := p.migrateMergeRequests(ctx)
@@ -652,12 +659,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 	if pullRequest == nil && !strings.EqualFold(mergeRequest.State, "opened") {
 		p.log.Trace("searching for existing branch for closed/merged merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 
-		// Create a worktree
-		worktree, err := p.repo.Worktree()
-		if err != nil {
-			return result, fmt.Errorf("creating worktree: %v", err)
-		}
-
 		// Generate temporary branch names
 		mergeRequest.SourceBranch = sourceBranchForClosedMergeRequest
 		mergeRequest.TargetBranch = targetBranchForClosedMergeRequest
@@ -687,125 +688,150 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 			return result, fmt.Errorf("end commit for merge request %d is nil", mergeRequest.IID)
 		}
 
-		p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
-		startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
-		if err != nil {
-			if skipInvalidMergeRequests {
-				p.log.Info("skipping invalid merge request as start commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[0].ShortID, "error", err)
-				result.Status = StatusSkipped
-				result.SkipReason = "start commit does not exist"
+		if pullRequestsOnly {
+			// In pull-requests-only mode, use GitHub API to create temporary branches
+			// (no local git clone available)
+			skipped, err := p.createTempBranchesViaAPI(ctx, mergeRequest, mergeRequestCommits, &result)
+			if err != nil {
+				return result, err
+			}
+			if skipped {
 				return result, nil
 			}
-			return result, fmt.Errorf("loading start commit %s: %v", mergeRequestCommits[0].ShortID, err)
-		}
-
-		if startCommit.NumParents() == 0 {
-			// Orphaned commit, we cannot open a pull request as GitHub rejects it
-			if skipInvalidMergeRequests {
-				p.log.Info("skipping invalid merge request as start commit has no parents", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", startCommit.Hash)
-				result.Status = StatusSkipped
-				result.SkipReason = "start commit has no parents (orphaned)"
-				return result, nil
-			}
-
-			return result, fmt.Errorf("start commit %s for merge request %d has no parents", mergeRequestCommits[0].ShortID, mergeRequest.IID)
-		} else {
-			// Sometimes we will be starting from a merge commit, so look for a suitable parent commit to branch out from
-			var startCommitParent *object.Commit
-			for i := 0; i < startCommit.NumParents(); i++ {
-				p.log.Trace("inspecting start commit parent", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "parent_index", i, "sha", mergeRequestCommits[0].ShortID)
-				startCommitParent, err = startCommit.Parent(i)
-				if err != nil {
-					// Don't return as we will keep trying to find a parent
-					sendErr(fmt.Errorf("loading parent commit %d: %s", i, err))
-					continue
+			defer func() {
+				if pullRequest == nil {
+					return
 				}
-				break
+				p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+				p.deleteTempBranchesViaAPI(ctx, mergeRequest)
+			}()
+		} else {
+			// Use local git clone to create temporary branches
+			worktree, err := p.repo.Worktree()
+			if err != nil {
+				return result, fmt.Errorf("creating worktree: %v", err)
 			}
 
-			if startCommitParent == nil {
-				return result, fmt.Errorf("identifying suitable parent of start commit %s for merge request %d", mergeRequestCommits[0].ShortID, mergeRequest.IID)
+			p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
+			startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
+			if err != nil {
+				if skipInvalidMergeRequests {
+					p.log.Info("skipping invalid merge request as start commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[0].ShortID, "error", err)
+					result.Status = StatusSkipped
+					result.SkipReason = "start commit does not exist"
+					return result, nil
+				}
+				return result, fmt.Errorf("loading start commit %s: %v", mergeRequestCommits[0].ShortID, err)
 			}
 
-			p.log.Trace("creating target branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startCommitParent.Hash)
+			if startCommit.NumParents() == 0 {
+				// Orphaned commit, we cannot open a pull request as GitHub rejects it
+				if skipInvalidMergeRequests {
+					p.log.Info("skipping invalid merge request as start commit has no parents", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", startCommit.Hash)
+					result.Status = StatusSkipped
+					result.SkipReason = "start commit has no parents (orphaned)"
+					return result, nil
+				}
+
+				return result, fmt.Errorf("start commit %s for merge request %d has no parents", mergeRequestCommits[0].ShortID, mergeRequest.IID)
+			} else {
+				// Sometimes we will be starting from a merge commit, so look for a suitable parent commit to branch out from
+				var startCommitParent *object.Commit
+				for i := 0; i < startCommit.NumParents(); i++ {
+					p.log.Trace("inspecting start commit parent", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "parent_index", i, "sha", mergeRequestCommits[0].ShortID)
+					startCommitParent, err = startCommit.Parent(i)
+					if err != nil {
+						// Don't return as we will keep trying to find a parent
+						sendErr(fmt.Errorf("loading parent commit %d: %s", i, err))
+						continue
+					}
+					break
+				}
+
+				if startCommitParent == nil {
+					return result, fmt.Errorf("identifying suitable parent of start commit %s for merge request %d", mergeRequestCommits[0].ShortID, mergeRequest.IID)
+				}
+
+				p.log.Trace("creating target branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startCommitParent.Hash)
+				if err = worktree.Checkout(&git.CheckoutOptions{
+					Create: true,
+					Force:  true,
+					Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
+					Hash:   startCommitParent.Hash,
+				}); err != nil {
+					return result, fmt.Errorf("checking out temporary target branch: %v", err)
+				}
+			}
+
+			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
+			p.log.Trace("creating source branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
+
+			// Validate that the end commit exists before attempting checkout
+			if _, err = object.GetCommit(p.repo.Storer, endHash); err != nil {
+				if skipInvalidMergeRequests {
+					p.log.Info("skipping invalid merge request as end commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, "error", err)
+					result.Status = StatusSkipped
+					result.SkipReason = "end commit does not exist"
+					return result, nil
+				}
+				return result, fmt.Errorf("loading end commit %s: %v", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err)
+			}
+
 			if err = worktree.Checkout(&git.CheckoutOptions{
 				Create: true,
 				Force:  true,
-				Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
-				Hash:   startCommitParent.Hash,
+				Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
+				Hash:   endHash,
 			}); err != nil {
-				return result, fmt.Errorf("checking out temporary target branch: %v", err)
+				return result, fmt.Errorf("checking out temporary source branch: %v", err)
 			}
-		}
 
-		endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
-		p.log.Trace("creating source branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
-
-		// Validate that the end commit exists before attempting checkout
-		if _, err = object.GetCommit(p.repo.Storer, endHash); err != nil {
-			if skipInvalidMergeRequests {
-				p.log.Info("skipping invalid merge request as end commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, "error", err)
-				result.Status = StatusSkipped
-				result.SkipReason = "end commit does not exist"
-				return result, nil
-			}
-			return result, fmt.Errorf("loading end commit %s: %v", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err)
-		}
-
-		if err = worktree.Checkout(&git.CheckoutOptions{
-			Create: true,
-			Force:  true,
-			Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
-			Hash:   endHash,
-		}); err != nil {
-			return result, fmt.Errorf("checking out temporary source branch: %v", err)
-		}
-
-		p.log.Debug("pushing branches for merged/closed merge request", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-		mrPushOpts := &git.PushOptions{
-			RemoteName: "github",
-			RefSpecs: []config.RefSpec{
-				config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
-				config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
-			},
-			Force: !noForce,
-		}
-		mrSideband, err := p.pushWithSideband(ctx, mrPushOpts)
-		if err != nil {
-			if errors.Is(err, git.NoErrAlreadyUpToDate) {
-				p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-			} else {
-				hint := pushErrHint(err)
-				if noForce {
-					hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
-				}
-				return result, formatPushError("pushing temporary branches to github", hint, err, mrSideband)
-			}
-		}
-
-		// We will clean up these temporary branches after configuring and closing the pull request
-		defer func() {
-			if pullRequest == nil {
-				return
-			}
-			p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-			cleanupOpts := &git.PushOptions{
+			p.log.Debug("pushing branches for merged/closed merge request", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+			mrPushOpts := &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
-					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
-					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
 				},
-				Force: true, // force is irrelevant for delete refspecs, always set true
+				Force: !noForce,
 			}
-			sideband, err := p.pushWithSideband(ctx, cleanupOpts)
+			mrSideband, err := p.pushWithSideband(ctx, mrPushOpts)
 			if err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
-					sendErr(formatPushError("pushing branch deletions to github", "", err, sideband))
+					hint := pushErrHint(err)
+					if noForce {
+						hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
+					}
+					return result, formatPushError("pushing temporary branches to github", hint, err, mrSideband)
 				}
 			}
-		}()
+
+			// We will clean up these temporary branches after configuring and closing the pull request
+			defer func() {
+				if pullRequest == nil {
+					return
+				}
+				p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+				cleanupOpts := &git.PushOptions{
+					RemoteName: "github",
+					RefSpecs: []config.RefSpec{
+						config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
+						config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
+					},
+					Force: true, // force is irrelevant for delete refspecs, always set true
+				}
+				sideband, err := p.pushWithSideband(ctx, cleanupOpts)
+				if err != nil {
+					if errors.Is(err, git.NoErrAlreadyUpToDate) {
+						p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					} else {
+						sendErr(formatPushError("pushing branch deletions to github", "", err, sideband))
+					}
+				}
+			}()
+		}
 	}
 
 	if p.defaultBranch != p.project.DefaultBranch && mergeRequest.TargetBranch == p.project.DefaultBranch {
@@ -1096,4 +1122,95 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gitlab.
 	}
 
 	return result, nil
+}
+
+// createTempBranchesViaAPI creates temporary branches on GitHub for a closed/merged MR
+// using the GitHub Git References API, without requiring a local git clone.
+// Returns (skipped bool, err error). When skipped is true, result.Status and result.SkipReason are set.
+func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gitlab.MergeRequest, commits []*gitlab.Commit, result *MergeRequestResult) (bool, error) {
+	owner := p.githubPath[0]
+	repo := p.githubPath[1]
+	startShortID := commits[0].ShortID
+	endShortID := commits[len(commits)-1].ShortID
+
+	p.log.Trace("inspecting start commit via GitHub API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", startShortID)
+	startCommit, resp, err := gh.Git.GetCommit(ctx, owner, repo, commits[0].ID)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			if skipInvalidMergeRequests {
+				p.log.Info("skipping invalid merge request as start commit does not exist on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "missing_commit", startShortID)
+				result.Status = StatusSkipped
+				result.SkipReason = "start commit does not exist on GitHub"
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("loading start commit %s from GitHub: %v", startShortID, err)
+	}
+
+	if len(startCommit.Parents) == 0 {
+		// Orphaned commit, we cannot open a pull request as GitHub rejects it
+		if skipInvalidMergeRequests {
+			p.log.Info("skipping invalid merge request as start commit has no parents", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", startShortID)
+			result.Status = StatusSkipped
+			result.SkipReason = "start commit has no parents (orphaned)"
+			return true, nil
+		}
+		return false, fmt.Errorf("start commit %s for merge request %d has no parents", startShortID, mr.IID)
+	}
+
+	parentSHA := startCommit.Parents[0].GetSHA()
+	p.log.Trace("creating target branch for merged/closed merge request via API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.TargetBranch, "sha", parentSHA)
+	if _, _, err = gh.Git.CreateRef(ctx, owner, repo, github.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA}); err != nil {
+		if !isAlreadyExistsError(err) {
+			return false, fmt.Errorf("creating temporary target branch %s on GitHub: %v", mr.TargetBranch, err)
+		}
+		p.log.Trace("temporary target branch already exists on GitHub", "branch", mr.TargetBranch)
+	}
+
+	p.log.Trace("inspecting end commit via GitHub API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", endShortID)
+	if _, resp, err = gh.Git.GetCommit(ctx, owner, repo, commits[len(commits)-1].ID); err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			if skipInvalidMergeRequests {
+				p.log.Info("skipping invalid merge request as end commit does not exist on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "missing_commit", endShortID)
+				result.Status = StatusSkipped
+				result.SkipReason = "end commit does not exist on GitHub"
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("loading end commit %s from GitHub: %v", endShortID, err)
+	}
+
+	endSHA := commits[len(commits)-1].ID
+	p.log.Trace("creating source branch for merged/closed merge request via API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.SourceBranch, "sha", endSHA)
+	if _, _, err = gh.Git.CreateRef(ctx, owner, repo, github.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA}); err != nil {
+		if !isAlreadyExistsError(err) {
+			return false, fmt.Errorf("creating temporary source branch %s on GitHub: %v", mr.SourceBranch, err)
+		}
+		p.log.Trace("temporary source branch already exists on GitHub", "branch", mr.SourceBranch)
+	}
+
+	return false, nil
+}
+
+// deleteTempBranchesViaAPI deletes the temporary migration branches from GitHub via API.
+// Errors are logged as warnings but not returned.
+func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gitlab.MergeRequest) {
+	owner := p.githubPath[0]
+	repo := p.githubPath[1]
+	if _, err := gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.SourceBranch); err != nil {
+		p.log.Warn("failed to delete temporary source branch via API", "branch", mr.SourceBranch, "error", err)
+	}
+	if _, err := gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.TargetBranch); err != nil {
+		p.log.Warn("failed to delete temporary target branch via API", "branch", mr.TargetBranch, "error", err)
+	}
+}
+
+// isAlreadyExistsError reports whether a GitHub API error indicates a reference already exists (HTTP 422).
+func isAlreadyExistsError(err error) bool {
+	var ghErr *github.ErrorResponse
+	if errors.As(err, &ghErr) {
+		return ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusUnprocessableEntity &&
+			strings.Contains(ghErr.Message, "Reference already exists")
+	}
+	return false
 }

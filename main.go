@@ -34,7 +34,7 @@ const (
 )
 
 var loop, report, detailedReport bool
-var deleteExistingRepos, enablePullRequests, noForce, renameMasterToMain, skipInvalidMergeRequests, skipOpenMergeRequests, trimGithubBranches bool
+var deleteExistingRepos, enablePullRequests, noForce, pullRequestsOnly, renameMasterToMain, skipInvalidMergeRequests, skipOpenMergeRequests, trimGithubBranches bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch, storageType, storageDir string
 var logOutput, logDirectory string
 var mergeRequestsAge, pushBatchSize int
@@ -206,6 +206,7 @@ func main() {
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)")
 	flag.BoolVar(&skipInvalidMergeRequests, "skip-invalid-merge-requests", false, "when true, will log and skip invalid merge requests instead of raising an error")
 	flag.BoolVar(&skipOpenMergeRequests, "skip-open-merge-requests", false, "skip open merge requests during migration (only migrate closed/merged MRs)")
+	flag.BoolVar(&pullRequestsOnly, "pull-requests-only", false, "migrate only closed/merged merge requests as pull requests without cloning/pushing the repository; open MRs are skipped (repo must already exist on GitHub)")
 	flag.BoolVar(&noForce, "no-force", false, "use regular push instead of force push (safe for repos where work has already begun)")
 	flag.BoolVar(&trimGithubBranches, "trim-branches-on-github", false, "when true, will delete any branches on GitHub that are no longer present in GitLab")
 	flag.BoolVar(&showVersion, "version", false, "output version information")
@@ -333,6 +334,23 @@ func main() {
 	if renameMasterToMain && renameTrunkBranch != "" {
 		logger.Error("cannot specify -rename-master-to-main and -rename-trunk-branch together")
 		os.Exit(1)
+	}
+
+	if pullRequestsOnly {
+		if deleteExistingRepos {
+			logger.Error("cannot specify -pull-requests-only and -delete-existing-repos together")
+			os.Exit(1)
+		}
+		if renameMasterToMain || renameTrunkBranch != "" {
+			logger.Error("cannot specify -pull-requests-only and branch rename options together")
+			os.Exit(1)
+		}
+		if trimGithubBranches {
+			logger.Error("cannot specify -pull-requests-only and -trim-branches-on-github together")
+			os.Exit(1)
+		}
+		enablePullRequests = true
+		skipOpenMergeRequests = true
 	}
 
 	if storageType != "memory" && storageType != "filesystem" {
