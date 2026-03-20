@@ -95,11 +95,6 @@ func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) {
 	a.migrator.PrintReport(ctx, projects)
 }
 
-// ErrCount returns the number of non-fatal errors encountered during migration.
-func (a *App) ErrCount() int32 {
-	return a.migrator.ErrCount()
-}
-
 // buildRetryClient creates a retryable HTTP client with GitHub-specific backoff and retry logic.
 func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 	secondaryRateLimitPattern := regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)

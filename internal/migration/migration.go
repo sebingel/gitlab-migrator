@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	gogithub "github.com/google/go-github/v84/github"
@@ -18,6 +17,16 @@ import (
 	ghclient "github.com/manicminer/gitlab-migrator/internal/github"
 	glclient "github.com/manicminer/gitlab-migrator/internal/gitlab"
 )
+
+// MigrationPartialError is returned when migration completes but some projects had errors.
+type MigrationPartialError struct {
+	FailedProjects  int
+	PartialProjects int
+}
+
+func (e *MigrationPartialError) Error() string {
+	return fmt.Sprintf("migration completed with %d failed and %d partial project(s), review log output for details", e.FailedProjects, e.PartialProjects)
+}
 
 // CSVRow represents one project mapping from the projects CSV.
 type CSVRow = []string
@@ -31,8 +40,6 @@ type Migrator struct {
 	Logger   hclog.Logger
 	GHClient ghclient.Client
 	GLClient glclient.Client
-
-	errCount int32 // accessed atomically
 }
 
 // NewMigrator creates a fully initialised Migrator.
@@ -53,17 +60,6 @@ func NewMigrator(
 	m.GHClient = ghclient.NewClient(gh, c, logger)
 	m.GLClient = glclient.NewClient(gl, c, logger)
 	return m
-}
-
-// ErrCount returns the current error count.
-func (m *Migrator) ErrCount() int32 {
-	return atomic.LoadInt32(&m.errCount)
-}
-
-// SendErr increments the error count and logs the error.
-func (m *Migrator) SendErr(err error) {
-	atomic.AddInt32(&m.errCount, 1)
-	m.Logger.Error(err.Error())
 }
 
 // PerformMigration migrates all projects and writes reports.
@@ -97,8 +93,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 				}
 				proj, err := m.newProject(slugs)
 				if err != nil {
-					atomic.AddInt32(&m.errCount, 1)
-					m.Logger.Error(err.Error())
+					m.Logger.Error("initializing project", "project", slugs[0], "error", err)
 					gitlabPath, githubPath, parseErr := ParseProjectSlugs(slugs)
 					if parseErr != nil {
 						gitlabPath = []string{"unknown", "unknown"}
@@ -119,8 +114,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 
 				result, err := proj.migrate(ctx)
 				if err != nil {
-					atomic.AddInt32(&m.errCount, 1)
-					proj.log.Error(err.Error())
+					proj.log.Error("migrating project", "error", err)
 					result.Status = StatusFailed
 					result.Error = err.Error()
 				}
@@ -163,6 +157,13 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 	}
 
 	PrintSummaryToConsole(finalReport)
+
+	if finalReport.FailedProjects > 0 || finalReport.PartialProjects > 0 {
+		return &MigrationPartialError{
+			FailedProjects:  finalReport.FailedProjects,
+			PartialProjects: finalReport.PartialProjects,
+		}
+	}
 
 	return nil
 }
@@ -211,7 +212,7 @@ func (m *Migrator) PrintReport(ctx context.Context, projects []CSVRow) {
 
 		result, err := m.reportProject(ctx, proj)
 		if err != nil {
-			m.SendErr(err)
+			m.Logger.Error("reporting project", "error", err)
 		}
 
 		if result != nil {
@@ -242,14 +243,14 @@ type Report struct {
 func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, error) {
 	gitlabPath, _, err := ParseProjectSlugs(slugs)
 	if err != nil {
-		return nil, fmt.Errorf("parsing project slugs: %v", err)
+		return nil, fmt.Errorf("parsing project slugs: %w", err)
 	}
 
 	m.Logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
 	searchTerm := gitlabPath[1]
 	projectResult, _, err := m.GL.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm})
 	if err != nil {
-		return nil, fmt.Errorf("listing projects: %v", err)
+		return nil, fmt.Errorf("listing projects: %w", err)
 	}
 
 	var proj *gogitlab.Project
@@ -278,7 +279,7 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 	for {
 		result, resp, err := m.GL.MergeRequests.ListProjectMergeRequests(proj.ID, opts)
 		if err != nil {
-			return nil, fmt.Errorf("retrieving gitlab merge requests: %v", err)
+			return nil, fmt.Errorf("retrieving gitlab merge requests: %w", err)
 		}
 
 		mergeRequests = append(mergeRequests, result...)

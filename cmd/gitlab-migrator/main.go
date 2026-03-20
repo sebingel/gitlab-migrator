@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -294,10 +295,12 @@ func main() {
 		app.RunReport(ctx, projects)
 	} else {
 		if err = app.Run(ctx, projects, collector, sessionID); err != nil {
-			logger.Error(err.Error())
-			os.Exit(1)
-		} else if app.ErrCount() > 0 {
-			logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", app.ErrCount()))
+			var partialErr *migration.MigrationPartialError
+			if errors.As(err, &partialErr) {
+				logger.Warn(partialErr.Error())
+			} else {
+				logger.Error(err.Error())
+			}
 			os.Exit(1)
 		}
 	}
