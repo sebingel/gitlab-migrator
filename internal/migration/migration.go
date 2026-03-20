@@ -31,12 +31,12 @@ type CSVRow = []string
 
 // Migrator holds all runtime dependencies for the migration process.
 type Migrator struct {
-	Cfg      *config.Config
-	GH       *gogithub.Client
-	GL       *gogitlab.Client
-	Logger   hclog.Logger
-	GHClient clients.GitHubClient
-	GLClient clients.GitLabClient
+	cfg      *config.Config
+	gh       *gogithub.Client
+	gl       *gogitlab.Client
+	logger   hclog.Logger
+	ghClient clients.GitHubClient
+	glClient clients.GitLabClient
 }
 
 // NewMigrator creates a fully initialised Migrator.
@@ -49,23 +49,23 @@ func NewMigrator(
 	logger hclog.Logger,
 ) *Migrator {
 	return &Migrator{
-		Cfg:      cfg,
-		GH:       gh,
-		GL:       gl,
-		GHClient: ghClient,
-		GLClient: glClient,
-		Logger:   logger,
+		cfg:      cfg,
+		gh:       gh,
+		gl:       gl,
+		ghClient: ghClient,
+		glClient: glClient,
+		logger:   logger,
 	}
 }
 
 // PerformMigration migrates all projects and writes reports.
 func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, collector *ResultCollector, sessionID string) error {
-	concurrency := m.Cfg.MaxConcurrency
+	concurrency := m.cfg.MaxConcurrency
 	if len(projects) < concurrency {
 		concurrency = len(projects)
 	}
 
-	m.Logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), concurrency))
+	m.logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), concurrency))
 
 	var wg sync.WaitGroup
 	queue := make(chan CSVRow, concurrency*2)
@@ -89,7 +89,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 				}
 				proj, err := m.newProject(slugs)
 				if err != nil {
-					m.Logger.Error("initializing project", "project", slugs[0], "error", err)
+					m.logger.Error("initializing project", "project", slugs[0], "error", err)
 					gitlabPath, githubPath, parseErr := ParseProjectSlugs(slugs)
 					if parseErr != nil {
 						gitlabPath = []string{"unknown", "unknown"}
@@ -129,8 +129,8 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 		}
 	}
 
-	if m.Cfg.Loop {
-		m.Logger.Info("looping migration until canceled")
+	if m.cfg.Loop {
+		m.logger.Info("looping migration until canceled")
 		for {
 			if err := ctx.Err(); err != nil {
 				break
@@ -148,7 +148,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 
 	finalReport := collector.Finalize()
 
-	if m.Cfg.DetailedReport {
+	if m.cfg.DetailedReport {
 		m.writeDetailedReport(finalReport, sessionID)
 	}
 
@@ -167,37 +167,37 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 func (m *Migrator) writeDetailedReport(finalReport *MigrationReport, sessionID string) {
 	exePath, err := os.Executable()
 	if err != nil {
-		m.Logger.Error("failed to get executable path for reports", "error", err)
+		m.logger.Error("failed to get executable path for reports", "error", err)
 		return
 	}
 
 	reportsDir := filepath.Join(filepath.Dir(exePath), "reports")
 	if err := os.MkdirAll(reportsDir, 0755); err != nil {
-		m.Logger.Error("failed to create reports directory", "error", err)
+		m.logger.Error("failed to create reports directory", "error", err)
 		return
 	}
 
 	jsonPath := filepath.Join(reportsDir, sessionID+"-migration-report.json")
 	mdPath := filepath.Join(reportsDir, sessionID+"-migration-report.md")
 
-	m.Logger.Info("writing detailed migration reports", "directory", reportsDir, "session", sessionID)
+	m.logger.Info("writing detailed migration reports", "directory", reportsDir, "session", sessionID)
 
 	if err := WriteJSONReport(finalReport, jsonPath); err != nil {
-		m.Logger.Error("failed to write JSON report", "error", err, "path", jsonPath)
+		m.logger.Error("failed to write JSON report", "error", err, "path", jsonPath)
 	} else {
-		m.Logger.Info("JSON report written", "path", jsonPath)
+		m.logger.Info("JSON report written", "path", jsonPath)
 	}
 
 	if err := WriteMarkdownReport(finalReport, mdPath); err != nil {
-		m.Logger.Error("failed to write Markdown report", "error", err, "path", mdPath)
+		m.logger.Error("failed to write Markdown report", "error", err, "path", mdPath)
 	} else {
-		m.Logger.Info("Markdown report written", "path", mdPath)
+		m.logger.Info("Markdown report written", "path", mdPath)
 	}
 }
 
 // PrintReport logs a human-readable report for the given projects.
 func (m *Migrator) PrintReport(ctx context.Context, projects []CSVRow) {
-	m.Logger.Debug("building report")
+	m.logger.Debug("building report")
 
 	results := make([]Report, 0)
 
@@ -208,7 +208,7 @@ func (m *Migrator) PrintReport(ctx context.Context, projects []CSVRow) {
 
 		result, err := m.reportProject(ctx, proj)
 		if err != nil {
-			m.Logger.Error("reporting project", "error", err)
+			m.logger.Error("reporting project", "error", err)
 		}
 
 		if result != nil {
@@ -242,9 +242,9 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 		return nil, fmt.Errorf("parsing project slugs: %w", err)
 	}
 
-	m.Logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
+	m.logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
 	searchTerm := gitlabPath[1]
-	projectResult, _, err := m.GL.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm})
+	projectResult, _, err := m.gl.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm})
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
 	}
@@ -255,7 +255,7 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 			continue
 		}
 		if item.PathWithNamespace == slugs[0] {
-			m.Logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
+			m.logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
 			proj = item
 		}
 	}
@@ -271,9 +271,9 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 		Sort:    Pointer("asc"),
 	}
 
-	m.Logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
+	m.logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
 	for {
-		result, resp, err := m.GL.MergeRequests.ListProjectMergeRequests(proj.ID, opts)
+		result, resp, err := m.gl.MergeRequests.ListProjectMergeRequests(proj.ID, opts)
 		if err != nil {
 			return nil, fmt.Errorf("retrieving gitlab merge requests: %w", err)
 		}
@@ -288,7 +288,7 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 	}
 
 	mrCount := len(mergeRequests)
-	if m.Cfg.SkipOpenMergeRequests {
+	if m.cfg.SkipOpenMergeRequests {
 		mrCount = 0
 		for _, mr := range mergeRequests {
 			if mr != nil && !strings.EqualFold(mr.State, "opened") {

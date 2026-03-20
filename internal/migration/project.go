@@ -53,11 +53,11 @@ func (m *Migrator) newProject(slugs []string) (*project, error) {
 	var err error
 	p := &project{
 		m:             m,
-		storageType:   m.Cfg.StorageType,
-		storageDir:    m.Cfg.StorageDir,
-		pushBatchSize: m.Cfg.PushBatchSize,
+		storageType:   m.cfg.StorageType,
+		storageDir:    m.cfg.StorageDir,
+		pushBatchSize: m.cfg.PushBatchSize,
 	}
-	p.log = m.Logger.Named(slugs[0])
+	p.log = m.logger.Named(slugs[0])
 
 	p.gitlabPath, p.githubPath, err = ParseProjectSlugs(slugs)
 	if err != nil {
@@ -65,7 +65,7 @@ func (m *Migrator) newProject(slugs []string) (*project, error) {
 	}
 
 	p.log.Info("searching for GitLab project", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
-	p.project, _, err = m.GL.Projects.GetProject(slugs[0], nil)
+	p.project, _, err = m.gl.Projects.GetProject(slugs[0], nil)
 	if err != nil {
 		return nil, fmt.Errorf("retrieving project: %w", err)
 	}
@@ -75,9 +75,9 @@ func (m *Migrator) newProject(slugs []string) (*project, error) {
 	}
 
 	p.defaultBranch = "main"
-	if m.Cfg.RenameTrunkBranch != "" {
-		p.defaultBranch = m.Cfg.RenameTrunkBranch
-	} else if !m.Cfg.RenameMasterToMain && p.project.DefaultBranch != "" {
+	if m.cfg.RenameTrunkBranch != "" {
+		p.defaultBranch = m.cfg.RenameTrunkBranch
+	} else if !m.cfg.RenameMasterToMain && p.project.DefaultBranch != "" {
 		p.defaultBranch = p.project.DefaultBranch
 	}
 
@@ -147,7 +147,7 @@ func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted b
 		HasProjects:   Pointer(true),
 		HasWiki:       Pointer(true),
 	}
-	if _, _, err := p.m.GH.Repositories.Create(ctx, p.githubPath[0], &newRepo); err != nil {
+	if _, _, err := p.m.gh.Repositories.Create(ctx, p.githubPath[0], &newRepo); err != nil {
 		return fmt.Errorf("creating github repo: %w", err)
 	}
 	return nil
@@ -215,14 +215,14 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	}
 
 	p.log.Debug("checking for existing repository on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1])
-	_, _, err := p.m.GH.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
+	_, _, err := p.m.gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
 
 	var githubError *gogithub.ErrorResponse
 	if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
 		return p.result, fmt.Errorf("retrieving github repo: %w", err)
 	}
 
-	if p.m.Cfg.PullRequestsOnly {
+	if p.m.cfg.PullRequestsOnly {
 		if err != nil {
 			return p.result, fmt.Errorf("GitHub repository %s/%s not found (-pull-requests-only requires the repository to already exist on GitHub)", p.githubPath[0], p.githubPath[1])
 		}
@@ -233,17 +233,17 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			return p.result, fmt.Errorf("parsing clone URL: %v", parseErr)
 		}
 
-		p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !p.m.Cfg.NoForce)
+		p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !p.m.cfg.NoForce)
 
-		homepage := fmt.Sprintf("https://%s/%s/%s", p.m.Cfg.GitlabDomain, p.gitlabPath[0], p.gitlabPath[1])
+		homepage := fmt.Sprintf("https://%s/%s/%s", p.m.cfg.GitlabDomain, p.gitlabPath[0], p.gitlabPath[1])
 
 		if err != nil {
 			if err = p.createRepo(ctx, homepage, false); err != nil {
 				return p.result, err
 			}
-		} else if p.m.Cfg.DeleteExistingRepos {
+		} else if p.m.cfg.DeleteExistingRepos {
 			p.log.Warn("existing repository was found on GitHub, proceeding to delete", "owner", p.githubPath[0], "repo", p.githubPath[1])
-			if _, err = p.m.GH.Repositories.Delete(ctx, p.githubPath[0], p.githubPath[1]); err != nil {
+			if _, err = p.m.gh.Repositories.Delete(ctx, p.githubPath[0], p.githubPath[1]); err != nil {
 				return p.result, fmt.Errorf("deleting existing github repo: %w", err)
 			}
 
@@ -264,11 +264,11 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			AllowSquashMerge:  Pointer(true),
 			AllowUpdateBranch: Pointer(true),
 		}
-		if _, _, err = p.m.GH.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
+		if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
 			return p.result, fmt.Errorf("updating github repo: %w", err)
 		}
 
-		cloneUrl.User = url.UserPassword("oauth2", p.m.Cfg.GitlabToken)
+		cloneUrl.User = url.UserPassword("oauth2", p.m.cfg.GitlabToken)
 		cloneUrlWithCredentials := cloneUrl.String()
 
 		stor, err := p.createGitStorage()
@@ -308,8 +308,8 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			}
 		}
 
-		githubUrl := fmt.Sprintf("https://%s/%s/%s", p.m.Cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
-		githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", p.m.Cfg.GithubUser, p.m.Cfg.GithubToken, p.m.Cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
+		githubUrl := fmt.Sprintf("https://%s/%s/%s", p.m.cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
+		githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", p.m.cfg.GithubUser, p.m.cfg.GithubToken, p.m.cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
 
 		p.log.Debug("adding remote for GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 		if _, err = p.repo.CreateRemote(&gitconfig.RemoteConfig{
@@ -340,7 +340,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 
 		batches := ChunkRefSpecs(refSpecs, p.pushBatchSize)
 		pushMode := "force-pushing"
-		if p.m.Cfg.NoForce {
+		if p.m.cfg.NoForce {
 			pushMode = "pushing"
 		}
 		p.log.Debug(pushMode+" branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecs), "batches", len(batches), "batch_size", p.pushBatchSize)
@@ -350,7 +350,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 
 			opts := &git.PushOptions{
 				RemoteName: "github",
-				Force:      !p.m.Cfg.NoForce,
+				Force:      !p.m.cfg.NoForce,
 				RefSpecs:   batch,
 			}
 			sideband, err := p.pushWithSideband(ctx, opts)
@@ -360,7 +360,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 				} else {
 					msg := fmt.Sprintf("pushing branch batch %d/%d to github", batchNum+1, len(batches))
 					hint := pushErrHint(err)
-					if p.m.Cfg.NoForce {
+					if p.m.cfg.NoForce {
 						hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 					}
 					return p.result, formatPushError(msg, hint, err, sideband)
@@ -368,10 +368,10 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			}
 		}
 
-		if p.m.Cfg.TrimGithubBranches {
+		if p.m.cfg.TrimGithubBranches {
 			p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 			refSpecsToDelete := make([]gitconfig.RefSpec, 0)
-			githubBranches, err := p.m.GHClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+			githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
 			if err != nil {
 				return p.result, fmt.Errorf("listing branches from GitHub: %w", err)
 			}
@@ -413,7 +413,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 		tagOpts := &git.PushOptions{
 			RemoteName: "github",
-			Force:      !p.m.Cfg.NoForce,
+			Force:      !p.m.cfg.NoForce,
 			RefSpecs:   []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
 		}
 		tagSideband, err := p.pushWithSideband(ctx, tagOpts)
@@ -422,7 +422,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 				p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 			} else {
 				hint := pushErrHint(err)
-				if p.m.Cfg.NoForce {
+				if p.m.cfg.NoForce {
 					hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 				}
 				return p.result, formatPushError("pushing tags to github repo", hint, err, tagSideband)
@@ -433,12 +433,12 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		updateRepoDefault := gogithub.Repository{
 			DefaultBranch: &p.defaultBranch,
 		}
-		if _, _, err = p.m.GH.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
+		if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
 			return p.result, fmt.Errorf("setting default branch: %w", err)
 		}
 	} // end else !pullRequestsOnly
 
-	if p.m.Cfg.EnablePullRequests {
+	if p.m.cfg.EnablePullRequests {
 		mrResults := p.migrateMergeRequests(ctx)
 		p.result.MergeRequests = mrResults
 
@@ -482,13 +482,13 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 		Sort:    Pointer("asc"),
 	}
 
-	if p.m.Cfg.MergeRequestsAge > 0 {
-		opts.CreatedAfter = Pointer(time.Now().AddDate(0, 0, -p.m.Cfg.MergeRequestsAge))
+	if p.m.cfg.MergeRequestsAge > 0 {
+		opts.CreatedAfter = Pointer(time.Now().AddDate(0, 0, -p.m.cfg.MergeRequestsAge))
 	}
 
 	p.log.Debug("retrieving GitLab merge requests", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID)
 	for {
-		result, resp, err := p.m.GL.MergeRequests.ListProjectMergeRequests(p.project.ID, opts)
+		result, resp, err := p.m.gl.MergeRequests.ListProjectMergeRequests(p.project.ID, opts)
 		if err != nil {
 			p.log.Error("retrieving gitlab merge requests", "error", err)
 			return []MergeRequestResult{}
@@ -511,7 +511,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			continue
 		}
 
-		if p.m.Cfg.SkipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
+		if p.m.cfg.SkipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
 			results = append(results, MergeRequestResult{
 				GitLabMRID:    mergeRequest.IID,
 				GitLabMRTitle: mergeRequest.Title,
@@ -571,7 +571,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	sourceBranches := []string{mergeRequest.SourceBranch, sourceBranchForClosedMergeRequest}
 	branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
 	query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", p.githubPath[0], p.githubPath[1], branchQuery)
-	searchResult, err := p.m.GHClient.GetSearchResults(ctx, query)
+	searchResult, err := p.m.ghClient.GetSearchResults(ctx, query)
 	if err != nil {
 		return result, fmt.Errorf("listing pull requests: %w", err)
 	}
@@ -593,7 +593,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 			if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
 				prNumber, _ := strconv.Atoi(m[1])
-				pr, err := p.m.GHClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
+				pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
 				if err != nil {
 					return result, fmt.Errorf("retrieving pull request: %w", err)
 				}
@@ -615,7 +615,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 		if ref, err := p.repo.Reference(branchRef, false); err != nil {
 			p.log.Debug("branch lookup failed", "merge_request_id", mergeRequest.IID, "error", err, "error_type", fmt.Sprintf("%T", err))
-			if errors.Is(err, plumbing.ErrReferenceNotFound) && p.m.Cfg.SkipInvalidMergeRequests {
+			if errors.Is(err, plumbing.ErrReferenceNotFound) && p.m.cfg.SkipInvalidMergeRequests {
 				p.log.Info("skipping invalid merge request as source branch does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 				result.Status = StatusSkipped
 				result.SkipReason = "source branch does not exist"
@@ -635,7 +635,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		mergeRequest.TargetBranch = targetBranchForClosedMergeRequest
 
 		p.log.Trace("retrieving commits for merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
-		mergeRequestCommits, _, err := p.m.GL.MergeRequests.GetMergeRequestCommits(p.project.ID, mergeRequest.IID, &gogitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
+		mergeRequestCommits, _, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mergeRequest.IID, &gogitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
 		if err != nil {
 			return result, fmt.Errorf("retrieving merge request commits: %w", err)
 		}
@@ -657,7 +657,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			return result, fmt.Errorf("end commit for merge request %d is nil", mergeRequest.IID)
 		}
 
-		if p.m.Cfg.PullRequestsOnly {
+		if p.m.cfg.PullRequestsOnly {
 			skipped, err := p.createTempBranchesViaAPI(ctx, mergeRequest, mergeRequestCommits, &result)
 			if err != nil {
 				return result, err
@@ -681,7 +681,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
 			startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
 			if err != nil {
-				if p.m.Cfg.SkipInvalidMergeRequests {
+				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as start commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[0].ShortID, "error", err)
 					result.Status = StatusSkipped
 					result.SkipReason = "start commit does not exist"
@@ -691,7 +691,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 
 			if startCommit.NumParents() == 0 {
-				if p.m.Cfg.SkipInvalidMergeRequests {
+				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as start commit has no parents", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", startCommit.Hash)
 					result.Status = StatusSkipped
 					result.SkipReason = "start commit has no parents (orphaned)"
@@ -730,7 +730,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			p.log.Trace("creating source branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
 
 			if _, err = object.GetCommit(p.repo.Storer, endHash); err != nil {
-				if p.m.Cfg.SkipInvalidMergeRequests {
+				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as end commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, "error", err)
 					result.Status = StatusSkipped
 					result.SkipReason = "end commit does not exist"
@@ -755,7 +755,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					gitconfig.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
 					gitconfig.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
 				},
-				Force: !p.m.Cfg.NoForce,
+				Force: !p.m.cfg.NoForce,
 			}
 			mrSideband, err := p.pushWithSideband(ctx, mrPushOpts)
 			if err != nil {
@@ -763,7 +763,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
 					hint := pushErrHint(err)
-					if p.m.Cfg.NoForce {
+					if p.m.cfg.NoForce {
 						hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 					}
 					return result, formatPushError("pushing temporary branches to github", hint, err, mrSideband)
@@ -802,7 +802,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	githubAuthorName := mergeRequest.Author.Name
 
-	author, err := p.m.GLClient.GetUser(mergeRequest.Author.Username)
+	author, err := p.m.glClient.GetUser(mergeRequest.Author.Username)
 	if err != nil {
 		return result, fmt.Errorf("retrieving gitlab user: %w", err)
 	}
@@ -817,7 +817,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	p.log.Debug("determining merge request approvers", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
 	approvers := make([]string, 0)
-	awards, _, err := p.m.GL.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mergeRequest.IID, &gogitlab.ListAwardEmojiOptions{PerPage: 100})
+	awards, _, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mergeRequest.IID, &gogitlab.ListAwardEmojiOptions{PerPage: 100})
 	if err != nil {
 		p.log.Error("listing merge request awards", "error", err)
 	} else {
@@ -825,7 +825,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			if award.Name == "thumbsup" {
 				approver := award.User.Name
 
-				approverUser, err := p.m.GLClient.GetUser(award.User.Username)
+				approverUser, err := p.m.glClient.GetUser(award.User.Username)
 				if err != nil {
 					p.log.Error("retrieving gitlab user for approver", "username", award.User.Username, "error", err)
 					continue
@@ -879,7 +879,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], mergeRequest.CreatedAt.Format(config.DateFormat), closeDate, approval, originalState, p.m.Cfg.GitlabDomain, mergeRequestTitle)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], mergeRequest.CreatedAt.Format(config.DateFormat), closeDate, approval, originalState, p.m.cfg.GitlabDomain, mergeRequestTitle)
 
 	if pullRequest == nil {
 		p.log.Info("creating pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -891,7 +891,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			MaintainerCanModify: Pointer(true),
 			Draft:               &mergeRequest.Draft,
 		}
-		if pullRequest, _, err = p.m.GH.PullRequests.Create(ctx, p.githubPath[0], p.githubPath[1], &newPullRequest); err != nil {
+		if pullRequest, _, err = p.m.gh.PullRequests.Create(ctx, p.githubPath[0], p.githubPath[1], &newPullRequest); err != nil {
 			if strings.Contains(err.Error(), "No commits between") {
 				p.log.Debug("skipping merge request as the change is already present in trunk branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
 				result.Status = StatusSkipped
@@ -907,7 +907,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			p.log.Debug("closing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
 
 			pullRequest.State = Pointer("closed")
-			if pullRequest, _, err = p.m.GH.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
 		}
@@ -927,7 +927,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				State:  newState,
 			}
 
-			if pullRequest, _, err = p.m.GH.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
+			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
 				return result, fmt.Errorf("updating pull request state: %w", err)
 			}
 		}
@@ -942,7 +942,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			pullRequest.Body = &body
 			pullRequest.Draft = &mergeRequest.Draft
 			pullRequest.MaintainerCanModify = nil
-			if pullRequest, _, err = p.m.GH.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
 		} else {
@@ -958,7 +958,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	p.log.Debug("retrieving GitLab merge request comments", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
 	for {
-		notes, resp, err := p.m.GL.Notes.ListMergeRequestNotes(p.project.ID, mergeRequest.IID, noteOpts)
+		notes, resp, err := p.m.gl.Notes.ListMergeRequestNotes(p.project.ID, mergeRequest.IID, noteOpts)
 		if err != nil {
 			return result, fmt.Errorf("listing merge request notes: %w", err)
 		}
@@ -975,7 +975,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	result.TotalComments = len(comments)
 
 	p.log.Debug("retrieving GitHub pull request comments", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
-	prComments, _, err := p.m.GH.Issues.ListComments(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &gogithub.IssueListCommentsOptions{Sort: Pointer("created"), Direction: Pointer("asc")})
+	prComments, _, err := p.m.gh.Issues.ListComments(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &gogithub.IssueListCommentsOptions{Sort: Pointer("created"), Direction: Pointer("asc")})
 	if err != nil {
 		p.log.Error("listing pull request comments", "error", err)
 	} else {
@@ -994,7 +994,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 			githubCommentAuthorName := comment.Author.Name
 
-			commentAuthor, err := p.m.GLClient.GetUser(comment.Author.Username)
+			commentAuthor, err := p.m.glClient.GetUser(comment.Author.Username)
 			if err != nil {
 				commentResult.Status = StatusFailed
 				commentResult.Error = fmt.Sprintf("retrieving gitlab user: %v", err)
@@ -1034,7 +1034,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					if prComment.Body == nil || *prComment.Body != commentBody {
 						p.log.Debug("updating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
 						prComment.Body = &commentBody
-						if _, _, err = p.m.GH.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], prComment.GetID(), prComment); err != nil {
+						if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], prComment.GetID(), prComment); err != nil {
 							commentResult.Status = StatusFailed
 							commentResult.Error = fmt.Sprintf("updating comment: %v", err)
 							result.Comments = append(result.Comments, commentResult)
@@ -1056,7 +1056,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				newComment := gogithub.IssueComment{
 					Body: &commentBody,
 				}
-				createdComment, _, err := p.m.GH.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
+				createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
 				if err != nil {
 					commentResult.Status = StatusFailed
 					commentResult.Error = fmt.Sprintf("creating comment: %v", err)
@@ -1090,10 +1090,10 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	endShortID := commits[len(commits)-1].ShortID
 
 	p.log.Trace("inspecting start commit via GitHub API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", startShortID)
-	startCommit, resp, err := p.m.GH.Git.GetCommit(ctx, owner, repo, commits[0].ID)
+	startCommit, resp, err := p.m.gh.Git.GetCommit(ctx, owner, repo, commits[0].ID)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			if p.m.Cfg.SkipInvalidMergeRequests {
+			if p.m.cfg.SkipInvalidMergeRequests {
 				p.log.Info("skipping invalid merge request as start commit does not exist on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "missing_commit", startShortID)
 				result.Status = StatusSkipped
 				result.SkipReason = "start commit does not exist on GitHub"
@@ -1104,7 +1104,7 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	}
 
 	if len(startCommit.Parents) == 0 {
-		if p.m.Cfg.SkipInvalidMergeRequests {
+		if p.m.cfg.SkipInvalidMergeRequests {
 			p.log.Info("skipping invalid merge request as start commit has no parents", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", startShortID)
 			result.Status = StatusSkipped
 			result.SkipReason = "start commit has no parents (orphaned)"
@@ -1115,7 +1115,7 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 
 	parentSHA := startCommit.Parents[0].GetSHA()
 	p.log.Trace("creating target branch for merged/closed merge request via API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.TargetBranch, "sha", parentSHA)
-	if _, _, err = p.m.GH.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA}); err != nil {
+	if _, _, err = p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA}); err != nil {
 		if !isAlreadyExistsError(err) {
 			return false, fmt.Errorf("creating temporary target branch %s on GitHub: %w", mr.TargetBranch, err)
 		}
@@ -1123,9 +1123,9 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	}
 
 	p.log.Trace("inspecting end commit via GitHub API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", endShortID)
-	if _, resp, err = p.m.GH.Git.GetCommit(ctx, owner, repo, commits[len(commits)-1].ID); err != nil {
+	if _, resp, err = p.m.gh.Git.GetCommit(ctx, owner, repo, commits[len(commits)-1].ID); err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			if p.m.Cfg.SkipInvalidMergeRequests {
+			if p.m.cfg.SkipInvalidMergeRequests {
 				p.log.Info("skipping invalid merge request as end commit does not exist on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "missing_commit", endShortID)
 				result.Status = StatusSkipped
 				result.SkipReason = "end commit does not exist on GitHub"
@@ -1137,7 +1137,7 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 
 	endSHA := commits[len(commits)-1].ID
 	p.log.Trace("creating source branch for merged/closed merge request via API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.SourceBranch, "sha", endSHA)
-	if _, _, err = p.m.GH.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA}); err != nil {
+	if _, _, err = p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA}); err != nil {
 		if !isAlreadyExistsError(err) {
 			return false, fmt.Errorf("creating temporary source branch %s on GitHub: %w", mr.SourceBranch, err)
 		}
@@ -1150,10 +1150,10 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.MergeRequest) {
 	owner := p.githubPath[0]
 	repo := p.githubPath[1]
-	if _, err := p.m.GH.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.SourceBranch); err != nil {
+	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.SourceBranch); err != nil {
 		p.log.Warn("failed to delete temporary source branch via API", "branch", mr.SourceBranch, "error", err)
 	}
-	if _, err := p.m.GH.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.TargetBranch); err != nil {
+	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.TargetBranch); err != nil {
 		p.log.Warn("failed to delete temporary target branch via API", "branch", mr.TargetBranch, "error", err)
 	}
 }
