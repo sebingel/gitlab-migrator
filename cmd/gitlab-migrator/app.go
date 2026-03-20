@@ -90,10 +90,10 @@ func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) {
 	a.migrator.PrintReport(ctx, projects)
 }
 
+var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
+
 // buildRetryClient creates a retryable HTTP client with GitHub-specific backoff and retry logic.
 func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
-	secondaryRateLimitPattern := regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
-
 	retryClient := &retryablehttp.Client{
 		HTTPClient:   cleanhttp.DefaultPooledClient(),
 		Logger:       nil,
