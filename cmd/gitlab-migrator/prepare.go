@@ -96,6 +96,7 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	p.logger.Info("repository size", "size_mb", repoSizeBefore/1024/1024)
 
 	// Scan for large files
+	p.logger.Info("scanning for large files (>100MB)")
 	largeFiles, err := scanLargeFiles(ctx, repoDir)
 	if err != nil {
 		report.Error = err.Error()

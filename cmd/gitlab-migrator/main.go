@@ -201,7 +201,7 @@ func main() {
 	var mergeRequestsAgeRaw string
 	fmt.Printf(fmt.Sprintf("gitlab-migrator %s\n", cfg.Version))
 
-	flag.StringVar(&configPath, "config", "", "path to JSON configuration file (values are merged with command-line flags)")
+	flag.StringVar(&configPath, "config", "", "path to JSON configuration file (file values override command-line flags)")
 	flag.BoolVar(&cfg.Loop, "loop", false, "continue migrating until canceled")
 	flag.BoolVar(&cfg.Report, "report", false, "report on primitives to be migrated instead of beginning migration")
 	flag.BoolVar(&cfg.DetailedReport, "detailed-report", false, "write detailed migration report to reports/ directory")
