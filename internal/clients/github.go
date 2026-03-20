@@ -5,6 +5,7 @@ package clients
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
@@ -108,4 +109,23 @@ func (c *githubClient) GetUser(ctx context.Context, username string) (*gogithub.
 		return nil, fmt.Errorf("unable to determine whether owner is a user or organisation: %s", username)
 	}
 	return user, nil
+}
+
+// SearchModder is an http.RoundTripper that enables advanced search on GitHub issue searches.
+var _ http.RoundTripper = &SearchModder{}
+
+// SearchModder modifies GitHub API search requests to enable advanced search mode.
+type SearchModder struct {
+	Base http.RoundTripper
+}
+
+func (g *SearchModder) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req != nil && req.URL != nil {
+		if req.URL.Path == "/search/issues" {
+			values := req.URL.Query()
+			values.Set("advanced_search", "true")
+			req.URL.RawQuery = values.Encode()
+		}
+	}
+	return g.Base.RoundTrip(req)
 }

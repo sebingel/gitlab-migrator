@@ -12,10 +12,8 @@ import (
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	gogitlab "github.com/xanzy/go-gitlab"
-	"github.com/manicminer/gitlab-migrator/internal/cache"
+	"github.com/manicminer/gitlab-migrator/internal/clients"
 	"github.com/manicminer/gitlab-migrator/internal/config"
-	ghclient "github.com/manicminer/gitlab-migrator/internal/github"
-	glclient "github.com/manicminer/gitlab-migrator/internal/gitlab"
 )
 
 // MigrationPartialError is returned when migration completes but some projects had errors.
@@ -36,10 +34,9 @@ type Migrator struct {
 	Cfg      *config.Config
 	GH       *gogithub.Client
 	GL       *gogitlab.Client
-	Cache    *cache.ObjectCache
 	Logger   hclog.Logger
-	GHClient ghclient.Client
-	GLClient glclient.Client
+	GHClient clients.GitHubClient
+	GLClient clients.GitLabClient
 }
 
 // NewMigrator creates a fully initialised Migrator.
@@ -47,19 +44,18 @@ func NewMigrator(
 	cfg *config.Config,
 	gh *gogithub.Client,
 	gl *gogitlab.Client,
-	c *cache.ObjectCache,
+	ghClient clients.GitHubClient,
+	glClient clients.GitLabClient,
 	logger hclog.Logger,
 ) *Migrator {
-	m := &Migrator{
-		Cfg:    cfg,
-		GH:     gh,
-		GL:     gl,
-		Cache:  c,
-		Logger: logger,
+	return &Migrator{
+		Cfg:      cfg,
+		GH:       gh,
+		GL:       gl,
+		GHClient: ghClient,
+		GLClient: glClient,
+		Logger:   logger,
 	}
-	m.GHClient = ghclient.NewClient(gh, c, logger)
-	m.GLClient = glclient.NewClient(gl, c, logger)
-	return m
 }
 
 // PerformMigration migrates all projects and writes reports.

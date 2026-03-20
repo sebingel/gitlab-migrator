@@ -20,9 +20,8 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	gogitlab "github.com/xanzy/go-gitlab"
 
-	"github.com/manicminer/gitlab-migrator/internal/cache"
+	"github.com/manicminer/gitlab-migrator/internal/clients"
 	"github.com/manicminer/gitlab-migrator/internal/config"
-	ghclient "github.com/manicminer/gitlab-migrator/internal/github"
 	"github.com/manicminer/gitlab-migrator/internal/migration"
 )
 
@@ -36,7 +35,6 @@ type GitHubError struct {
 type App struct {
 	cfg      *config.Config
 	logger   hclog.Logger
-	cache    *cache.ObjectCache
 	gh       *gogithub.Client
 	gl       *gogitlab.Client
 	migrator *migration.Migrator
@@ -44,10 +42,9 @@ type App struct {
 
 // NewApp constructs an App by creating and wiring all runtime dependencies from the given config.
 func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
-	objectCache := cache.NewObjectCache()
 	retryClient := buildRetryClient(logger)
 
-	transport := &ghclient.SearchModder{
+	transport := &clients.SearchModder{
 		Base: &retryablehttp.RoundTripper{Client: retryClient},
 	}
 	paginatedClient := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
@@ -73,12 +70,14 @@ func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
 		return nil, fmt.Errorf("configuring GitLab client: %v", err)
 	}
 
-	migrator := migration.NewMigrator(cfg, gh, gl, objectCache, logger)
+	ghClient := clients.NewGitHubClient(gh, logger)
+	glClient := clients.NewGitLabClient(gl, logger)
+
+	migrator := migration.NewMigrator(cfg, gh, gl, ghClient, glClient, logger)
 
 	return &App{
 		cfg:      cfg,
 		logger:   logger,
-		cache:    objectCache,
 		gh:       gh,
 		gl:       gl,
 		migrator: migrator,
