@@ -1,4 +1,4 @@
-package main
+package migration
 
 import (
 	"bytes"
@@ -10,17 +10,17 @@ import (
 	"time"
 )
 
-// ResultStatus represents the outcome of a migration operation
+// ResultStatus represents the outcome of a migration operation.
 type ResultStatus string
 
 const (
 	StatusSuccess ResultStatus = "success"
 	StatusFailed  ResultStatus = "failed"
 	StatusSkipped ResultStatus = "skipped"
-	StatusPartial ResultStatus = "partial" // Some components failed
+	StatusPartial ResultStatus = "partial"
 )
 
-// MigrationReport is the top-level structure containing all migration results
+// MigrationReport is the top-level structure containing all migration results.
 type MigrationReport struct {
 	StartTime       time.Time       `json:"start_time"`
 	EndTime         time.Time       `json:"end_time"`
@@ -32,7 +32,7 @@ type MigrationReport struct {
 	Projects        []ProjectResult `json:"projects"`
 }
 
-// ProjectResult contains results for a single project migration
+// ProjectResult contains results for a single project migration.
 type ProjectResult struct {
 	GitLabGroup   string       `json:"gitlab_group"`
 	GitLabProject string       `json:"gitlab_project"`
@@ -44,11 +44,9 @@ type ProjectResult struct {
 	EndTime       time.Time    `json:"end_time"`
 	Duration      time.Duration `json:"duration"`
 
-	// Branch migration
 	BranchesMigrated []string `json:"branches_migrated"`
 	BranchCount      int      `json:"branch_count"`
 
-	// MR migration
 	MergeRequests []MergeRequestResult `json:"merge_requests,omitempty"`
 	TotalMRs      int                  `json:"total_mrs"`
 	SuccessfulMRs int                  `json:"successful_mrs"`
@@ -56,26 +54,25 @@ type ProjectResult struct {
 	SkippedMRs    int                  `json:"skipped_mrs"`
 }
 
-// MergeRequestResult contains results for a single MR migration
+// MergeRequestResult contains results for a single MR migration.
 type MergeRequestResult struct {
-	GitLabMRID    int          `json:"gitlab_mr_id"`
-	GitLabMRTitle string       `json:"gitlab_mr_title"`
-	GitLabState   string       `json:"gitlab_state"`
-	SourceBranch  string       `json:"source_branch"`
-	TargetBranch  string       `json:"target_branch"`
-	GitHubPRNumber *int        `json:"github_pr_number,omitempty"`
-	Status        ResultStatus `json:"status"`
-	Error         string       `json:"error,omitempty"`
-	SkipReason    string       `json:"skip_reason,omitempty"`
+	GitLabMRID     int          `json:"gitlab_mr_id"`
+	GitLabMRTitle  string       `json:"gitlab_mr_title"`
+	GitLabState    string       `json:"gitlab_state"`
+	SourceBranch   string       `json:"source_branch"`
+	TargetBranch   string       `json:"target_branch"`
+	GitHubPRNumber *int         `json:"github_pr_number,omitempty"`
+	Status         ResultStatus `json:"status"`
+	Error          string       `json:"error,omitempty"`
+	SkipReason     string       `json:"skip_reason,omitempty"`
 
-	// Comment migration
 	Comments         []CommentResult `json:"comments,omitempty"`
 	TotalComments    int             `json:"total_comments"`
 	MigratedComments int             `json:"migrated_comments"`
 	FailedComments   int             `json:"failed_comments"`
 }
 
-// CommentResult contains results for a single comment migration
+// CommentResult contains results for a single comment migration.
 type CommentResult struct {
 	GitLabNoteID    int          `json:"gitlab_note_id"`
 	GitHubCommentID *int64       `json:"github_comment_id,omitempty"`
@@ -85,14 +82,14 @@ type CommentResult struct {
 	CreatedAt       time.Time    `json:"created_at"`
 }
 
-// ResultCollector is a thread-safe collector for migration results
+// ResultCollector is a thread-safe collector for migration results.
 type ResultCollector struct {
 	mutex  *sync.RWMutex
 	report *MigrationReport
 }
 
-// newResultCollector creates a new ResultCollector
-func newResultCollector() *ResultCollector {
+// NewResultCollector creates a new ResultCollector.
+func NewResultCollector() *ResultCollector {
 	return &ResultCollector{
 		mutex: new(sync.RWMutex),
 		report: &MigrationReport{
@@ -102,8 +99,8 @@ func newResultCollector() *ResultCollector {
 	}
 }
 
-// addProjectResult adds a project result to the collection (thread-safe)
-func (rc *ResultCollector) addProjectResult(result ProjectResult) {
+// AddProjectResult adds a project result to the collection (thread-safe).
+func (rc *ResultCollector) AddProjectResult(result ProjectResult) {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
 
@@ -120,8 +117,8 @@ func (rc *ResultCollector) addProjectResult(result ProjectResult) {
 	}
 }
 
-// finalize finalizes the report with end time and duration
-func (rc *ResultCollector) finalize() *MigrationReport {
+// Finalize finalizes the report with end time and duration.
+func (rc *ResultCollector) Finalize() *MigrationReport {
 	rc.mutex.Lock()
 	defer rc.mutex.Unlock()
 
@@ -131,30 +128,26 @@ func (rc *ResultCollector) finalize() *MigrationReport {
 	return rc.report
 }
 
-// writeJSONReport writes the migration report as JSON to the specified path
-func writeJSONReport(report *MigrationReport, outputPath string) error {
+// WriteJSONReport writes the migration report as JSON to the specified path.
+func WriteJSONReport(report *MigrationReport, outputPath string) error {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling report to JSON: %v", err)
 	}
-
 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
 		return fmt.Errorf("writing JSON report: %v", err)
 	}
-
 	return nil
 }
 
-// writeMarkdownReport writes the migration report as Markdown to the specified path
-func writeMarkdownReport(report *MigrationReport, outputPath string) error {
+// WriteMarkdownReport writes the migration report as Markdown to the specified path.
+func WriteMarkdownReport(report *MigrationReport, outputPath string) error {
 	var buf bytes.Buffer
 
-	// Header
 	fmt.Fprintf(&buf, "# GitLab to GitHub Migration Report\n\n")
 	fmt.Fprintf(&buf, "**Generated:** %s\n\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(&buf, "**Duration:** %s\n\n", report.Duration.Round(time.Second))
 
-	// Summary
 	fmt.Fprintf(&buf, "## Summary\n\n")
 	fmt.Fprintf(&buf, "| Metric | Count |\n")
 	fmt.Fprintf(&buf, "|--------|-------|\n")
@@ -163,7 +156,6 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 	fmt.Fprintf(&buf, "| Failed | %d |\n", report.FailedProjects)
 	fmt.Fprintf(&buf, "| Partial | %d |\n\n", report.PartialProjects)
 
-	// Per-project details
 	for _, proj := range report.Projects {
 		fmt.Fprintf(&buf, "## Project: %s/%s → %s/%s\n\n",
 			proj.GitLabGroup, proj.GitLabProject, proj.GitHubOwner, proj.GitHubRepo)
@@ -179,7 +171,6 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 			}
 		}
 
-		// Branches
 		fmt.Fprintf(&buf, "### Branches Migrated (%d)\n\n", proj.BranchCount)
 		if len(proj.BranchesMigrated) > 0 {
 			for _, branch := range proj.BranchesMigrated {
@@ -188,7 +179,6 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 			fmt.Fprintf(&buf, "\n")
 		}
 
-		// MRs summary
 		fmt.Fprintf(&buf, "### Merge Requests\n\n")
 		fmt.Fprintf(&buf, "| Metric | Count |\n")
 		fmt.Fprintf(&buf, "|--------|-------|\n")
@@ -197,7 +187,6 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 		fmt.Fprintf(&buf, "| Failed | %d |\n", proj.FailedMRs)
 		fmt.Fprintf(&buf, "| Skipped | %d |\n\n", proj.SkippedMRs)
 
-		// Failed/Skipped MR details
 		if proj.FailedMRs > 0 || proj.SkippedMRs > 0 {
 			fmt.Fprintf(&buf, "#### Failed/Skipped Merge Requests\n\n")
 			fmt.Fprintf(&buf, "| MR ID | Title | Status | Reason/Error |\n")
@@ -216,7 +205,6 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 			fmt.Fprintf(&buf, "\n")
 		}
 
-		// Comment failures
 		failedComments := 0
 		for _, mr := range proj.MergeRequests {
 			failedComments += mr.FailedComments
@@ -229,16 +217,14 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 
 			for _, mr := range proj.MergeRequests {
 				if mr.FailedComments > 0 {
-					// Collect failed comment errors
-					errors := make([]string, 0)
+					errs := make([]string, 0)
 					for _, comment := range mr.Comments {
 						if comment.Status == StatusFailed {
-							errors = append(errors, fmt.Sprintf("Note %d: %s", comment.GitLabNoteID, comment.Error))
+							errs = append(errs, fmt.Sprintf("Note %d: %s", comment.GitLabNoteID, comment.Error))
 						}
 					}
-
 					fmt.Fprintf(&buf, "| %d | %d | %d | %s |\n",
-						mr.GitLabMRID, mr.TotalComments, mr.FailedComments, escapeMD(strings.Join(errors, "; ")))
+						mr.GitLabMRID, mr.TotalComments, mr.FailedComments, escapeMD(strings.Join(errs, "; ")))
 				}
 			}
 			fmt.Fprintf(&buf, "\n")
@@ -254,22 +240,8 @@ func writeMarkdownReport(report *MigrationReport, outputPath string) error {
 	return nil
 }
 
-// escapeMD escapes pipe characters for Markdown table cells
-func escapeMD(s string) string {
-	return strings.ReplaceAll(s, "|", "\\|")
-}
-
-// escapeMDCell escapes a string for safe use in a Markdown table cell.
-// Multiline content is truncated to the first line to prevent breaking table layout.
-func escapeMDCell(s string) string {
-	if i := strings.Index(s, "\n"); i >= 0 {
-		s = s[:i] + " [...]"
-	}
-	return strings.ReplaceAll(s, "|", "\\|")
-}
-
-// printSummaryToConsole prints a concise summary of the migration to console
-func printSummaryToConsole(report *MigrationReport) {
+// PrintSummaryToConsole prints a concise summary of the migration to console.
+func PrintSummaryToConsole(report *MigrationReport) {
 	fmt.Println("\n" + strings.Repeat("=", 80))
 	fmt.Println("MIGRATION SUMMARY")
 	fmt.Println(strings.Repeat("=", 80))
@@ -308,4 +280,15 @@ func printSummaryToConsole(report *MigrationReport) {
 	}
 
 	fmt.Println(strings.Repeat("=", 80))
+}
+
+func escapeMD(s string) string {
+	return strings.ReplaceAll(s, "|", "\\|")
+}
+
+func escapeMDCell(s string) string {
+	if i := strings.Index(s, "\n"); i >= 0 {
+		s = s[:i] + " [...]"
+	}
+	return strings.ReplaceAll(s, "|", "\\|")
 }
