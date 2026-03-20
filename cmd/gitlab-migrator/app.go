@@ -35,8 +35,6 @@ type GitHubError struct {
 type App struct {
 	cfg      *config.Config
 	logger   hclog.Logger
-	gh       *gogithub.Client
-	gl       *gogitlab.Client
 	migrator *migration.Migrator
 }
 
@@ -78,8 +76,6 @@ func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
 	return &App{
 		cfg:      cfg,
 		logger:   logger,
-		gh:       gh,
-		gl:       gl,
 		migrator: migrator,
 	}, nil
 }
