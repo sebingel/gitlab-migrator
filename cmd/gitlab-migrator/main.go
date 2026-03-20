@@ -32,13 +32,7 @@ import (
 	"github.com/manicminer/gitlab-migrator/internal/migration"
 )
 
-var (
-	logger  hclog.Logger
-	version = "development"
-)
-
-// secondaryRateLimitPattern detects GitHub secondary rate limit error messages.
-var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
+var version = "development"
 
 // GitHubError is the error body returned by the GitHub API.
 type GitHubError struct {
@@ -179,6 +173,9 @@ func roundDuration(d, r time.Duration) time.Duration {
 func main() {
 	var err error
 
+	// secondaryRateLimitPattern detects GitHub secondary rate limit error messages.
+	secondaryRateLimitPattern := regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
+
 	valueCtx := context.WithValue(context.Background(), gogithub.BypassRateLimitCheck, true)
 
 	ctx, cancel := context.WithCancel(valueCtx)
@@ -200,9 +197,11 @@ func main() {
 	cfg := &config.Config{Version: version}
 
 	var showVersion bool
+	var configPath string
 	var mergeRequestsAgeRaw string
 	fmt.Printf(fmt.Sprintf("gitlab-migrator %s\n", cfg.Version))
 
+	flag.StringVar(&configPath, "config", "", "path to JSON configuration file (values are merged with command-line flags)")
 	flag.BoolVar(&cfg.Loop, "loop", false, "continue migrating until canceled")
 	flag.BoolVar(&cfg.Report, "report", false, "report on primitives to be migrated instead of beginning migration")
 	flag.BoolVar(&cfg.DetailedReport, "detailed-report", false, "write detailed migration report to reports/ directory")
@@ -245,9 +244,11 @@ func main() {
 		return
 	}
 
-	if cfg.LogDirectory != "" && !strings.Contains(strings.ToLower(cfg.LogOutput), "file") {
-		fmt.Fprintf(os.Stderr, "Error: -log-directory requires -log-output to include 'file' (e.g. -log-output=file or -log-output=console,file)\n")
-		os.Exit(1)
+	if configPath != "" {
+		if err = cfg.LoadFile(configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	sessionID := time.Now().Format("2006-01-02-150405")
@@ -262,7 +263,7 @@ func main() {
 		defer logFileHandle.Close()
 	}
 
-	logger = hclog.New(&hclog.LoggerOptions{
+	logger := hclog.New(&hclog.LoggerOptions{
 		Name:   "gitlab-migrator",
 		Level:  hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
 		Output: logWriter,
@@ -272,16 +273,8 @@ func main() {
 
 	// Handle prepare mode early — no API tokens needed
 	if cfg.PrepareMode {
-		if cfg.PrepareCloneURL == "" || cfg.PrepareTargetURL == "" {
-			logger.Error("-prepare requires both -prepare-clone-url and -prepare-target-url")
-			os.Exit(1)
-		}
-		if cfg.PrepareLargeFiles != "" && cfg.PrepareLargeFiles != "remove" && cfg.PrepareLargeFiles != "lfs" {
-			logger.Error("-prepare-large-files must be 'remove' or 'lfs'", "value", cfg.PrepareLargeFiles)
-			os.Exit(1)
-		}
-		if cfg.GithubRepo != "" || cfg.GitlabProject != "" || cfg.ProjectsCsvPath != "" {
-			logger.Error("-prepare cannot be combined with -github-repo, -gitlab-project, or -projects-csv")
+		if err := cfg.ValidatePrepare(); err != nil {
+			logger.Error(err.Error())
 			os.Exit(1)
 		}
 		if !isAllowedCloneURL(cfg.PrepareCloneURL) {
@@ -292,7 +285,7 @@ func main() {
 			logger.Error("-prepare-target-url must use https:// or git@ SSH format", "url", cfg.PrepareTargetURL)
 			os.Exit(1)
 		}
-		if err := runPrepare(ctx, cfg.PrepareCloneURL, cfg.PrepareTargetURL, cfg.PrepareLargeFiles, cfg.PrepareBatchCount); err != nil {
+		if err := newPreparer(logger).run(ctx, cfg.PrepareCloneURL, cfg.PrepareTargetURL, cfg.PrepareLargeFiles, cfg.PrepareBatchCount); err != nil {
 			logger.Error("prepare failed", "error", err)
 			os.Exit(1)
 		}
@@ -322,53 +315,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	repoSpecifiedInline := cfg.GithubRepo != "" && cfg.GitlabProject != ""
-	if repoSpecifiedInline && cfg.ProjectsCsvPath != "" {
-		logger.Error("cannot specify -projects-csv and either -github-repo or -gitlab-project at the same time")
-		os.Exit(1)
-	}
-	if !repoSpecifiedInline && cfg.ProjectsCsvPath == "" {
-		logger.Error("must specify either -projects-csv or both of -github-repo and -gitlab-project")
-		os.Exit(1)
-	}
-
-	if cfg.RenameMasterToMain && cfg.RenameTrunkBranch != "" {
-		logger.Error("cannot specify -rename-master-to-main and -rename-trunk-branch together")
-		os.Exit(1)
-	}
-
-	if cfg.PullRequestsOnly {
-		if cfg.DeleteExistingRepos {
-			logger.Error("cannot specify -pull-requests-only and -delete-existing-repos together")
-			os.Exit(1)
-		}
-		if cfg.RenameMasterToMain || cfg.RenameTrunkBranch != "" {
-			logger.Error("cannot specify -pull-requests-only and branch rename options together")
-			os.Exit(1)
-		}
-		if cfg.TrimGithubBranches {
-			logger.Error("cannot specify -pull-requests-only and -trim-branches-on-github together")
-			os.Exit(1)
-		}
-		cfg.EnablePullRequests = true
-		cfg.SkipOpenMergeRequests = true
-	}
-
-	if cfg.StorageType != "memory" && cfg.StorageType != "filesystem" {
-		logger.Error("storage-type must be either 'memory' or 'filesystem'")
-		os.Exit(1)
-	}
-
-	if cfg.PushBatchSize <= 0 {
-		logger.Error("push-batch-size must be greater than 0")
-		os.Exit(1)
-	}
-
 	if mergeRequestsAgeRaw != "" {
 		if cfg.MergeRequestsAge, err = strconv.Atoi(mergeRequestsAgeRaw); err != nil {
 			logger.Error("must specify an integer for -merge-requests-age")
 			os.Exit(1)
 		}
+	}
+
+	if cfg.PullRequestsOnly {
+		cfg.EnablePullRequests = true
+		cfg.SkipOpenMergeRequests = true
+	}
+
+	if err := cfg.Validate(); err != nil {
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 
 	retryClient := &retryablehttp.Client{

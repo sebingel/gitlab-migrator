@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/go-hclog"
 )
 
 type largeFile struct {
@@ -36,8 +38,18 @@ type prepareReport struct {
 	Error          string
 }
 
-// runPrepare orchestrates the prepare mode workflow.
-func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, batchCount int) error {
+// preparer holds the logger for prepare mode operations.
+type preparer struct {
+	logger hclog.Logger
+}
+
+// newPreparer creates a preparer with the given logger.
+func newPreparer(logger hclog.Logger) *preparer {
+	return &preparer{logger: logger}
+}
+
+// run orchestrates the prepare mode workflow.
+func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode string, batchCount int) error {
 	start := time.Now()
 	report := &prepareReport{
 		CloneURL:  cloneURL,
@@ -49,30 +61,30 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		printPrepareReport(report)
 	}()
 
-	logger.Info("starting prepare mode", "source", cloneURL, "target", targetURL)
+	p.logger.Info("starting prepare mode", "source", cloneURL, "target", targetURL)
 
 	// Check prerequisites
-	pythonCmd, err := checkPreparePrerequisites(ctx, largeFileMode)
+	pythonCmd, err := p.checkPrerequisites(ctx, largeFileMode)
 	if err != nil {
 		report.Error = err.Error()
 		return err
 	}
 
 	// Clone repository
-	repoDir, err := prepareClone(ctx, cloneURL)
+	repoDir, err := p.clone(ctx, cloneURL)
 	if err != nil {
 		report.Error = err.Error()
 		return err
 	}
 
 	// Detect default branch
-	defaultBranch, err := detectDefaultBranch(ctx, repoDir)
+	defaultBranch, err := p.detectDefaultBranch(ctx, repoDir)
 	if err != nil {
 		report.Error = err.Error()
 		return err
 	}
 	report.DefaultBranch = defaultBranch
-	logger.Info("detected default branch", "branch", defaultBranch)
+	p.logger.Info("detected default branch", "branch", defaultBranch)
 
 	// Estimate repo size
 	repoSizeBefore, err := estimateRepoSize(repoDir)
@@ -81,7 +93,7 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		return err
 	}
 	report.RepoSizeBefore = repoSizeBefore
-	logger.Info("repository size", "size_mb", repoSizeBefore/1024/1024)
+	p.logger.Info("repository size", "size_mb", repoSizeBefore/1024/1024)
 
 	// Scan for large files
 	largeFiles, err := scanLargeFiles(ctx, repoDir)
@@ -90,9 +102,9 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		return err
 	}
 	report.LargeFiles = largeFiles
-	logger.Info("large file scan complete", "count", len(largeFiles))
+	p.logger.Info("large file scan complete", "count", len(largeFiles))
 	for _, f := range largeFiles {
-		logger.Info("large file", "path", f.Path, "size_mb", f.Size/1024/1024)
+		p.logger.Info("large file", "path", f.Path, "size_mb", f.Size/1024/1024)
 	}
 
 	// Decide cleanup strategy
@@ -103,7 +115,7 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		return err
 	}
 	if !needsCleanup && largeFileMode != "" {
-		logger.Info("no large files found, skipping cleanup")
+		p.logger.Info("no large files found, skipping cleanup")
 	}
 
 	// Execute cleanup if needed
@@ -111,7 +123,7 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		report.CleanupMethod = largeFileMode
 
 		// Remove origin remote (required by filter-repo)
-		if err := removeRemote(ctx, repoDir, "origin"); err != nil {
+		if err := p.removeRemote(ctx, repoDir, "origin"); err != nil {
 			report.Error = err.Error()
 			return err
 		}
@@ -119,32 +131,32 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 		// Execute cleanup
 		switch largeFileMode {
 		case "remove":
-			if err := executeFilterRepo(ctx, repoDir, pythonCmd, largeFiles); err != nil {
+			if err := p.executeFilterRepo(ctx, repoDir, pythonCmd, largeFiles); err != nil {
 				report.Error = err.Error()
 				return err
 			}
-			logger.Info("filter-repo complete", "files_removed", len(uniquePaths(largeFiles)))
+			p.logger.Info("filter-repo complete", "files_removed", len(uniquePaths(largeFiles)))
 
 		case "lfs":
-			if err := executeLFSMigrate(ctx, repoDir); err != nil {
+			if err := p.executeLFSMigrate(ctx, repoDir); err != nil {
 				report.Error = err.Error()
 				return err
 			}
-			logger.Info("lfs migrate complete")
+			p.logger.Info("lfs migrate complete")
 
 			// Add remote temporarily for LFS push
-			if err := addRemote(ctx, repoDir, "origin", targetURL); err != nil {
+			if err := p.addRemote(ctx, repoDir, "origin", targetURL); err != nil {
 				report.Error = err.Error()
 				return err
 			}
-			if err := executeLFSPush(ctx, repoDir, "origin"); err != nil {
+			if err := p.executeLFSPush(ctx, repoDir, "origin"); err != nil {
 				report.Error = err.Error()
 				return err
 			}
-			logger.Info("lfs objects pushed")
+			p.logger.Info("lfs objects pushed")
 
 			// Remove remote again for clean state before configuring target
-			if err := removeRemote(ctx, repoDir, "origin"); err != nil {
+			if err := p.removeRemote(ctx, repoDir, "origin"); err != nil {
 				report.Error = err.Error()
 				return err
 			}
@@ -157,16 +169,16 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 	// but didn't push LFS objects (e.g. interrupted), detect and push them now.
 	if !needsCleanup && largeFileMode == "lfs" {
 		if lfsConfigured, _ := hasLFSTracking(repoDir); lfsConfigured {
-			logger.Info("LFS tracking detected from previous run, pushing LFS objects")
-			if err := addRemote(ctx, repoDir, "origin", targetURL); err != nil {
+			p.logger.Info("LFS tracking detected from previous run, pushing LFS objects")
+			if err := p.addRemote(ctx, repoDir, "origin", targetURL); err != nil {
 				report.Error = err.Error()
 				return err
 			}
-			if err := executeLFSPush(ctx, repoDir, "origin"); err != nil {
+			if err := p.executeLFSPush(ctx, repoDir, "origin"); err != nil {
 				report.Error = err.Error()
 				return err
 			}
-			if err := removeRemote(ctx, repoDir, "origin"); err != nil {
+			if err := p.removeRemote(ctx, repoDir, "origin"); err != nil {
 				report.Error = err.Error()
 				return err
 			}
@@ -174,11 +186,11 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 	}
 
 	// Configure target remote
-	if err := addRemote(ctx, repoDir, "origin", targetURL); err != nil {
+	if err := p.addRemote(ctx, repoDir, "origin", targetURL); err != nil {
 		report.Error = err.Error()
 		return err
 	}
-	logger.Info("configured target remote", "url", targetURL)
+	p.logger.Info("configured target remote", "url", targetURL)
 
 	// Measure repo size after cleanup
 	repoSizeAfter, err := estimateRepoSize(repoDir)
@@ -189,22 +201,22 @@ func runPrepare(ctx context.Context, cloneURL, targetURL, largeFileMode string, 
 	report.RepoSizeAfter = repoSizeAfter
 
 	// Push to target
-	batched, usedBatchCount, err := pushRepo(ctx, repoDir, "origin", defaultBranch, batchCount, repoSizeAfter)
+	batched, usedBatchCount, err := p.pushRepo(ctx, repoDir, "origin", defaultBranch, batchCount, repoSizeAfter)
 	if err != nil {
 		report.Error = err.Error()
 		return err
 	}
 	report.BatchPush = batched
 	report.BatchCount = usedBatchCount
-	logger.Info("push complete")
+	p.logger.Info("push complete")
 
 	return nil
 }
 
-// checkPreparePrerequisites verifies required tools are installed and returns the python command name.
-func checkPreparePrerequisites(ctx context.Context, largeFileMode string) (string, error) {
+// checkPrerequisites verifies required tools are installed and returns the python command name.
+func (p *preparer) checkPrerequisites(ctx context.Context, largeFileMode string) (string, error) {
 	// Check git >= 2.22.0
-	gitVersionRaw, err := runGitCmd(ctx, "", "--version")
+	gitVersionRaw, err := p.runGitCmd(ctx, "", "--version")
 	if err != nil {
 		return "", fmt.Errorf("git not found: %v", err)
 	}
@@ -215,12 +227,12 @@ func checkPreparePrerequisites(ctx context.Context, largeFileMode string) (strin
 	if !versionAtLeast(gitVersion, [3]int{2, 22, 0}) {
 		return "", fmt.Errorf("git >= 2.22.0 required, found %d.%d.%d", gitVersion[0], gitVersion[1], gitVersion[2])
 	}
-	logger.Info("prerequisite check", "tool", "git", "version", fmt.Sprintf("%d.%d.%d", gitVersion[0], gitVersion[1], gitVersion[2]))
+	p.logger.Info("prerequisite check", "tool", "git", "version", fmt.Sprintf("%d.%d.%d", gitVersion[0], gitVersion[1], gitVersion[2]))
 
 	// Find python command
 	pythonCmd := ""
 	for _, cmd := range []string{"python3", "python"} {
-		out, err := runToolCmd(ctx, cmd, "--version")
+		out, err := p.runToolCmd(ctx, cmd, "--version")
 		if err != nil {
 			continue
 		}
@@ -230,7 +242,7 @@ func checkPreparePrerequisites(ctx context.Context, largeFileMode string) (strin
 		}
 		if versionAtLeast(ver, [3]int{3, 6, 0}) {
 			pythonCmd = cmd
-			logger.Info("prerequisite check", "tool", "python", "command", cmd, "version", fmt.Sprintf("%d.%d.%d", ver[0], ver[1], ver[2]))
+			p.logger.Info("prerequisite check", "tool", "python", "command", cmd, "version", fmt.Sprintf("%d.%d.%d", ver[0], ver[1], ver[2]))
 			break
 		}
 	}
@@ -241,22 +253,312 @@ func checkPreparePrerequisites(ctx context.Context, largeFileMode string) (strin
 		}
 
 		// Check for git-filter-repo
-		_, err := runToolCmd(ctx, pythonCmd, "-m", "git_filter_repo", "--version")
+		_, err := p.runToolCmd(ctx, pythonCmd, "-m", "git_filter_repo", "--version")
 		if err != nil {
 			return "", fmt.Errorf("git-filter-repo not found; install it with: pip install git-filter-repo")
 		}
-		logger.Info("prerequisite check", "tool", "git-filter-repo", "status", "available")
+		p.logger.Info("prerequisite check", "tool", "git-filter-repo", "status", "available")
 	}
 
 	if largeFileMode == "lfs" {
-		lfsVersionRaw, err := runToolCmd(ctx, "git", "lfs", "version")
+		lfsVersionRaw, err := p.runToolCmd(ctx, "git", "lfs", "version")
 		if err != nil {
 			return "", fmt.Errorf("git-lfs not found (required for -prepare-large-files=lfs): %v", err)
 		}
-		logger.Info("prerequisite check", "tool", "git-lfs", "version", strings.TrimSpace(lfsVersionRaw))
+		p.logger.Info("prerequisite check", "tool", "git-lfs", "version", strings.TrimSpace(lfsVersionRaw))
 	}
 
 	return pythonCmd, nil
+}
+
+// runGitCmd runs a git command, captures output, and logs at DEBUG.
+func (p *preparer) runGitCmd(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	p.logger.Debug("running git command", "args", args, "dir", dir)
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if err != nil {
+		return result, fmt.Errorf("git %s: %v\n%s", strings.Join(args, " "), err, result)
+	}
+	p.logger.Debug("git command output", "args", args, "output", result)
+	return result, nil
+}
+
+// runGitCmdStreaming runs a git command with stdout/stderr piped to the logger.
+func (p *preparer) runGitCmdStreaming(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	p.logger.Info("running git command", "args", args, "dir", dir)
+
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		return fmt.Errorf("starting git %s: %v", strings.Join(args, " "), err)
+	}
+
+	// Scan in goroutine so we can close the pipe writer after Wait
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(pr)
+		for scanner.Scan() {
+			p.logger.Info("git", "output", scanner.Text())
+		}
+	}()
+
+	err := cmd.Wait()
+	pw.Close() // unblocks scanner
+	<-scanDone // wait for scanner to finish
+
+	if err != nil {
+		return fmt.Errorf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+// runToolCmd runs an arbitrary command, captures output.
+func (p *preparer) runToolCmd(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	p.logger.Debug("running command", "name", name, "args", args)
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if err != nil {
+		return result, fmt.Errorf("%s %s: %v\n%s", name, strings.Join(args, " "), err, result)
+	}
+	return result, nil
+}
+
+// clone clones the repository as a mirror. Idempotent: skips if directory exists.
+func (p *preparer) clone(ctx context.Context, cloneURL string) (string, error) {
+	// Derive directory name from URL
+	repoDir := repoNameFromURL(cloneURL)
+	if repoDir == "" {
+		return "", fmt.Errorf("cannot derive repository directory name from URL: %s", cloneURL)
+	}
+
+	// Resolve to absolute path so all subsequent operations use a stable path
+	absDir, err := filepath.Abs(repoDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving clone directory path: %v", err)
+	}
+	repoDir = absDir
+
+	// Check if directory already exists (idempotent)
+	if info, err := os.Stat(repoDir); err == nil && info.IsDir() {
+		p.logger.Info("using existing clone", "dir", repoDir)
+		return repoDir, nil
+	}
+
+	p.logger.Info("cloning repository", "url", cloneURL, "dir", repoDir)
+	if err := p.runGitCmdStreaming(ctx, "", "clone", "--mirror", cloneURL, repoDir); err != nil {
+		return "", fmt.Errorf("cloning repository: %v", err)
+	}
+	p.logger.Info("cloned repository", "dir", repoDir)
+	return repoDir, nil
+}
+
+// detectDefaultBranch reads HEAD from a bare/mirror clone.
+func (p *preparer) detectDefaultBranch(ctx context.Context, repoDir string) (string, error) {
+	out, err := p.runGitCmd(ctx, repoDir, "symbolic-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("detecting default branch: %v", err)
+	}
+	// Strip "refs/heads/" prefix
+	branch := strings.TrimPrefix(strings.TrimSpace(out), "refs/heads/")
+	return branch, nil
+}
+
+// removeRemote removes a git remote. Idempotent: no-op if remote doesn't exist.
+func (p *preparer) removeRemote(ctx context.Context, repoDir, name string) error {
+	_, err := p.runGitCmd(ctx, repoDir, "remote", "get-url", name)
+	if err != nil {
+		// Remote doesn't exist, nothing to do
+		p.logger.Debug("remote does not exist, skipping removal", "remote", name)
+		return nil
+	}
+	p.logger.Info("removing remote", "remote", name)
+	_, err = p.runGitCmd(ctx, repoDir, "remote", "remove", name)
+	return err
+}
+
+// addRemote adds a git remote. Idempotent: if remote exists with correct URL, skip; if wrong URL, update.
+func (p *preparer) addRemote(ctx context.Context, repoDir, name, url string) error {
+	existingURL, err := p.runGitCmd(ctx, repoDir, "remote", "get-url", name)
+	if err == nil {
+		// Remote exists
+		if strings.TrimSpace(existingURL) == url {
+			p.logger.Debug("remote already configured correctly", "remote", name, "url", url)
+			return nil
+		}
+		// Wrong URL, update it
+		p.logger.Info("updating remote URL", "remote", name, "url", url)
+		_, err = p.runGitCmd(ctx, repoDir, "remote", "set-url", name, url)
+		return err
+	}
+	// Remote doesn't exist, add it
+	p.logger.Info("adding remote", "remote", name, "url", url)
+	_, err = p.runGitCmd(ctx, repoDir, "remote", "add", name, url)
+	return err
+}
+
+// executeFilterRepo runs git-filter-repo to remove large files from history.
+func (p *preparer) executeFilterRepo(ctx context.Context, repoDir, pythonCmd string, files []largeFile) error {
+	paths := uniquePaths(files)
+	p.logger.Info("running git-filter-repo", "paths_to_remove", len(paths))
+
+	args := []string{"-m", "git_filter_repo", "--invert-paths", "--force"}
+	for _, path := range paths {
+		args = append(args, "--path", path)
+	}
+
+	cmd := exec.CommandContext(ctx, pythonCmd, args...)
+	cmd.Dir = repoDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("running git-filter-repo: %v", err)
+	}
+	return nil
+}
+
+// executeLFSMigrate runs git lfs fetch --all followed by git lfs migrate import --everything --above=100mb.
+func (p *preparer) executeLFSMigrate(ctx context.Context, repoDir string) error {
+	p.logger.Info("fetching all LFS objects")
+	if err := p.runGitCmdStreaming(ctx, repoDir, "lfs", "fetch", "--all"); err != nil {
+		return fmt.Errorf("git lfs fetch --all: %v", err)
+	}
+
+	p.logger.Info("running git lfs migrate import")
+	if err := p.runGitCmdStreaming(ctx, repoDir, "lfs", "migrate", "import", "--everything", "--above=100mb"); err != nil {
+		return fmt.Errorf("git lfs migrate import: %v", err)
+	}
+	return nil
+}
+
+// executeLFSPush pushes all LFS objects to the remote.
+func (p *preparer) executeLFSPush(ctx context.Context, repoDir, remote string) error {
+	p.logger.Info("pushing LFS objects", "remote", remote)
+	if err := p.runGitCmdStreaming(ctx, repoDir, "lfs", "push", remote, "--all"); err != nil {
+		return fmt.Errorf("git lfs push: %v", err)
+	}
+	return nil
+}
+
+// pushRepo decides between direct and batch push based on repo size.
+// Returns whether batch push was used and the batch count.
+func (p *preparer) pushRepo(ctx context.Context, repoDir, remote, defaultBranch string, batchCount int, repoSize int64) (batched bool, usedBatchCount int, err error) {
+	const batchThreshold = 2 * 1024 * 1024 * 1024 // 2 GiB
+
+	if repoSize <= batchThreshold && batchCount == 0 {
+		p.logger.Info("repository size under 2 GiB, using direct push", "size_mb", repoSize/1024/1024)
+		return false, 0, p.directPush(ctx, repoDir, remote)
+	}
+
+	if batchCount != 0 && repoSize <= batchThreshold {
+		p.logger.Info("batch push forced by -prepare-batch-count override", "size_mb", repoSize/1024/1024, "batch_count", batchCount)
+	}
+
+	// Calculate batch count if not overridden
+	if batchCount == 0 {
+		repoSizeGB := float64(repoSize) / (1024 * 1024 * 1024)
+		batchCount = int(math.Ceil(repoSizeGB * 10))
+		if batchCount < 10 {
+			batchCount = 10
+		}
+	}
+
+	p.logger.Info("repository size over 2 GiB, using batch push", "size_mb", repoSize/1024/1024, "batch_count", batchCount)
+	return true, batchCount, p.batchPush(ctx, repoDir, remote, defaultBranch, batchCount)
+}
+
+// directPush performs a git push --mirror.
+func (p *preparer) directPush(ctx context.Context, repoDir, remote string) error {
+	return p.runGitCmdStreaming(ctx, repoDir, "push", "--mirror", remote)
+}
+
+// batchPush pushes commits in batches with adaptive retry on push-too-large errors.
+// NOTE: Only the default branch is batched. Other branches are pushed via "git push --all"
+// in a single operation, which may fail for repos with very large non-default branches.
+func (p *preparer) batchPush(ctx context.Context, repoDir, remote, branch string, batchCount int) error {
+	// Get commit list
+	out, err := p.runGitCmd(ctx, repoDir, "rev-list", "--reverse", "--first-parent", branch)
+	if err != nil {
+		return fmt.Errorf("listing commits: %v", err)
+	}
+
+	commits := strings.Split(strings.TrimSpace(out), "\n")
+	if len(commits) == 0 || (len(commits) == 1 && commits[0] == "") {
+		return fmt.Errorf("no commits found on branch %s (empty repository? use direct push instead of batch)", branch)
+	}
+
+	batchSize := int(math.Ceil(float64(len(commits)) / float64(batchCount)))
+	if batchSize < 1 {
+		batchSize = 1
+	}
+
+	p.logger.Info("batch push starting", "total_commits", len(commits), "batch_size", batchSize, "batch_count", batchCount)
+
+	lastSuccessIdx := -1
+	i := batchSize - 1
+
+	for i < len(commits) {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("context canceled: %v", err)
+		}
+
+		sha := commits[i]
+		ref := fmt.Sprintf("%s:refs/heads/%s", sha, branch)
+		_, pushErr := p.runGitCmd(ctx, repoDir, "push", remote, ref)
+
+		if pushErr != nil {
+			if isPushTooLargeError(pushErr.Error()) {
+				if batchSize <= 1 {
+					return fmt.Errorf("single commit exceeds GitHub 2 GiB push limit: %s", sha)
+				}
+				batchSize = batchSize / 2
+				if batchSize < 1 {
+					batchSize = 1
+				}
+				p.logger.Warn("push rejected (payload too large), halving batch size",
+					"new_batch_size", batchSize, "retrying_from", lastSuccessIdx+1)
+				i = lastSuccessIdx + batchSize
+				continue
+			}
+			return fmt.Errorf("pushing batch to %s: %v", remote, pushErr)
+		}
+
+		lastSuccessIdx = i
+		p.logger.Info("batch pushed", "commits", i+1, "total", len(commits))
+		i += batchSize
+	}
+
+	// Push tip of default branch (may be past last batch boundary)
+	p.logger.Info("pushing branch tip", "branch", branch)
+	if _, err := p.runGitCmd(ctx, repoDir, "push", remote, branch); err != nil {
+		return fmt.Errorf("pushing branch tip: %v", err)
+	}
+
+	// Push remaining branches
+	p.logger.Info("pushing all branches")
+	if _, err := p.runGitCmd(ctx, repoDir, "push", "--all", remote); err != nil {
+		return fmt.Errorf("pushing all branches: %v", err)
+	}
+
+	// Push tags
+	p.logger.Info("pushing tags")
+	if _, err := p.runGitCmd(ctx, repoDir, "push", "--tags", remote); err != nil {
+		return fmt.Errorf("pushing tags: %v", err)
+	}
+
+	return nil
 }
 
 // parseToolVersion parses a version string like "git version 2.43.0.windows.1" into [2,43,0].
@@ -294,100 +596,6 @@ func versionAtLeast(ver, min [3]int) bool {
 	return true // equal
 }
 
-// runGitCmd runs a git command, captures output, and logs at DEBUG.
-func runGitCmd(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	logger.Debug("running git command", "args", args, "dir", dir)
-	out, err := cmd.CombinedOutput()
-	result := strings.TrimSpace(string(out))
-	if err != nil {
-		return result, fmt.Errorf("git %s: %v\n%s", strings.Join(args, " "), err, result)
-	}
-	logger.Debug("git command output", "args", args, "output", result)
-	return result, nil
-}
-
-// runGitCmdStreaming runs a git command with stdout/stderr piped to the logger.
-func runGitCmdStreaming(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	logger.Info("running git command", "args", args, "dir", dir)
-
-	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd.Stderr = pw
-
-	if err := cmd.Start(); err != nil {
-		pw.Close()
-		return fmt.Errorf("starting git %s: %v", strings.Join(args, " "), err)
-	}
-
-	// Scan in goroutine so we can close the pipe writer after Wait
-	scanDone := make(chan struct{})
-	go func() {
-		defer close(scanDone)
-		scanner := bufio.NewScanner(pr)
-		for scanner.Scan() {
-			logger.Info("git", "output", scanner.Text())
-		}
-	}()
-
-	err := cmd.Wait()
-	pw.Close() // unblocks scanner
-	<-scanDone // wait for scanner to finish
-
-	if err != nil {
-		return fmt.Errorf("git %s: %v", strings.Join(args, " "), err)
-	}
-	return nil
-}
-
-// runToolCmd runs an arbitrary command, captures output.
-func runToolCmd(ctx context.Context, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	logger.Debug("running command", "name", name, "args", args)
-	out, err := cmd.CombinedOutput()
-	result := strings.TrimSpace(string(out))
-	if err != nil {
-		return result, fmt.Errorf("%s %s: %v\n%s", name, strings.Join(args, " "), err, result)
-	}
-	return result, nil
-}
-
-// prepareClone clones the repository as a mirror. Idempotent: skips if directory exists.
-func prepareClone(ctx context.Context, cloneURL string) (string, error) {
-	// Derive directory name from URL
-	repoDir := repoNameFromURL(cloneURL)
-	if repoDir == "" {
-		return "", fmt.Errorf("cannot derive repository directory name from URL: %s", cloneURL)
-	}
-
-	// Resolve to absolute path so all subsequent operations use a stable path
-	absDir, err := filepath.Abs(repoDir)
-	if err != nil {
-		return "", fmt.Errorf("resolving clone directory path: %v", err)
-	}
-	repoDir = absDir
-
-	// Check if directory already exists (idempotent)
-	if info, err := os.Stat(repoDir); err == nil && info.IsDir() {
-		logger.Info("using existing clone", "dir", repoDir)
-		return repoDir, nil
-	}
-
-	logger.Info("cloning repository", "url", cloneURL, "dir", repoDir)
-	if err := runGitCmdStreaming(ctx, "", "clone", "--mirror", cloneURL, repoDir); err != nil {
-		return "", fmt.Errorf("cloning repository: %v", err)
-	}
-	logger.Info("cloned repository", "dir", repoDir)
-	return repoDir, nil
-}
-
 // repoNameFromURL extracts a directory name like "repo.git" from a clone URL.
 func repoNameFromURL(cloneURL string) string {
 	// Handle both https://host/group/repo.git and git@host:group/repo.git
@@ -409,8 +617,6 @@ func repoNameFromURL(cloneURL string) string {
 
 // scanLargeFiles finds all blobs >100MB in the repository history.
 func scanLargeFiles(ctx context.Context, repoDir string) ([]largeFile, error) {
-	logger.Info("scanning for large files (>100MB)")
-
 	// Use rev-list piped to cat-file
 	revListCmd := exec.CommandContext(ctx, "git", "rev-list", "--objects", "--all")
 	revListCmd.Dir = repoDir
@@ -480,17 +686,6 @@ func scanLargeFiles(ctx context.Context, repoDir string) ([]largeFile, error) {
 	return files, nil
 }
 
-// detectDefaultBranch reads HEAD from a bare/mirror clone.
-func detectDefaultBranch(ctx context.Context, repoDir string) (string, error) {
-	out, err := runGitCmd(ctx, repoDir, "symbolic-ref", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("detecting default branch: %v", err)
-	}
-	// Strip "refs/heads/" prefix
-	branch := strings.TrimPrefix(strings.TrimSpace(out), "refs/heads/")
-	return branch, nil
-}
-
 // estimateRepoSize walks the directory and sums file sizes.
 func estimateRepoSize(repoDir string) (int64, error) {
 	var totalSize int64
@@ -506,39 +701,6 @@ func estimateRepoSize(repoDir string) (int64, error) {
 	return totalSize, err
 }
 
-// removeRemote removes a git remote. Idempotent: no-op if remote doesn't exist.
-func removeRemote(ctx context.Context, repoDir, name string) error {
-	_, err := runGitCmd(ctx, repoDir, "remote", "get-url", name)
-	if err != nil {
-		// Remote doesn't exist, nothing to do
-		logger.Debug("remote does not exist, skipping removal", "remote", name)
-		return nil
-	}
-	logger.Info("removing remote", "remote", name)
-	_, err = runGitCmd(ctx, repoDir, "remote", "remove", name)
-	return err
-}
-
-// addRemote adds a git remote. Idempotent: if remote exists with correct URL, skip; if wrong URL, update.
-func addRemote(ctx context.Context, repoDir, name, url string) error {
-	existingURL, err := runGitCmd(ctx, repoDir, "remote", "get-url", name)
-	if err == nil {
-		// Remote exists
-		if strings.TrimSpace(existingURL) == url {
-			logger.Debug("remote already configured correctly", "remote", name, "url", url)
-			return nil
-		}
-		// Wrong URL, update it
-		logger.Info("updating remote URL", "remote", name, "url", url)
-		_, err = runGitCmd(ctx, repoDir, "remote", "set-url", name, url)
-		return err
-	}
-	// Remote doesn't exist, add it
-	logger.Info("adding remote", "remote", name, "url", url)
-	_, err = runGitCmd(ctx, repoDir, "remote", "add", name, url)
-	return err
-}
-
 // uniquePaths returns deduplicated paths from large files.
 func uniquePaths(files []largeFile) []string {
 	seen := make(map[string]bool)
@@ -550,158 +712,6 @@ func uniquePaths(files []largeFile) []string {
 		}
 	}
 	return result
-}
-
-// executeFilterRepo runs git-filter-repo to remove large files from history.
-func executeFilterRepo(ctx context.Context, repoDir, pythonCmd string, files []largeFile) error {
-	paths := uniquePaths(files)
-	logger.Info("running git-filter-repo", "paths_to_remove", len(paths))
-
-	args := []string{"-m", "git_filter_repo", "--invert-paths", "--force"}
-	for _, p := range paths {
-		args = append(args, "--path", p)
-	}
-
-	cmd := exec.CommandContext(ctx, pythonCmd, args...)
-	cmd.Dir = repoDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("running git-filter-repo: %v", err)
-	}
-	return nil
-}
-
-// executeLFSMigrate runs git lfs fetch --all followed by git lfs migrate import --everything --above=100mb.
-func executeLFSMigrate(ctx context.Context, repoDir string) error {
-	logger.Info("fetching all LFS objects")
-	if err := runGitCmdStreaming(ctx, repoDir, "lfs", "fetch", "--all"); err != nil {
-		return fmt.Errorf("git lfs fetch --all: %v", err)
-	}
-
-	logger.Info("running git lfs migrate import")
-	if err := runGitCmdStreaming(ctx, repoDir, "lfs", "migrate", "import", "--everything", "--above=100mb"); err != nil {
-		return fmt.Errorf("git lfs migrate import: %v", err)
-	}
-	return nil
-}
-
-// executeLFSPush pushes all LFS objects to the remote.
-func executeLFSPush(ctx context.Context, repoDir, remote string) error {
-	logger.Info("pushing LFS objects", "remote", remote)
-	if err := runGitCmdStreaming(ctx, repoDir, "lfs", "push", remote, "--all"); err != nil {
-		return fmt.Errorf("git lfs push: %v", err)
-	}
-	return nil
-}
-
-// pushRepo decides between direct and batch push based on repo size.
-// Returns whether batch push was used and the batch count.
-func pushRepo(ctx context.Context, repoDir, remote, defaultBranch string, batchCount int, repoSize int64) (batched bool, usedBatchCount int, err error) {
-	const batchThreshold = 2 * 1024 * 1024 * 1024 // 2 GiB
-
-	if repoSize <= batchThreshold && batchCount == 0 {
-		logger.Info("repository size under 2 GiB, using direct push", "size_mb", repoSize/1024/1024)
-		return false, 0, directPush(ctx, repoDir, remote)
-	}
-
-	if batchCount != 0 && repoSize <= batchThreshold {
-		logger.Info("batch push forced by -prepare-batch-count override", "size_mb", repoSize/1024/1024, "batch_count", batchCount)
-	}
-
-	// Calculate batch count if not overridden
-	if batchCount == 0 {
-		repoSizeGB := float64(repoSize) / (1024 * 1024 * 1024)
-		batchCount = int(math.Ceil(repoSizeGB * 10))
-		if batchCount < 10 {
-			batchCount = 10
-		}
-	}
-
-	logger.Info("repository size over 2 GiB, using batch push", "size_mb", repoSize/1024/1024, "batch_count", batchCount)
-	return true, batchCount, batchPush(ctx, repoDir, remote, defaultBranch, batchCount)
-}
-
-// directPush performs a git push --mirror.
-func directPush(ctx context.Context, repoDir, remote string) error {
-	return runGitCmdStreaming(ctx, repoDir, "push", "--mirror", remote)
-}
-
-// batchPush pushes commits in batches with adaptive retry on push-too-large errors.
-// NOTE: Only the default branch is batched. Other branches are pushed via "git push --all"
-// in a single operation, which may fail for repos with very large non-default branches.
-func batchPush(ctx context.Context, repoDir, remote, branch string, batchCount int) error {
-	// Get commit list
-	out, err := runGitCmd(ctx, repoDir, "rev-list", "--reverse", "--first-parent", branch)
-	if err != nil {
-		return fmt.Errorf("listing commits: %v", err)
-	}
-
-	commits := strings.Split(strings.TrimSpace(out), "\n")
-	if len(commits) == 0 || (len(commits) == 1 && commits[0] == "") {
-		return fmt.Errorf("no commits found on branch %s (empty repository? use direct push instead of batch)", branch)
-	}
-
-	batchSize := int(math.Ceil(float64(len(commits)) / float64(batchCount)))
-	if batchSize < 1 {
-		batchSize = 1
-	}
-
-	logger.Info("batch push starting", "total_commits", len(commits), "batch_size", batchSize, "batch_count", batchCount)
-
-	lastSuccessIdx := -1
-	i := batchSize - 1
-
-	for i < len(commits) {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("context canceled: %v", err)
-		}
-
-		sha := commits[i]
-		ref := fmt.Sprintf("%s:refs/heads/%s", sha, branch)
-		_, pushErr := runGitCmd(ctx, repoDir, "push", remote, ref)
-
-		if pushErr != nil {
-			if isPushTooLargeError(pushErr.Error()) {
-				if batchSize <= 1 {
-					return fmt.Errorf("single commit exceeds GitHub 2 GiB push limit: %s", sha)
-				}
-				batchSize = batchSize / 2
-				if batchSize < 1 {
-					batchSize = 1
-				}
-				logger.Warn("push rejected (payload too large), halving batch size",
-					"new_batch_size", batchSize, "retrying_from", lastSuccessIdx+1)
-				i = lastSuccessIdx + batchSize
-				continue
-			}
-			return fmt.Errorf("pushing batch to %s: %v", remote, pushErr)
-		}
-
-		lastSuccessIdx = i
-		logger.Info("batch pushed", "commits", i+1, "total", len(commits))
-		i += batchSize
-	}
-
-	// Push tip of default branch (may be past last batch boundary)
-	logger.Info("pushing branch tip", "branch", branch)
-	if _, err := runGitCmd(ctx, repoDir, "push", remote, branch); err != nil {
-		return fmt.Errorf("pushing branch tip: %v", err)
-	}
-
-	// Push remaining branches
-	logger.Info("pushing all branches")
-	if _, err := runGitCmd(ctx, repoDir, "push", "--all", remote); err != nil {
-		return fmt.Errorf("pushing all branches: %v", err)
-	}
-
-	// Push tags
-	logger.Info("pushing tags")
-	if _, err := runGitCmd(ctx, repoDir, "push", "--tags", remote); err != nil {
-		return fmt.Errorf("pushing tags: %v", err)
-	}
-
-	return nil
 }
 
 // isAllowedCloneURL validates that a clone URL uses https:// or git@ SSH format.
