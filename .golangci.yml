@@ -8,6 +8,5 @@ linters:
         linters:
           - staticcheck
         text: "SA1019"
-        path: "internal/clients/gitlab\\.go"
 
 # vim: set ts=2 sts=2 sw=2 et:
