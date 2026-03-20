@@ -1,3 +1,5 @@
+version: "2"
+
 issues:
   exclude-rules:
     - # gogitlab (go-gitlab) uses deprecated Client/NewClient; full migration to
