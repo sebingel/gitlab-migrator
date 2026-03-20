@@ -19,15 +19,15 @@ func ParseProjectSlugs(slugs []string) (gitlabPath []string, githubPath []string
 	}
 
 	delimPosition := strings.LastIndex(slugs[0], "/")
+	if delimPosition < 0 {
+		return nil, nil, fmt.Errorf("invalid GitLab project: %s", slugs[0])
+	}
 	gitlabPath = []string{
 		slugs[0][:delimPosition],
 		slugs[0][delimPosition+1:],
 	}
 	githubPath = strings.Split(slugs[1], "/")
 
-	if len(gitlabPath) != 2 {
-		return nil, nil, fmt.Errorf("invalid GitLab project: %s", slugs[0])
-	}
 	if len(githubPath) != 2 {
 		return nil, nil, fmt.Errorf("invalid GitHub project: %s", slugs[1])
 	}
