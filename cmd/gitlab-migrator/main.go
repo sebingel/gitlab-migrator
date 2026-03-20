@@ -4,41 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/gofri/go-github-pagination/githubpagination"
 	gogithub "github.com/google/go-github/v84/github"
-	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-retryablehttp"
-	gogitlab "github.com/xanzy/go-gitlab"
 
-	"github.com/manicminer/gitlab-migrator/internal/cache"
 	"github.com/manicminer/gitlab-migrator/internal/config"
-	ghclient "github.com/manicminer/gitlab-migrator/internal/github"
 	"github.com/manicminer/gitlab-migrator/internal/migration"
 )
 
 var version = "development"
-
-// GitHubError is the error body returned by the GitHub API.
-type GitHubError struct {
-	Message          string
-	DocumentationURL string `json:"documentation_url"`
-}
 
 func createLogWriter(logOutput, logDirectory, sessionID string) (io.Writer, *os.File, error) {
 	if logOutput == "" {
@@ -125,56 +109,8 @@ func createLogWriter(logOutput, logDirectory, sessionID string) (io.Writer, *os.
 	return os.Stderr, nil, nil
 }
 
-func unmarshalResp(resp *http.Response, model interface{}) error {
-	if resp == nil {
-		return nil
-	}
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("parsing response body: %+v", err)
-	}
-	_ = resp.Body.Close()
-
-	respBody = bytes.TrimPrefix(respBody, []byte("\xef\xbb\xbf"))
-
-	if len(respBody) == 0 {
-		return nil
-	}
-
-	if err := json.Unmarshal(respBody, model); err != nil {
-		return fmt.Errorf("unmarshaling response body: %+v", err)
-	}
-
-	resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
-
-	return nil
-}
-
-func roundDuration(d, r time.Duration) time.Duration {
-	if r <= 0 {
-		return d
-	}
-	neg := d < 0
-	if neg {
-		d = -d
-	}
-	if m := d % r; m+m < r {
-		d = d - m
-	} else {
-		d = d + r - m
-	}
-	if neg {
-		return -d
-	}
-	return d
-}
-
 func main() {
 	var err error
-
-	// secondaryRateLimitPattern detects GitHub secondary rate limit error messages.
-	secondaryRateLimitPattern := regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
 
 	valueCtx := context.WithValue(context.Background(), gogithub.BypassRateLimitCheck, true)
 
@@ -269,8 +205,6 @@ func main() {
 		Output: logWriter,
 	})
 
-	objectCache := cache.NewObjectCache()
-
 	// Handle prepare mode early — no API tokens needed
 	if cfg.PrepareMode {
 		if err := cfg.ValidatePrepare(); err != nil {
@@ -332,195 +266,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	retryClient := &retryablehttp.Client{
-		HTTPClient:   cleanhttp.DefaultPooledClient(),
-		Logger:       nil,
-		RetryMax:     15,
-		RetryWaitMin: 30 * time.Second,
-		RetryWaitMax: 900 * time.Second,
-	}
-
-	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
-		}
-
-		defer func() {
-			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
-		}()
-
-		if resp != nil {
-			var errResp GitHubError
-
-			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-				_ = unmarshalResp(resp, &errResp)
-			}
-
-			isSecondaryLimit := secondaryRateLimitPattern.MatchString(errResp.Message)
-
-			if s, ok := resp.Header["Retry-After"]; ok {
-				if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
-					sleep = time.Second * time.Duration(retryAfter)
-					return
-				}
-			}
-
-			if isSecondaryLimit {
-				baseWait := 120 * time.Second
-				mult := math.Pow(2, float64(attemptNum))
-				sleep = time.Duration(float64(baseWait) * mult)
-				if sleep > max {
-					sleep = max
-				}
-
-				jitterPercent := rand.Float64() * 0.4
-				jitter := time.Duration(jitterPercent * float64(sleep))
-				sleep += jitter
-
-				jitteredMax := max + time.Duration(rand.Float64()*0.4*float64(max))
-				if sleep > jitteredMax {
-					sleep = jitteredMax
-				}
-
-				message := errResp.Message
-				if message == "" {
-					message = "(unable to parse error response)"
-				}
-
-				logger.Info("waiting for secondary rate limit recovery",
-					"wait_duration", sleep,
-					"attempt", attemptNum,
-					"message", message)
-				return
-			}
-
-			if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
-				if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
-
-					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
-						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-							sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+30, 0)), time.Second)
-							return
-						}
-					}
-
-					sleep = 60 * time.Second
-					return
-				}
-			}
-		}
-
-		mult := math.Pow(2, float64(attemptNum)) * float64(min)
-		wait := time.Duration(mult)
-		if float64(wait) != mult || wait > max {
-			wait = max
-		}
-
-		sleep = wait
-		return
-	}
-
-	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-		if err != nil {
-			return false, err
-		}
-
-		if resp == nil {
-			return true, nil
-		}
-
-		errResp := GitHubError{}
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			if err = unmarshalResp(resp, &errResp); err != nil {
-				return false, err
-			}
-		}
-
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
-		}
-
-		if resp.StatusCode == http.StatusForbidden {
-			if match, err := regexp.MatchString("SAML enforcement", errResp.Message); err != nil {
-				return false, fmt.Errorf("matching 403 response: %v", err)
-			} else if match {
-				msg := errResp.Message
-				if errResp.DocumentationURL != "" {
-					msg += fmt.Sprintf(" - %s", errResp.DocumentationURL)
-				}
-				return false, fmt.Errorf("received 403 with response: %v", msg)
-			}
-
-			if secondaryRateLimitPattern.MatchString(errResp.Message) {
-				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
-					"message", errResp.Message,
-					"method", requestMethod,
-					"url", requestUrl)
-				return true, nil
-			}
-		}
-
-		retryableStatuses := []int{
-			http.StatusTooManyRequests,
-			http.StatusForbidden,
-			http.StatusRequestTimeout,
-			http.StatusFailedDependency,
-			http.StatusInternalServerError,
-			http.StatusBadGateway,
-			http.StatusServiceUnavailable,
-			http.StatusGatewayTimeout,
-		}
-
-		for _, status := range retryableStatuses {
-			if resp.StatusCode == status {
-				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "message", errResp.Message)
-				return true, nil
-			}
-		}
-
-		return false, nil
-	}
-
-	transport := &ghclient.SearchModder{
-		Base: &retryablehttp.RoundTripper{Client: retryClient},
-	}
-	client := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
-
-	var gh *gogithub.Client
-	if cfg.GithubDomain == config.DefaultGithubDomain {
-		gh = gogithub.NewClient(client).WithAuthToken(cfg.GithubToken)
-	} else {
-		githubUrl := fmt.Sprintf("https://%s", cfg.GithubDomain)
-		if gh, err = gogithub.NewClient(client).WithAuthToken(cfg.GithubToken).WithEnterpriseURLs(githubUrl, githubUrl); err != nil {
-			logger.Error(err.Error())
-			os.Exit(1)
-		}
-	}
-
-	gitlabOpts := make([]gogitlab.ClientOptionFunc, 0)
-	if cfg.GitlabDomain != config.DefaultGitlabDomain {
-		gitlabUrl := fmt.Sprintf("https://%s", cfg.GitlabDomain)
-		gitlabOpts = append(gitlabOpts, gogitlab.WithBaseURL(gitlabUrl))
-	}
-	var gl *gogitlab.Client
-	if gl, err = gogitlab.NewClient(cfg.GitlabToken, gitlabOpts...); err != nil {
+	app, err := NewApp(cfg, logger)
+	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
-
-	migrator := migration.NewMigrator(cfg, gh, gl, objectCache, logger)
 
 	projects := make([]migration.CSVRow, 0)
 	if cfg.ProjectsCsvPath != "" {
@@ -541,13 +291,13 @@ func main() {
 	}
 
 	if cfg.Report {
-		migrator.PrintReport(ctx, projects)
+		app.RunReport(ctx, projects)
 	} else {
-		if err = migrator.PerformMigration(ctx, projects, collector, sessionID); err != nil {
+		if err = app.Run(ctx, projects, collector, sessionID); err != nil {
 			logger.Error(err.Error())
 			os.Exit(1)
-		} else if migrator.ErrCount() > 0 {
-			logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", migrator.ErrCount()))
+		} else if app.ErrCount() > 0 {
+			logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", app.ErrCount()))
 			os.Exit(1)
 		}
 	}
