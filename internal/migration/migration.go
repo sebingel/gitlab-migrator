@@ -29,8 +29,8 @@ type Migrator struct {
 	GL       *gogitlab.Client
 	Cache    *cache.ObjectCache
 	Logger   hclog.Logger
-	GHClient *ghclient.Client
-	GLClient *glclient.Client
+	GHClient ghclient.Client
+	GLClient glclient.Client
 
 	errCount int32 // accessed atomically
 }

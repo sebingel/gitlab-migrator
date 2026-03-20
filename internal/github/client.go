@@ -11,25 +11,28 @@ import (
 	"github.com/manicminer/gitlab-migrator/internal/cache"
 )
 
-// Client wraps the GitHub API client with caching support.
-type Client struct {
+// Client is the interface for the GitHub API client wrapper.
+type Client interface {
+	GetBranches(ctx context.Context, owner, repo string) ([]*gogithub.Branch, error)
+	GetPullRequest(ctx context.Context, org, repo string, prNumber int) (*gogithub.PullRequest, error)
+	GetSearchResults(ctx context.Context, query string) (*gogithub.IssuesSearchResult, error)
+	GetUser(ctx context.Context, username string) (*gogithub.User, error)
+}
+
+// client is the concrete implementation of Client.
+type client struct {
 	gh     *gogithub.Client
 	cache  *cache.ObjectCache
 	logger hclog.Logger
 }
 
 // NewClient creates a new GitHub client wrapper.
-func NewClient(gh *gogithub.Client, c *cache.ObjectCache, logger hclog.Logger) *Client {
-	return &Client{gh: gh, cache: c, logger: logger}
-}
-
-// Raw returns the underlying GitHub API client for direct API access.
-func (c *Client) Raw() *gogithub.Client {
-	return c.gh
+func NewClient(gh *gogithub.Client, c *cache.ObjectCache, logger hclog.Logger) Client {
+	return &client{gh: gh, cache: c, logger: logger}
 }
 
 // GetBranches returns the branches for a GitHub repository, using the cache.
-func (c *Client) GetBranches(ctx context.Context, owner, repo string) ([]*gogithub.Branch, error) {
+func (c *client) GetBranches(ctx context.Context, owner, repo string) ([]*gogithub.Branch, error) {
 	cacheToken := fmt.Sprintf("%s/%s", owner, repo)
 	result := c.cache.GetGithubBranches(cacheToken)
 	if result == nil {
@@ -49,7 +52,7 @@ func (c *Client) GetBranches(ctx context.Context, owner, repo string) ([]*gogith
 }
 
 // GetPullRequest returns a GitHub pull request, using the cache.
-func (c *Client) GetPullRequest(ctx context.Context, org, repo string, prNumber int) (*gogithub.PullRequest, error) {
+func (c *client) GetPullRequest(ctx context.Context, org, repo string, prNumber int) (*gogithub.PullRequest, error) {
 	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
 	pullRequest := c.cache.GetGithubPullRequest(cacheToken)
 	if pullRequest == nil {
@@ -69,7 +72,7 @@ func (c *Client) GetPullRequest(ctx context.Context, org, repo string, prNumber 
 }
 
 // GetSearchResults returns GitHub issue search results, using the cache.
-func (c *Client) GetSearchResults(ctx context.Context, query string) (*gogithub.IssuesSearchResult, error) {
+func (c *client) GetSearchResults(ctx context.Context, query string) (*gogithub.IssuesSearchResult, error) {
 	result := c.cache.GetGithubSearchResults(query)
 	if result == nil {
 		c.logger.Debug("performing search", "query", query)
@@ -88,7 +91,7 @@ func (c *Client) GetSearchResults(ctx context.Context, query string) (*gogithub.
 }
 
 // GetUser returns a GitHub user, using the cache.
-func (c *Client) GetUser(ctx context.Context, username string) (*gogithub.User, error) {
+func (c *client) GetUser(ctx context.Context, username string) (*gogithub.User, error) {
 	user := c.cache.GetGithubUser(username)
 	if user == nil {
 		c.logger.Debug("retrieving user details", "username", username)

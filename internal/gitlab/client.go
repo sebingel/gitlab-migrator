@@ -9,25 +9,25 @@ import (
 	"github.com/manicminer/gitlab-migrator/internal/cache"
 )
 
-// Client wraps the GitLab API client with caching support.
-type Client struct {
+// Client is the interface for the GitLab API client wrapper.
+type Client interface {
+	GetUser(username string) (*gogitlab.User, error)
+}
+
+// client is the concrete implementation of Client.
+type client struct {
 	gl     *gogitlab.Client
 	cache  *cache.ObjectCache
 	logger hclog.Logger
 }
 
 // NewClient creates a new GitLab client wrapper.
-func NewClient(gl *gogitlab.Client, c *cache.ObjectCache, logger hclog.Logger) *Client {
-	return &Client{gl: gl, cache: c, logger: logger}
-}
-
-// Raw returns the underlying GitLab API client for direct API access.
-func (c *Client) Raw() *gogitlab.Client {
-	return c.gl
+func NewClient(gl *gogitlab.Client, c *cache.ObjectCache, logger hclog.Logger) Client {
+	return &client{gl: gl, cache: c, logger: logger}
 }
 
 // GetUser returns a GitLab user by username, using the cache.
-func (c *Client) GetUser(username string) (*gogitlab.User, error) {
+func (c *client) GetUser(username string) (*gogitlab.User, error) {
 	user := c.cache.GetGitlabUser(username)
 	if user == nil {
 		c.logger.Debug("retrieving user details", "username", username)
