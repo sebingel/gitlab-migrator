@@ -65,7 +65,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 		concurrency = len(projects)
 	}
 
-	m.logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), concurrency))
+	m.logger.Info("processing project(s)", "count", len(projects), "workers", concurrency)
 
 	var wg sync.WaitGroup
 	queue := make(chan CSVRow, concurrency*2)
