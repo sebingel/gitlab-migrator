@@ -32,9 +32,12 @@ type Config struct {
 	GithubDomain string `json:"github_domain,omitempty"`
 	GitlabDomain string `json:"gitlab_domain,omitempty"`
 
-	// Auth (prefer environment variables; config file support provided for convenience)
-	GithubToken string `json:"github_token,omitempty"`
-	GitlabToken string `json:"gitlab_token,omitempty"`
+	// GithubToken and GitlabToken must be supplied via the GITHUB_TOKEN and
+	// GITLAB_TOKEN environment variables respectively. They are intentionally
+	// excluded from JSON config file support to avoid plaintext credentials in
+	// configuration files that may be committed to version control.
+	GithubToken string `json:"-"`
+	GitlabToken string `json:"-"`
 
 	// Project targets
 	GithubRepo      string `json:"github_repo,omitempty"`
@@ -74,11 +77,26 @@ type Config struct {
 // LoadFile reads configuration from a JSON file, merging values into c.
 // Fields present in the file override the current values in c.
 // Fields absent from the file are left unchanged.
+//
+// Token fields (github_token, gitlab_token) are rejected if found in the
+// config file. Tokens must be supplied via environment variables only.
 func (c *Config) LoadFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading config file %q: %w", path, err)
 	}
+
+	// Reject token fields in config files to prevent plaintext credential storage.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err == nil {
+		if _, found := raw["github_token"]; found {
+			return fmt.Errorf("config file %q must not contain \"github_token\": use the GITHUB_TOKEN environment variable instead", path)
+		}
+		if _, found := raw["gitlab_token"]; found {
+			return fmt.Errorf("config file %q must not contain \"gitlab_token\": use the GITLAB_TOKEN environment variable instead", path)
+		}
+	}
+
 	if err := json.Unmarshal(data, c); err != nil {
 		return fmt.Errorf("parsing config file %q: %w", path, err)
 	}
