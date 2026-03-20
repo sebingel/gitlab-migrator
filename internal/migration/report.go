@@ -251,11 +251,14 @@ func PrintSummaryToConsole(report *MigrationReport) {
 		report.TotalProjects, report.SuccessProjects, report.FailedProjects, report.PartialProjects)
 
 	for _, proj := range report.Projects {
-		statusSymbol := "✓"
-		if proj.Status == StatusFailed {
+		var statusSymbol string
+		switch proj.Status {
+		case StatusFailed:
 			statusSymbol = "✗"
-		} else if proj.Status == StatusPartial {
+		case StatusPartial:
 			statusSymbol = "⚠"
+		default:
+			statusSymbol = "✓"
 		}
 
 		fmt.Printf("%s %s/%s → %s/%s\n",

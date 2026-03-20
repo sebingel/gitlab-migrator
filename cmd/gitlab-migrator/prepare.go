@@ -301,7 +301,7 @@ func (p *preparer) runGitCmdStreaming(ctx context.Context, dir string, args ...s
 	cmd.Stderr = pw
 
 	if err := cmd.Start(); err != nil {
-		pw.Close()
+		pw.Close() //nolint:errcheck // pipe close error is not actionable when start already failed
 		return fmt.Errorf("starting git %s: %v", strings.Join(args, " "), err)
 	}
 
@@ -316,7 +316,7 @@ func (p *preparer) runGitCmdStreaming(ctx context.Context, dir string, args ...s
 	}()
 
 	err := cmd.Wait()
-	pw.Close() // unblocks scanner
+	pw.Close() //nolint:errcheck // pipe close unblocks scanner goroutine; error not actionable here
 	<-scanDone // wait for scanner to finish
 
 	if err != nil {

@@ -1,0 +1,10 @@
+issues:
+  exclude-rules:
+    - # gogitlab (go-gitlab) uses deprecated Client/NewClient; full migration to
+      # gitlab.com/gitlab-org/api/client-go is a separate task (see gm-3hc)
+      linters:
+        - staticcheck
+      text: "SA1019"
+      path: "internal/clients/gitlab\\.go"
+
+# vim: set ts=2 sts=2 sw=2 et:

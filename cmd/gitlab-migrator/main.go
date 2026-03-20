@@ -197,7 +197,7 @@ func main() {
 	}
 
 	if logFileHandle != nil {
-		defer logFileHandle.Close()
+		defer logFileHandle.Close() //nolint:errcheck // log file close errors are not actionable at shutdown
 	}
 
 	logger := hclog.New(&hclog.LoggerOptions{
@@ -273,7 +273,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	projects := make([]migration.CSVRow, 0)
+	var projects []migration.CSVRow
 	if cfg.ProjectsCsvPath != "" {
 		data, err := os.ReadFile(cfg.ProjectsCsvPath)
 		if err != nil {
