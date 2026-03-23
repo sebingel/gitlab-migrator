@@ -20,9 +20,9 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	gogitlab "github.com/xanzy/go-gitlab"
 
-	"github.com/manicminer/gitlab-migrator/internal/clients"
-	"github.com/manicminer/gitlab-migrator/internal/config"
-	"github.com/manicminer/gitlab-migrator/internal/migration"
+	"github.com/sebingel/gitlab-migrator/internal/clients"
+	"github.com/sebingel/gitlab-migrator/internal/config"
+	"github.com/sebingel/gitlab-migrator/internal/migration"
 )
 
 // GitHubError is the error body returned by the GitHub API.

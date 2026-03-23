@@ -19,8 +19,8 @@ import (
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 
-	"github.com/manicminer/gitlab-migrator/internal/config"
-	"github.com/manicminer/gitlab-migrator/internal/migration"
+	"github.com/sebingel/gitlab-migrator/internal/config"
+	"github.com/sebingel/gitlab-migrator/internal/migration"
 )
 
 var version = "development"

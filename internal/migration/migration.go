@@ -12,8 +12,8 @@ import (
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	gogitlab "github.com/xanzy/go-gitlab"
-	"github.com/manicminer/gitlab-migrator/internal/clients"
-	"github.com/manicminer/gitlab-migrator/internal/config"
+	"github.com/sebingel/gitlab-migrator/internal/clients"
+	"github.com/sebingel/gitlab-migrator/internal/config"
 )
 
 // MigrationPartialError is returned when migration completes but some projects had errors.

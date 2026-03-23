@@ -29,7 +29,7 @@ import (
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	gogitlab "github.com/xanzy/go-gitlab"
-	"github.com/manicminer/gitlab-migrator/internal/config"
+	"github.com/sebingel/gitlab-migrator/internal/config"
 )
 
 // project holds the state for a single project migration.
