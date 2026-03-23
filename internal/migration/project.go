@@ -800,14 +800,17 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		mergeRequest.TargetBranch = p.defaultBranch
 	}
 
-	githubAuthorName := mergeRequest.Author.Name
+	githubAuthorName := "Unknown Author"
+	if mergeRequest.Author != nil {
+		githubAuthorName = mergeRequest.Author.Name
 
-	author, err := p.m.glClient.GetUser(mergeRequest.Author.Username)
-	if err != nil {
-		return result, fmt.Errorf("retrieving gitlab user: %w", err)
-	}
-	if author.WebsiteURL != "" {
-		githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.WebsiteURL), "https://github.com/")
+		author, err := p.m.glClient.GetUser(mergeRequest.Author.Username)
+		if err != nil {
+			return result, fmt.Errorf("retrieving gitlab user: %w", err)
+		}
+		if author.WebsiteURL != "" {
+			githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.WebsiteURL), "https://github.com/")
+		}
 	}
 
 	originalState := ""
@@ -983,6 +986,11 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 		for _, comment := range comments {
 			if comment == nil || comment.System {
+				continue
+			}
+
+			if comment.Author.Username == "" {
+				p.log.Warn("skipping comment with unknown author", "comment_id", comment.ID)
 				continue
 			}
 
