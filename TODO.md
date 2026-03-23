@@ -33,3 +33,25 @@
 **Decision:** Document for future consideration, prioritize fixing actual bugs.
 
 **Estimated Effort:** 2-3 hours (implementation + testing)
+
+## Migrate go-gitlab Dependency
+
+**Current:** `github.com/xanzy/go-gitlab` (deprecated)
+**Target:** `gitlab.com/gitlab-org/api/client-go`
+
+**Why:**
+- `go-gitlab` is deprecated and no longer maintained
+- staticcheck SA1019 warnings suppressed via `.golangci.yml` as workaround
+
+**Why Easy Now:**
+- The refactoring introduced the `GitLabClient` interface
+- Concrete implementation is isolated in `internal/clients/gitlab.go`
+- Only that file and the client constructor in `cmd/gitlab-migrator/app.go` need to change
+
+**Scope:**
+- Update `go.mod` / `go.sum`
+- Adapt `internal/clients/gitlab.go` to new API
+- Adapt `cmd/gitlab-migrator/app.go` client constructor
+- Remove SA1019 suppression from `.golangci.yml`
+
+**Estimated Effort:** 2-4 hours
