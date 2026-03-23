@@ -221,7 +221,7 @@ func (m *Migrator) PrintReport(ctx context.Context, projects []CSVRow) {
 	totalMergeRequests := 0
 	for _, result := range results {
 		totalMergeRequests += result.MergeRequestsCount
-		fmt.Printf("%#v\n", result)
+		fmt.Printf("%s/%s: %d merge requests\n", result.GroupName, result.ProjectName, result.MergeRequestsCount)
 	}
 
 	fmt.Println()
