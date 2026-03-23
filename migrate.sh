@@ -57,9 +57,20 @@ arguments+=("-detailed-report")
 arguments+=("-no-force")
 # arguments+=("-push-batch-size" "100")
 # arguments+=("-skip-open-merge-requests")
+# arguments+=("-pull-requests-only")
 # arguments+=("-report")
 # arguments+=("-rename-trunk-branch" "main")
+# arguments+=("-config" "migration.json")
 # arguments+=("-version")
+
+# Prepare mode (standalone, incompatible with normal migration flags)
+# arguments=(
+#     "-prepare"
+#     "-prepare-clone-url" "https://gitlab.example.com/group/repo.git"
+#     "-prepare-target-url" "https://github.com/org/repo.git"
+# )
+# arguments+=("-prepare-large-files" "remove")  # or "lfs"
+# arguments+=("-prepare-batch-count" "10")
 
 # Display configuration
 echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"

@@ -35,7 +35,7 @@ $arguments = @(
     "-projects-csv", $ProjectsCsv,
 #     "-migrate-pull-requests",
     "-skip-invalid-merge-requests",
-    "-trim-branches-on-github",
+#     "-trim-branches-on-github",
     "-log-output", "console,file"
 )
 
@@ -55,10 +55,21 @@ $arguments += "-detailed-report"
 # $arguments += "-storage-dir", "C:\temp\migration"
 $arguments += "-no-force"
 # $arguments += "-push-batch-size", "100"
-# $arguments += "-skip-open-merge-requests"
+$arguments += "-skip-open-merge-requests"
+$arguments += "-pull-requests-only"
 # $arguments += "-report"
 # $arguments += "-rename-trunk-branch", "main"
+# $arguments += "-config", "migration.json"
 # $arguments += "-version"
+
+# Prepare mode (standalone, incompatible with normal migration flags)
+# $arguments = @(
+#     "-prepare",
+#     "-prepare-clone-url", "https://gitlab.example.com/group/repo.git",
+#     "-prepare-target-url", "https://github.com/org/repo.git"
+# )
+# $arguments += "-prepare-large-files", "remove"  # or "lfs"
+# $arguments += "-prepare-batch-count", "10"
 
 # Display configuration
 Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
