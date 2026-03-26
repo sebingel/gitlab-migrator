@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofri/go-github-pagination/githubpagination"
@@ -103,6 +106,18 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 	}
 
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
+		if resp == nil {
+			mult := math.Pow(2, float64(attemptNum)) * float64(min)
+			wait := time.Duration(mult)
+			if float64(wait) != mult || wait > max {
+				wait = max
+			}
+			jitter := time.Duration(rand.Float64() * 0.2 * float64(wait))
+			wait += jitter
+			logger.Trace("waiting before retrying after network error", "sleep", wait, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
+			return wait
+		}
+
 		requestMethod := "unknown"
 		requestUrl := "unknown"
 
@@ -117,63 +132,61 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
 		}()
 
-		if resp != nil {
-			var errResp GitHubError
+		var errResp GitHubError
 
-			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-				_ = unmarshalResp(resp, &errResp)
-			}
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			_ = unmarshalResp(resp, &errResp)
+		}
 
-			isSecondaryLimit := secondaryRateLimitPattern.MatchString(errResp.Message)
+		isSecondaryLimit := secondaryRateLimitPattern.MatchString(errResp.Message)
 
-			if s, ok := resp.Header["Retry-After"]; ok {
-				if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
-					sleep = time.Second * time.Duration(retryAfter)
-					return
-				}
-			}
-
-			if isSecondaryLimit {
-				baseWait := 120 * time.Second
-				mult := math.Pow(2, float64(attemptNum))
-				sleep = time.Duration(float64(baseWait) * mult)
-				if sleep > max {
-					sleep = max
-				}
-
-				jitterPercent := rand.Float64() * 0.4
-				jitter := time.Duration(jitterPercent * float64(sleep))
-				sleep += jitter
-
-				jitteredMax := max + time.Duration(rand.Float64()*0.4*float64(max))
-				if sleep > jitteredMax {
-					sleep = jitteredMax
-				}
-
-				message := errResp.Message
-				if message == "" {
-					message = "(unable to parse error response)"
-				}
-
-				logger.Info("waiting for secondary rate limit recovery",
-					"wait_duration", sleep,
-					"attempt", attemptNum,
-					"message", message)
+		if s, ok := resp.Header["Retry-After"]; ok {
+			if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
+				sleep = time.Second * time.Duration(retryAfter)
 				return
 			}
+		}
 
-			if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
-				if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
-					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
-						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-							sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+30, 0)), time.Second)
-							return
-						}
+		if isSecondaryLimit {
+			baseWait := 120 * time.Second
+			mult := math.Pow(2, float64(attemptNum))
+			sleep = time.Duration(float64(baseWait) * mult)
+			if sleep > max {
+				sleep = max
+			}
+
+			jitterPercent := rand.Float64() * 0.4
+			jitter := time.Duration(jitterPercent * float64(sleep))
+			sleep += jitter
+
+			jitteredMax := max + time.Duration(rand.Float64()*0.4*float64(max))
+			if sleep > jitteredMax {
+				sleep = jitteredMax
+			}
+
+			message := errResp.Message
+			if message == "" {
+				message = "(unable to parse error response)"
+			}
+
+			logger.Info("waiting for secondary rate limit recovery",
+				"wait_duration", sleep,
+				"attempt", attemptNum,
+				"message", message)
+			return
+		}
+
+		if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
+			if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
+				if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
+					if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
+						sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+30, 0)), time.Second)
+						return
 					}
-
-					sleep = 60 * time.Second
-					return
 				}
+
+				sleep = 60 * time.Second
+				return
 			}
 		}
 
@@ -189,6 +202,13 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
 		if err != nil {
+			if ctx.Err() != nil {
+				return false, err
+			}
+			if isTransientNetworkError(err) {
+				logger.Warn("transient network error - will retry", "error", err.Error())
+				return true, nil
+			}
 			return false, err
 		}
 
@@ -255,6 +275,43 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 	}
 
 	return retryClient
+}
+
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Concrete type checks where possible
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		opMsg := strings.ToLower(opErr.Error())
+		if strings.Contains(opMsg, "connection reset") || strings.Contains(opMsg, "broken pipe") {
+			return true
+		}
+	}
+
+	// String matching for HTTP/2-specific errors where no concrete type is exported by Go.
+	// These patterns are based on Go 1.25 net/http2 error strings and may break on major updates.
+	msg := strings.ToLower(err.Error())
+	transientPatterns := []string{
+		"stream error",
+		"goaway",
+		"use of closed network connection",
+		"tls handshake timeout",
+	}
+
+	for _, pattern := range transientPatterns {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func unmarshalResp(resp *http.Response, model interface{}) error {
