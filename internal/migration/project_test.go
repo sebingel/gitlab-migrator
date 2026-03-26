@@ -163,9 +163,9 @@ func TestIsSearchSyntaxError(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "422 with syntax in message",
+			name: "422 with syntax in message but no search is invalid",
 			err:  makeGitHubError(http.StatusUnprocessableEntity, "Query syntax error at position 42", nil),
-			want: true,
+			want: false,
 		},
 		{
 			name: "422 with unrelated message",
@@ -185,18 +185,18 @@ func TestIsSearchSyntaxError(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "422 with Validation Failed + syntax in nested error",
+			name: "422 with Validation Failed + syntax in nested error but no search is invalid",
 			err: makeGitHubError(http.StatusUnprocessableEntity, "Validation Failed", []gogithub.Error{
 				{Message: "Query syntax error at position 42"},
 			}),
-			want: true,
+			want: false,
 		},
 		{
-			name: "422 with mixed-case Invalid Syntax in nested error",
+			name: "422 with mixed-case Invalid Syntax in nested error but no search is invalid",
 			err: makeGitHubError(http.StatusUnprocessableEntity, "Validation Failed", []gogithub.Error{
 				{Message: "The search query has Invalid Syntax"},
 			}),
-			want: true,
+			want: false,
 		},
 		{
 			name: "422 with Validation Failed + unrelated nested error",

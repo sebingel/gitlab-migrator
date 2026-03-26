@@ -302,7 +302,6 @@ func isTransientNetworkError(err error) bool {
 		"stream error",
 		"goaway",
 		"use of closed network connection",
-		"connection refused",
 		"tls handshake timeout",
 	}
 
