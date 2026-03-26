@@ -894,7 +894,13 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			MaintainerCanModify: Pointer(true),
 			Draft:               &mergeRequest.Draft,
 		}
-		if pullRequest, _, err = p.m.gh.PullRequests.Create(ctx, p.githubPath[0], p.githubPath[1], &newPullRequest); err != nil {
+		// Closure writes to outer pullRequest — on retry, only the last successful value is used.
+		err = p.retryOnNotFound(ctx, "creating pull request", func() error {
+			var createErr error
+			pullRequest, _, createErr = p.m.gh.PullRequests.Create(ctx, p.githubPath[0], p.githubPath[1], &newPullRequest)
+			return createErr
+		})
+		if err != nil {
 			if strings.Contains(err.Error(), "No commits between") {
 				p.log.Debug("skipping merge request as the change is already present in trunk branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
 				result.Status = StatusSkipped
@@ -910,7 +916,16 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			p.log.Debug("closing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
 
 			pullRequest.State = Pointer("closed")
-			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+			prNumber := pullRequest.GetNumber()
+			editReq := pullRequest // capture before closure may nil pullRequest
+			// Closure writes to outer pullRequest — inputs are captured separately so a failed
+			// attempt (which nils pullRequest) does not corrupt the retry.
+			err = p.retryOnNotFound(ctx, "closing pull request", func() error {
+				var editErr error
+				pullRequest, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], prNumber, editReq)
+				return editErr
+			})
+			if err != nil {
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
 		}
@@ -930,6 +945,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				State:  newState,
 			}
 
+			// No retry: PR was found via search, repo is fully propagated at this point.
 			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
 				return result, fmt.Errorf("updating pull request state: %w", err)
 			}
@@ -1097,10 +1113,13 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	startShortID := commits[0].ShortID
 	endShortID := commits[len(commits)-1].ShortID
 
+	// No retry on GetCommit: a 404 here means the commit genuinely does not exist on GitHub
+	// (e.g. force-pushed away), not an eventual-consistency delay. The mirror push completes
+	// before we reach this point, so git objects are already available.
 	p.log.Trace("inspecting start commit via GitHub API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", startShortID)
-	startCommit, resp, err := p.m.gh.Git.GetCommit(ctx, owner, repo, commits[0].ID)
+	startCommit, _, err := p.m.gh.Git.GetCommit(ctx, owner, repo, commits[0].ID)
 	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
+		if isGitHubNotFound(err) {
 			if p.m.cfg.SkipInvalidMergeRequests {
 				p.log.Info("skipping invalid merge request as start commit does not exist on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "missing_commit", startShortID)
 				result.Status = StatusSkipped
@@ -1123,16 +1142,24 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 
 	parentSHA := startCommit.Parents[0].GetSHA()
 	p.log.Trace("creating target branch for merged/closed merge request via API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.TargetBranch, "sha", parentSHA)
-	if _, _, err = p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA}); err != nil {
-		if !isAlreadyExistsError(err) {
+	// Retry: GitHub's references layer may lag behind the object store — CreateRef can
+	// 404 on a SHA that GetCommit already resolved, due to cross-service propagation delay.
+	err = p.retryOnNotFound(ctx, "creating target branch", func() error {
+		_, _, createErr := p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA})
+		return createErr
+	})
+	if err != nil {
+		if isAlreadyExistsError(err) {
+			p.log.Trace("temporary target branch already exists on GitHub", "branch", mr.TargetBranch)
+		} else {
 			return false, fmt.Errorf("creating temporary target branch %s on GitHub: %w", mr.TargetBranch, err)
 		}
-		p.log.Trace("temporary target branch already exists on GitHub", "branch", mr.TargetBranch)
 	}
 
+	// No retry on GetCommit — same reasoning as above.
 	p.log.Trace("inspecting end commit via GitHub API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "sha", endShortID)
-	if _, resp, err = p.m.gh.Git.GetCommit(ctx, owner, repo, commits[len(commits)-1].ID); err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
+	if _, _, err = p.m.gh.Git.GetCommit(ctx, owner, repo, commits[len(commits)-1].ID); err != nil {
+		if isGitHubNotFound(err) {
 			if p.m.cfg.SkipInvalidMergeRequests {
 				p.log.Info("skipping invalid merge request as end commit does not exist on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "missing_commit", endShortID)
 				result.Status = StatusSkipped
@@ -1145,11 +1172,17 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 
 	endSHA := commits[len(commits)-1].ID
 	p.log.Trace("creating source branch for merged/closed merge request via API", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.SourceBranch, "sha", endSHA)
-	if _, _, err = p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA}); err != nil {
-		if !isAlreadyExistsError(err) {
+	// Retry for same reason as target branch above.
+	err = p.retryOnNotFound(ctx, "creating source branch", func() error {
+		_, _, createErr := p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA})
+		return createErr
+	})
+	if err != nil {
+		if isAlreadyExistsError(err) {
+			p.log.Trace("temporary source branch already exists on GitHub", "branch", mr.SourceBranch)
+		} else {
 			return false, fmt.Errorf("creating temporary source branch %s on GitHub: %w", mr.SourceBranch, err)
 		}
-		p.log.Trace("temporary source branch already exists on GitHub", "branch", mr.SourceBranch)
 	}
 
 	return false, nil
@@ -1173,4 +1206,38 @@ func isAlreadyExistsError(err error) bool {
 			strings.Contains(ghErr.Message, "Reference already exists")
 	}
 	return false
+}
+
+func isGitHubNotFound(err error) bool {
+	var ghErr *gogithub.ErrorResponse
+	if errors.As(err, &ghErr) {
+		return ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound
+	}
+	return false
+}
+
+func (p *project) retryOnNotFound(ctx context.Context, desc string, fn func() error) error {
+	retryDelays := [...]time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second}
+
+	err := fn()
+	if err == nil || !isGitHubNotFound(err) {
+		return err
+	}
+
+	for i, delay := range retryDelays {
+		p.log.Warn("GitHub API returned 404, retrying", "operation", desc, "attempt", i+1, "delay", delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		err = fn()
+		if err == nil || !isGitHubNotFound(err) {
+			return err
+		}
+	}
+	p.log.Warn("retries exhausted, still 404", "operation", desc, "attempts", len(retryDelays)+1)
+	return err
 }
