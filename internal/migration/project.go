@@ -162,6 +162,7 @@ func pushErrHint(err error) string {
 
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 var gitProgressLineRegex = regexp.MustCompile(`(?i)^(Compressing|Counting|Enumerating|Receiving|Resolving|Writing) (objects|deltas)\b`)
+var prNumberRegex = regexp.MustCompile(`.+/([0-9]+)$`)
 
 func cleanSidebandOutput(raw string, maxLen int) string {
 	cleaned := ansiEscapeRegex.ReplaceAllString(raw, "")
@@ -573,37 +574,50 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", p.githubPath[0], p.githubPath[1], branchQuery)
 	searchResult, err := p.m.ghClient.GetSearchResults(ctx, query)
 	if err != nil {
-		return result, fmt.Errorf("listing pull requests: %w", err)
+		if isSearchSyntaxError(err) {
+			p.log.Warn("search query failed due to special characters in branch name - falling back to list API",
+				"source_branch", mergeRequest.SourceBranch, "error", err)
+			pullRequest, err = p.findExistingPRByList(ctx, mergeRequest)
+			if err != nil {
+				return result, fmt.Errorf("listing pull requests (fallback): %w", err)
+			}
+			if pullRequest != nil {
+				result.GitHubPRNumber = pullRequest.Number
+			}
+		} else {
+			return result, fmt.Errorf("listing pull requests: %w", err)
+		}
 	}
 
-	for _, issue := range searchResult.Issues {
-		if issue == nil {
-			continue
-		}
-
-		if err := ctx.Err(); err != nil {
-			return result, fmt.Errorf("preparing to retrieve pull request: %w", err)
-		}
-
-		if issue.IsPullRequest() {
-			prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
-			if err != nil {
-				return result, fmt.Errorf("parsing pull request url: %w", err)
+	if searchResult != nil {
+		for _, issue := range searchResult.Issues {
+			if issue == nil {
+				continue
 			}
 
-			if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
-				prNumber, _ := strconv.Atoi(m[1])
-				pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
+			if err := ctx.Err(); err != nil {
+				return result, fmt.Errorf("preparing to retrieve pull request: %w", err)
+			}
+
+			if issue.IsPullRequest() {
+				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
 				if err != nil {
-					return result, fmt.Errorf("retrieving pull request: %w", err)
+					return result, fmt.Errorf("parsing pull request url: %w", err)
 				}
 
-				if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) ||
-					strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | [%d]", mergeRequest.IID)) {
-					p.log.Debug("found existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber())
-					pullRequest = pr
-					result.GitHubPRNumber = pullRequest.Number
-					break
+				if m := prNumberRegex.FindStringSubmatch(prUrl.Path); len(m) == 2 {
+					prNumber, _ := strconv.Atoi(m[1])
+					pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
+					if err != nil {
+						return result, fmt.Errorf("retrieving pull request: %w", err)
+					}
+
+					if bodyMatchesMergeRequest(pr.GetBody(), mergeRequest.IID) {
+						p.log.Debug("found existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber())
+						pullRequest = pr
+						result.GitHubPRNumber = pullRequest.Number
+						break
+					}
 				}
 			}
 		}
@@ -884,6 +898,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 %[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], mergeRequest.CreatedAt.Format(config.DateFormat), closeDate, approval, originalState, p.m.cfg.GitlabDomain, mergeRequestTitle)
 
+	created := false
 	if pullRequest == nil {
 		p.log.Info("creating pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 		newPullRequest := gogithub.NewPullRequest{
@@ -907,11 +922,30 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				result.SkipReason = fmt.Sprintf("branch '%s' has no new commits relative to '%s'; changes are already present in the target branch", mergeRequest.SourceBranch, mergeRequest.TargetBranch)
 				return result, nil
 			}
-			return result, fmt.Errorf("creating pull request: %w", err)
+			// 422 "already exists" → search index lag, find PR via List API
+			if isAlreadyExistsPRError(err) {
+				p.log.Info("PR already exists (search index lag) - looking up via list API",
+					"owner", p.githubPath[0], "repo", p.githubPath[1],
+					"merge_request_id", mergeRequest.IID)
+				pullRequest, err = p.findExistingPRByList(ctx, mergeRequest)
+				if err != nil {
+					return result, fmt.Errorf("finding existing PR after create conflict: %w", err)
+				}
+				if pullRequest == nil {
+					return result, fmt.Errorf("creating pull request: PR already exists but could not be found via list API")
+				}
+				// pullRequest is set → falls through into update path
+			} else {
+				return result, fmt.Errorf("creating pull request: %w", err)
+			}
+		} else {
+			created = true
 		}
 
 		result.GitHubPRNumber = pullRequest.Number
+	}
 
+	if created {
 		if mergeRequest.State == "closed" || mergeRequest.State == "merged" {
 			p.log.Debug("closing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
 
@@ -929,8 +963,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
 		}
-
-	} else {
+	} else if pullRequest != nil {
 		var newState *string
 		switch mergeRequest.State {
 		case "opened":
@@ -1199,13 +1232,96 @@ func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	}
 }
 
+func bodyMatchesMergeRequest(body string, mrIID int) bool {
+	return strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | %d |", mrIID)) ||
+		strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | [%d]", mrIID))
+}
+
+// findExistingPRByList looks up an already-created PR using PullRequests.List
+// instead of the Search API. This is used as a fallback when the Search API
+// index lags behind and a subsequent Create returns 422 "already exists".
+func (p *project) findExistingPRByList(ctx context.Context, mr *gogitlab.MergeRequest) (*gogithub.PullRequest, error) {
+	for _, head := range []string{
+		fmt.Sprintf("%s:%s", p.githubPath[0], mr.SourceBranch),
+		fmt.Sprintf("%s:migration-source-%d/%s", p.githubPath[0], mr.IID, mr.SourceBranch),
+	} {
+		opts := &gogithub.PullRequestListOptions{
+			Head:        head,
+			State:       "all",
+			ListOptions: gogithub.ListOptions{PerPage: 100},
+		}
+		for {
+			prs, resp, err := p.m.gh.PullRequests.List(ctx, p.githubPath[0], p.githubPath[1], opts)
+			if err != nil {
+				return nil, err
+			}
+			for _, pr := range prs {
+				if bodyMatchesMergeRequest(pr.GetBody(), mr.IID) {
+					return pr, nil
+				}
+			}
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
+		}
+	}
+	return nil, nil
+}
+
 func isAlreadyExistsError(err error) bool {
 	var ghErr *gogithub.ErrorResponse
-	if errors.As(err, &ghErr) {
-		return ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusUnprocessableEntity &&
-			strings.Contains(ghErr.Message, "Reference already exists")
+	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
+		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	if strings.Contains(ghErr.Message, "Reference already exists") {
+		return true
+	}
+	for _, e := range ghErr.Errors {
+		if strings.Contains(e.Message, "Reference already exists") {
+			return true
+		}
 	}
 	return false
+}
+
+func isAlreadyExistsPRError(err error) bool {
+	var ghErr *gogithub.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
+		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	if strings.Contains(ghErr.Message, "A pull request already exists") {
+		return true
+	}
+	for _, e := range ghErr.Errors {
+		if strings.Contains(e.Message, "A pull request already exists") {
+			return true
+		}
+	}
+	return false
+}
+
+func isSearchSyntaxError(err error) bool {
+	var ghErr *gogithub.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
+		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	if containsSearchSyntaxHint(ghErr.Message) {
+		return true
+	}
+	for _, e := range ghErr.Errors {
+		if containsSearchSyntaxHint(e.Message) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSearchSyntaxHint(msg string) bool {
+	return strings.Contains(msg, "search is invalid") || strings.Contains(msg, "syntax")
 }
 
 func isGitHubNotFound(err error) bool {

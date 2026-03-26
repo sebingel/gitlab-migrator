@@ -80,7 +80,7 @@ func (c *githubClient) GetSearchResults(ctx context.Context, query string) (*gog
 		var err error
 		result, _, err = c.gh.Search.Issues(ctx, query, nil)
 		if err != nil {
-			return nil, fmt.Errorf("performing issue search: %v", err)
+			return nil, fmt.Errorf("performing issue search: %w", err)
 		}
 		if result == nil {
 			return nil, fmt.Errorf("nil search result was returned for query: %s", query)
