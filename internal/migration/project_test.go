@@ -192,6 +192,13 @@ func TestIsSearchSyntaxError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "422 with mixed-case Invalid Syntax in nested error",
+			err: makeGitHubError(http.StatusUnprocessableEntity, "Validation Failed", []gogithub.Error{
+				{Message: "The search query has Invalid Syntax"},
+			}),
+			want: true,
+		},
+		{
 			name: "422 with Validation Failed + unrelated nested error",
 			err: makeGitHubError(http.StatusUnprocessableEntity, "Validation Failed", []gogithub.Error{
 				{Message: "Something else went wrong"},

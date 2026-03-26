@@ -910,6 +910,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			Draft:               &mergeRequest.Draft,
 		}
 		// Closure writes to outer pullRequest — on retry, only the last successful value is used.
+		// retryOnNotFound passes through non-404 errors (e.g. 422 "already exists"),
+		// which are handled by the error checks below.
 		err = p.retryOnNotFound(ctx, "creating pull request", func() error {
 			var createErr error
 			pullRequest, _, createErr = p.m.gh.PullRequests.Create(ctx, p.githubPath[0], p.githubPath[1], &newPullRequest)
@@ -932,7 +934,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					return result, fmt.Errorf("finding existing PR after create conflict: %w", err)
 				}
 				if pullRequest == nil {
-					return result, fmt.Errorf("creating pull request: PR already exists but could not be found via list API")
+					return result, fmt.Errorf("creating pull request: PR already exists but could not be found via list API (MR !%d)", mergeRequest.IID)
 				}
 				// pullRequest is set → falls through into update path
 			} else {
@@ -951,7 +953,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 			pullRequest.State = Pointer("closed")
 			prNumber := pullRequest.GetNumber()
-			editReq := pullRequest // capture before closure may nil pullRequest
+			editReqVal := *pullRequest // shallow copy — isolate retry input from closure's pullRequest writes
+			editReq := &editReqVal
 			// Closure writes to outer pullRequest — inputs are captured separately so a failed
 			// attempt (which nils pullRequest) does not corrupt the retry.
 			err = p.retryOnNotFound(ctx, "closing pull request", func() error {
@@ -964,6 +967,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 		}
 	} else if pullRequest != nil {
+		result.GitHubPRNumber = pullRequest.Number
+
 		var newState *string
 		switch mergeRequest.State {
 		case "opened":
@@ -973,13 +978,18 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		}
 
 		if pullRequest.State != nil && newState != nil && *pullRequest.State != *newState {
-			pullRequestState := &gogithub.PullRequest{
+			prNumber := pullRequest.GetNumber()
+			editReq := &gogithub.PullRequest{
 				Number: pullRequest.Number,
 				State:  newState,
 			}
 
-			// No retry: PR was found via search, repo is fully propagated at this point.
-			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
+			err = p.retryOnNotFound(ctx, "updating pull request state", func() error {
+				var editErr error
+				pullRequest, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], prNumber, editReq)
+				return editErr
+			})
+			if err != nil {
 				return result, fmt.Errorf("updating pull request state: %w", err)
 			}
 		}
@@ -994,7 +1004,16 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			pullRequest.Body = &body
 			pullRequest.Draft = &mergeRequest.Draft
 			pullRequest.MaintainerCanModify = nil
-			if pullRequest, _, err = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+
+			prNumber := pullRequest.GetNumber()
+			editReqVal := *pullRequest // shallow copy — isolate retry input from closure's pullRequest writes
+			editReq := &editReqVal
+			err = p.retryOnNotFound(ctx, "updating pull request", func() error {
+				var editErr error
+				pullRequest, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], prNumber, editReq)
+				return editErr
+			})
+			if err != nil {
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
 		} else {
@@ -1321,7 +1340,8 @@ func isSearchSyntaxError(err error) bool {
 }
 
 func containsSearchSyntaxHint(msg string) bool {
-	return strings.Contains(msg, "search is invalid") || strings.Contains(msg, "syntax")
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "search is invalid") || strings.Contains(lower, "syntax")
 }
 
 func isGitHubNotFound(err error) bool {
@@ -1357,3 +1377,4 @@ func (p *project) retryOnNotFound(ctx context.Context, desc string, fn func() er
 	p.log.Warn("retries exhausted, still 404", "operation", desc, "attempts", len(retryDelays)+1)
 	return err
 }
+
