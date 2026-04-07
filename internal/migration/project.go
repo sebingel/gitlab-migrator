@@ -532,6 +532,11 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 	p.log.Info("migrating merge requests from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "count", len(mergeRequests))
 
 	for _, mergeRequest := range mergeRequests {
+		if err := ctx.Err(); err != nil {
+			p.log.Warn("migration interrupted, stopping merge request processing", "remaining", len(mergeRequests)-len(results))
+			break
+		}
+
 		if mergeRequest == nil {
 			continue
 		}
