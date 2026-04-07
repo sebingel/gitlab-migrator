@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
 
@@ -41,4 +41,15 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Post LGTM if no review comments
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMENTS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --jq 'length')
+          REVIEWS=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --jq '[.[] | select(.user.login == "github-actions[bot]")] | length')
+          if [ "$COMMENTS" = "0" ] && [ "$REVIEWS" = "0" ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body "**Claude Code Review:** No issues found. LGTM!"
+          fi
 

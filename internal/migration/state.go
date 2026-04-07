@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,52 @@ type StateFile struct {
 	GitHubRepo    string              `json:"github_repo"`
 	UpdatedAt     time.Time           `json:"updated_at"`
 	MergeRequests map[string]*MRState `json:"merge_requests"`
+}
+
+// MarshalJSON implements custom JSON marshaling to sort merge request keys numerically
+// instead of the default lexicographic order (which produces "1","10","100","2",...).
+func (sf *StateFile) MarshalJSON() ([]byte, error) {
+	// Sort MR keys numerically
+	keys := make([]int, 0, len(sf.MergeRequests))
+	for k := range sf.MergeRequests {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			return nil, fmt.Errorf("non-numeric MR key %q: %w", k, err)
+		}
+		keys = append(keys, n)
+	}
+	sort.Ints(keys)
+
+	// Build ordered merge_requests object as raw JSON
+	mrParts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v, err := json.Marshal(sf.MergeRequests[strconv.Itoa(k)])
+		if err != nil {
+			return nil, err
+		}
+		mrParts = append(mrParts, fmt.Sprintf("%q:%s", strconv.Itoa(k), v))
+	}
+
+	// Marshal the other fields via an alias to avoid infinite recursion
+	type Alias struct {
+		Version       int       `json:"version"`
+		GitLabProject string    `json:"gitlab_project"`
+		GitHubRepo    string    `json:"github_repo"`
+		UpdatedAt     time.Time `json:"updated_at"`
+	}
+	outer, err := json.Marshal(&Alias{
+		Version:       sf.Version,
+		GitLabProject: sf.GitLabProject,
+		GitHubRepo:    sf.GitHubRepo,
+		UpdatedAt:     sf.UpdatedAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Splice the ordered merge_requests into the outer JSON object
+	// outer is like `{"version":1,...,"updated_at":"..."}` — insert before closing brace
+	return []byte(string(outer[:len(outer)-1]) + `,"merge_requests":{` + strings.Join(mrParts, ",") + `}}`), nil
 }
 
 // MigrationState manages the on-disk migration state for a single project pair.
@@ -206,19 +253,19 @@ func (s *MigrationState) Flush() error {
 	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp state file: %w", err)
 	}
 
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("syncing temp state file: %w", err)
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("closing temp state file: %w", err)
 	}
 
@@ -227,7 +274,7 @@ func (s *MigrationState) Flush() error {
 	}
 
 	if err := os.Rename(tmpPath, s.filePath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("renaming temp state file: %w", err)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
@@ -373,6 +374,55 @@ func TestSanitizeStateFileName(t *testing.T) {
 				tt.glGroup, tt.glProject, tt.ghOwner, tt.ghRepo, got, tt.want)
 		}
 	}
+}
+
+func TestMarshalJSON_NumericKeyOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.json")
+
+	s, _ := LoadOrCreate(path, "g/p", "o/r", testLogger())
+
+	// Record MRs in non-sequential order
+	for _, iid := range []int{100, 2, 30, 1, 10, 3, 20} {
+		s.RecordSuccess(iid, Pointer(iid))
+	}
+
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading file: %v", err)
+	}
+
+	// Extract the order of keys from the raw JSON
+	content := string(data)
+	expected := []string{`"1":`, `"2":`, `"3":`, `"10":`, `"20":`, `"30":`, `"100":`}
+
+	lastIdx := 0
+	for _, key := range expected {
+		idx := indexOf(content, key, lastIdx)
+		if idx == -1 {
+			t.Fatalf("key %s not found after position %d in JSON", key, lastIdx)
+		}
+		if idx < lastIdx {
+			t.Errorf("key %s at position %d is before previous key at %d — not numerically sorted", key, idx, lastIdx)
+		}
+		lastIdx = idx
+	}
+}
+
+// indexOf returns the index of substr in s starting from offset, or -1.
+func indexOf(s, substr string, offset int) int {
+	if offset >= len(s) {
+		return -1
+	}
+	i := strings.Index(s[offset:], substr)
+	if i == -1 {
+		return -1
+	}
+	return offset + i
 }
 
 func TestFlush_NoTempFileLeftBehind(t *testing.T) {
