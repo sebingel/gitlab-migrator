@@ -56,6 +56,9 @@ type Config struct {
 	StorageType string `json:"storage_type,omitempty"`
 	StorageDir  string `json:"storage_dir,omitempty"`
 
+	// State persistence for resumption
+	StateDir string `json:"state_dir,omitempty"`
+
 	// Concurrency / batching
 	MaxConcurrency int `json:"max_concurrency,omitempty"`
 	PushBatchSize  int `json:"push_batch_size,omitempty"`

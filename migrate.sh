@@ -54,6 +54,7 @@ fi
 arguments+=("-detailed-report")
 # arguments+=("-storage-type" "filesystem")
 # arguments+=("-storage-dir" "/tmp/migration")
+# arguments+=("-state-dir" "./state")
 arguments+=("-no-force")
 # arguments+=("-push-batch-size" "100")
 # arguments+=("-skip-open-merge-requests")

@@ -47,6 +47,7 @@ type project struct {
 	storagePath   string
 	pushBatchSize int
 	result        ProjectResult
+	state         *MigrationState // nil when -state-dir not set
 }
 
 func (m *Migrator) newProject(slugs []string) (*project, error) {
@@ -439,6 +440,29 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		}
 	} // end else !pullRequestsOnly
 
+	if p.m.cfg.StateDir != "" && p.m.cfg.EnablePullRequests {
+		if err := os.MkdirAll(p.m.cfg.StateDir, 0755); err != nil {
+			return p.result, fmt.Errorf("creating state directory: %w", err)
+		}
+		statePath := filepath.Join(p.m.cfg.StateDir,
+			sanitizeStateFileName(p.gitlabPath[0], p.gitlabPath[1], p.githubPath[0], p.githubPath[1])+".json")
+		p.state, err = LoadOrCreate(statePath,
+			p.gitlabPath[0]+"/"+p.gitlabPath[1],
+			p.githubPath[0]+"/"+p.githubPath[1],
+			p.log)
+		if err != nil {
+			return p.result, fmt.Errorf("loading migration state: %w", err)
+		}
+		total, success, _, skipped, _ := p.state.Summary()
+		if total > 0 {
+			p.log.Info("resuming from saved state", "total_tracked", total,
+				"previously_successful", success, "previously_skipped", skipped,
+				"state_file", statePath)
+		} else {
+			p.log.Debug("state persistence enabled", "state_file", statePath)
+		}
+	}
+
 	if p.m.cfg.EnablePullRequests {
 		mrResults := p.migrateMergeRequests(ctx)
 		p.result.MergeRequests = mrResults
@@ -512,14 +536,43 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			continue
 		}
 
+		if p.state != nil && p.state.ShouldSkip(mergeRequest.IID) {
+			prev := p.state.GetState(mergeRequest.IID)
+			if prev == nil {
+				p.log.Warn("state inconsistency: ShouldSkip=true but GetState=nil, reprocessing", "mr_iid", mergeRequest.IID)
+			} else {
+				p.log.Debug("skipping MR from saved state", "mr_iid", mergeRequest.IID, "status", prev.Status)
+				status := StatusSuccess
+				if prev.Status == MRStateSkipped {
+					status = StatusSkipped
+				}
+				results = append(results, MergeRequestResult{
+					GitLabMRID:     mergeRequest.IID,
+					GitLabMRTitle:  mergeRequest.Title,
+					GitLabState:    mergeRequest.State,
+					GitHubPRNumber: prev.GitHubPRNum,
+					Status:         status,
+					SkipReason:     prev.SkipReason,
+				})
+				continue
+			}
+		}
+
 		if p.m.cfg.SkipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
+			skipReason := "open merge request skipped (-skip-open-merge-requests)"
 			results = append(results, MergeRequestResult{
 				GitLabMRID:    mergeRequest.IID,
 				GitLabMRTitle: mergeRequest.Title,
 				GitLabState:   mergeRequest.State,
 				Status:        StatusSkipped,
-				SkipReason:    "open merge request skipped (-skip-open-merge-requests)",
+				SkipReason:    skipReason,
 			})
+			if p.state != nil {
+				p.state.RecordSkipped(mergeRequest.IID, skipReason)
+				if flushErr := p.state.Flush(); flushErr != nil {
+					p.log.Error("failed to persist migration state", "error", flushErr)
+				}
+			}
 			continue
 		}
 
@@ -530,6 +583,22 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			mrResult.Error = err.Error()
 		}
 		results = append(results, mrResult)
+
+		if p.state != nil {
+			switch mrResult.Status {
+			case StatusSuccess:
+				p.state.RecordSuccess(mergeRequest.IID, mrResult.GitHubPRNumber)
+			case StatusFailed:
+				p.state.RecordFailure(mergeRequest.IID, mrResult.Error)
+			case StatusSkipped:
+				p.state.RecordSkipped(mergeRequest.IID, mrResult.SkipReason)
+			case StatusPartial:
+				p.state.RecordPartial(mergeRequest.IID, mrResult.GitHubPRNumber, mrResult.Error)
+			}
+			if flushErr := p.state.Flush(); flushErr != nil {
+				p.log.Error("failed to persist migration state", "error", flushErr)
+			}
+		}
 	}
 
 	var successCount, failureCount, skippedCount int

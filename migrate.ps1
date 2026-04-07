@@ -53,6 +53,7 @@ if ($LogDirectory) {
 $arguments += "-detailed-report"
 # $arguments += "-storage-type", "filesystem"
 # $arguments += "-storage-dir", "C:\temp\migration"
+# $arguments += "-state-dir", ".\state"
 $arguments += "-no-force"
 # $arguments += "-push-batch-size", "100"
 $arguments += "-skip-open-merge-requests"
