@@ -253,19 +253,19 @@ func (s *MigrationState) Flush() error {
 	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp state file: %w", err)
 	}
 
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("syncing temp state file: %w", err)
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("closing temp state file: %w", err)
 	}
 
@@ -274,7 +274,7 @@ func (s *MigrationState) Flush() error {
 	}
 
 	if err := os.Rename(tmpPath, s.filePath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("renaming temp state file: %w", err)
 	}
 
