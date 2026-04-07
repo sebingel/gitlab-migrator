@@ -119,6 +119,7 @@ fabric.properties
 .claude
 logs/
 reports/
+state/
 
 # Gas Town runtime directories (not part of the repo)
 .beads/
