@@ -47,6 +47,7 @@ fi
 
 # Optional flags - uncomment as needed
 # arguments+=("-delete-existing-repos")
+# arguments+=("-unarchive-archived-repos")
 # arguments+=("-rename-master-to-main")
 # arguments+=("-loop")
 # arguments+=("-max-concurrency" "8")

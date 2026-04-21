@@ -27,6 +27,7 @@ type Config struct {
 	SkipInvalidMergeRequests bool `json:"skip_invalid_merge_requests,omitempty"`
 	SkipOpenMergeRequests    bool `json:"skip_open_merge_requests,omitempty"`
 	TrimGithubBranches       bool `json:"trim_branches_on_github,omitempty"`
+	UnarchiveArchivedRepos   bool `json:"unarchive_archived_repos,omitempty"`
 
 	// Domain / connection settings
 	GithubDomain string `json:"github_domain,omitempty"`

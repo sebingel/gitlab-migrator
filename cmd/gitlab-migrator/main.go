@@ -151,6 +151,7 @@ func main() {
 	flag.BoolVar(&cfg.PullRequestsOnly, "pull-requests-only", false, "migrate only closed/merged merge requests as pull requests without cloning/pushing the repository; open MRs are skipped (repo must already exist on GitHub)")
 	flag.BoolVar(&cfg.NoForce, "no-force", false, "use regular push instead of force push (safe for repos where work has already begun)")
 	flag.BoolVar(&cfg.TrimGithubBranches, "trim-branches-on-github", false, "when true, will delete any branches on GitHub that are no longer present in GitLab")
+	flag.BoolVar(&cfg.UnarchiveArchivedRepos, "unarchive-archived-repos", false, "temporarily unarchive the GitHub target repo before migration and re-archive it afterwards; without this flag, archived repos cause hard failures")
 	flag.BoolVar(&showVersion, "version", false, "output version information")
 
 	flag.StringVar(&cfg.GithubDomain, "github-domain", config.DefaultGithubDomain, "specifies the GitHub domain to use")

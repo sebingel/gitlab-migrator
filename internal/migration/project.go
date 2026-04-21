@@ -217,11 +217,30 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	}
 
 	p.log.Debug("checking for existing repository on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1])
-	_, _, err := p.m.gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
+	githubRepo, _, err := p.m.gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
 
 	var githubError *gogithub.ErrorResponse
 	if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
 		return p.result, fmt.Errorf("retrieving github repo: %w", err)
+	}
+
+	var wasArchived bool
+	if err == nil && githubRepo != nil {
+		wasArchived = githubRepo.GetArchived()
+	}
+
+	if wasArchived && p.m.cfg.UnarchiveArchivedRepos && !p.m.cfg.DeleteExistingRepos {
+		p.log.Info("GitHub repo is archived, temporarily unarchiving for migration", "owner", p.githubPath[0], "repo", p.githubPath[1])
+		if unarchErr := p.setArchived(ctx, false); unarchErr != nil {
+			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)
+		}
+		defer func() {
+			if archErr := p.setArchivedWithRetry(ctx, true); archErr != nil {
+				p.log.Warn("failed to re-archive GitHub repo after migration, manual re-archive required", "owner", p.githubPath[0], "repo", p.githubPath[1], "error", archErr)
+			} else {
+				p.log.Info("re-archived GitHub repo to restore original state", "owner", p.githubPath[0], "repo", p.githubPath[1])
+			}
+		}()
 	}
 
 	if p.m.cfg.PullRequestsOnly {
@@ -1450,5 +1469,40 @@ func (p *project) retryOnNotFound(ctx context.Context, desc string, fn func() er
 	}
 	p.log.Warn("retries exhausted, still 404", "operation", desc, "attempts", len(retryDelays)+1)
 	return err
+}
+
+func (p *project) setArchived(ctx context.Context, archived bool) error {
+	update := gogithub.Repository{Archived: Pointer(archived)}
+	_, _, err := p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &update)
+	return err
+}
+
+func (p *project) setArchivedWithRetry(ctx context.Context, archived bool) error {
+	retryDelays := [...]time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second}
+	action := "archive"
+	if !archived {
+		action = "unarchive"
+	}
+
+	err := p.setArchived(ctx, archived)
+	if err == nil {
+		return nil
+	}
+
+	for i, delay := range retryDelays {
+		p.log.Warn("failed to "+action+" GitHub repo, retrying", "attempt", i+1, "max_attempts", len(retryDelays)+1, "delay", delay, "error", err)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		err = p.setArchived(ctx, archived)
+		if err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", len(retryDelays)+1, err)
 }
 
