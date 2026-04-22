@@ -1434,7 +1434,8 @@ func isSearchSyntaxError(err error) bool {
 
 func containsSearchSyntaxHint(msg string) bool {
 	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "search is invalid")
+	return strings.Contains(lower, "search is invalid") ||
+		(strings.Contains(lower, "search query") && strings.Contains(lower, "invalid syntax"))
 }
 
 func isGitHubNotFound(err error) bool {
