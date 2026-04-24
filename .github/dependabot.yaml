@@ -18,3 +18,22 @@ updates:
           - "*"
     cooldown:
       default-days: 7
+
+  # Monitor Go modules for updates
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "go"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
