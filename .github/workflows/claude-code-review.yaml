@@ -27,13 +27,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@e58dfa55559035499a4982426bb73605e8b5ad8e # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
@@ -52,4 +52,3 @@ jobs:
           if [ "$COMMENTS" = "0" ] && [ "$REVIEWS" = "0" ]; then
             gh pr comment ${{ github.event.pull_request.number }} --body "**Claude Code Review:** No issues found. LGTM!"
           fi
-
