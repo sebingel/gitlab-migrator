@@ -1296,6 +1296,14 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	if err != nil {
 		if isAlreadyExistsError(err) {
 			p.log.Trace("temporary target branch already exists on GitHub", "branch", mr.TargetBranch)
+		} else if isReferenceUpdateFailedError(err) {
+			if p.m.cfg.SkipInvalidMergeRequests {
+				p.log.Info("skipping invalid merge request as target branch could not be created on GitHub (parent commit unreachable)", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mr.IID, "branch", mr.TargetBranch, "sha", parentSHA)
+				result.Status = StatusSkipped
+				result.SkipReason = "target branch creation failed (parent commit unreachable on GitHub)"
+				return true, nil
+			}
+			return false, fmt.Errorf("creating temporary target branch %s on GitHub: %w", mr.TargetBranch, err)
 		} else {
 			return false, fmt.Errorf("creating temporary target branch %s on GitHub: %w", mr.TargetBranch, err)
 		}
@@ -1396,6 +1404,15 @@ func isAlreadyExistsError(err error) bool {
 		}
 	}
 	return false
+}
+
+func isReferenceUpdateFailedError(err error) bool {
+	var ghErr *gogithub.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
+		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	return strings.Contains(ghErr.Message, "Reference update failed")
 }
 
 func isAlreadyExistsPRError(err error) bool {
