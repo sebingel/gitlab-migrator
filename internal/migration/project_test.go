@@ -109,6 +109,48 @@ func TestIsAlreadyExistsError(t *testing.T) {
 	}
 }
 
+func TestIsReferenceUpdateFailedError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "422 with matching message",
+			err:  makeGitHubError(http.StatusUnprocessableEntity, "Reference update failed", nil),
+			want: true,
+		},
+		{
+			name: "422 with unrelated message",
+			err:  makeGitHubError(http.StatusUnprocessableEntity, "Reference already exists", nil),
+			want: false,
+		},
+		{
+			name: "404 with matching message - wrong status code",
+			err:  makeGitHubError(http.StatusNotFound, "Reference update failed", nil),
+			want: false,
+		},
+		{
+			name: "non-ErrorResponse error",
+			err:  fmt.Errorf("Reference update failed"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReferenceUpdateFailedError(tt.err); got != tt.want {
+				t.Errorf("isReferenceUpdateFailedError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsGitHubNotFound(t *testing.T) {
 	tests := []struct {
 		name string
