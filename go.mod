@@ -3,7 +3,7 @@ module github.com/sebingel/gitlab-migrator
 go 1.25.0
 
 require (
-	github.com/go-git/go-billy/v5 v5.9.0
+	github.com/go-git/go-billy/v5 v5.9.1
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/gofri/go-github-pagination v1.0.1
 	github.com/google/go-github/v84 v84.0.0
