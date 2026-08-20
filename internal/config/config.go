@@ -29,6 +29,9 @@ type Config struct {
 	TrimGithubBranches       bool `json:"trim_branches_on_github,omitempty"`
 	UnarchiveArchivedRepos   bool `json:"unarchive_archived_repos,omitempty"`
 
+	// Repository visibility for newly created GitHub repos
+	RepoVisibility string `json:"repo_visibility,omitempty"`
+
 	// Domain / connection settings
 	GithubDomain string `json:"github_domain,omitempty"`
 	GitlabDomain string `json:"gitlab_domain,omitempty"`
@@ -140,6 +143,10 @@ func (c *Config) Validate() error {
 
 	if c.StorageType != "memory" && c.StorageType != "filesystem" {
 		return fmt.Errorf("storage-type must be either 'memory' or 'filesystem'")
+	}
+
+	if c.RepoVisibility != "private" && c.RepoVisibility != "internal" && c.RepoVisibility != "public" {
+		return fmt.Errorf("repo-visibility must be one of 'private', 'internal', or 'public'")
 	}
 
 	if c.PushBatchSize <= 0 {

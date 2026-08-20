@@ -165,6 +165,7 @@ func main() {
 	flag.StringVar(&cfg.LogOutput, "log-output", "", "comma-separated log targets: console, file, or console,file (default: console)")
 	flag.StringVar(&cfg.LogDirectory, "log-directory", "", "directory for session log files (defaults to ./logs in executable directory)")
 	flag.StringVar(&cfg.StorageType, "storage-type", "memory", "git storage type: 'memory' or 'filesystem' (use filesystem for large repositories)")
+	flag.StringVar(&cfg.RepoVisibility, "repo-visibility", "private", "visibility for newly created GitHub repos: 'private', 'internal', or 'public' ('internal' requires a GitHub Enterprise organization)")
 	flag.StringVar(&cfg.StorageDir, "storage-dir", "", "directory for filesystem storage (only used when -storage-type=filesystem, defaults to temp directory)")
 	flag.StringVar(&cfg.StateDir, "state-dir", "", "directory for migration state files enabling resumption after interruption (opt-in)")
 
