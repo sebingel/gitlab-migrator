@@ -34,6 +34,9 @@ arguments=(
     "-gitlab-domain" "$GITLAB_DOMAIN"
     "-github-domain" "$GITHUB_DOMAIN"
     "-projects-csv" "$PROJECTS_CSV"
+#     Alternative to -projects-csv: migrate a single project (mutually exclusive with -projects-csv)
+#     "-gitlab-project" "namespace/project"
+#     "-github-repo" "org/repo"
 #     "-migrate-pull-requests"
     "-skip-invalid-merge-requests"
     "-trim-branches-on-github"
