@@ -33,7 +33,10 @@ $arguments = @(
     "-gitlab-domain", $GitLabDomain,
     "-github-domain", $GitHubDomain,
     "-projects-csv", $ProjectsCsv,
-#     "-migrate-pull-requests",
+#     Alternative to -projects-csv: migrate a single project (mutually exclusive with -projects-csv)
+#     "-gitlab-project", "namespace/project",
+#     "-github-repo", "org/repo",
+    "-migrate-pull-requests",
     "-skip-invalid-merge-requests",
 #     "-trim-branches-on-github",
     "-log-output", "console,file"
@@ -46,7 +49,7 @@ if ($LogDirectory) {
 
 # Optional flags - uncomment as needed
 # $arguments += "-delete-existing-repos"
-# $arguments += "-unarchive-archived-repos"
+$arguments += "-unarchive-archived-repos"
 # $arguments += "-rename-master-to-main"
 # $arguments += "-loop"
 # $arguments += "-max-concurrency", "8"
@@ -54,11 +57,11 @@ if ($LogDirectory) {
 $arguments += "-detailed-report"
 # $arguments += "-storage-type", "filesystem"
 # $arguments += "-storage-dir", "C:\temp\migration"
-# $arguments += "-state-dir", ".\state"
+$arguments += "-state-dir", ".\state"
 $arguments += "-no-force"
 # $arguments += "-push-batch-size", "100"
 $arguments += "-skip-open-merge-requests"
-$arguments += "-pull-requests-only"
+# $arguments += "-pull-requests-only"
 # $arguments += "-report"
 # $arguments += "-rename-trunk-branch", "main"
 # $arguments += "-config", "migration.json"
