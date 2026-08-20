@@ -31,6 +31,8 @@ gitlab-migrator -github-user=mytokenuser -gitlab-project=mygitlabuser/myproject 
 Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
 
 ```
+  -config string
+        path to JSON configuration file (file values override command-line flags)
   -delete-existing-repos
         whether existing repositories should be deleted before migrating
   -detailed-report
@@ -87,12 +89,16 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         when true, will log and skip invalid merge requests instead of raising an error
   -skip-open-merge-requests
         skip open merge requests during migration (only migrate closed/merged MRs)
+  -state-dir string
+        directory for migration state files enabling resumption after interruption (opt-in)
   -storage-dir string
         directory for filesystem storage (only used when -storage-type=filesystem, defaults to temp directory)
   -storage-type string
         git storage type: 'memory' or 'filesystem' (use filesystem for large repositories) (default "memory")
   -trim-branches-on-github
         when true, will delete any branches on GitHub that are no longer present in GitLab
+  -unarchive-archived-repos
+        temporarily unarchive the GitHub target repo before migration and re-archive it afterwards; without this flag, archived repos cause hard failures
   -version
         output version information
 ```
@@ -220,6 +226,24 @@ This tool tries to be idempotent. You can run it over and over and it will patch
 _Note that this tool performs a forced mirror push by default, so it's not recommended to run this tool after commencing work in the target repository. Use `-no-force` if you need a regular push instead._
 
 For pull requests and their comments, the corresponding IDs from GitLab are added to the Markdown header, this is parsed to enable idempotence (see next section).
+
+## Configuration file
+
+Instead of (or in addition to) command-line flags, you can supply a JSON configuration file with `-config`:
+
+```
+gitlab-migrator -config=migration.json
+```
+
+Values in the file override any matching command-line flags. Field names are `snake_case` versions of the flags (e.g. `migrate_pull_requests`, `skip_open_merge_requests`). Tokens (`github_token`, `gitlab_token`) are rejected if present in the file; they must be supplied via the `GITHUB_TOKEN`/`GITLAB_TOKEN` environment variables.
+
+## Resuming interrupted migrations
+
+Pass `-state-dir` with a directory path to have the tool persist per-merge-request migration state to a JSON file as it works. If a migration is interrupted, re-running with the same `-state-dir` will skip merge requests that already completed successfully, so you can safely resume large or long-running migrations without redoing completed work.
+
+## Archived repositories
+
+By default, attempting to migrate into an archived GitHub repository fails. Pass `-unarchive-archived-repos` to have the tool temporarily unarchive the target repository before migrating, then re-archive it afterwards.
 
 ## Reporting
 
