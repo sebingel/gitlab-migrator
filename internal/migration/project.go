@@ -143,7 +143,7 @@ func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted b
 		Description:   &description,
 		Homepage:      &homepage,
 		DefaultBranch: &p.defaultBranch,
-		Private:       Pointer(true),
+		Visibility:    Pointer(p.m.cfg.RepoVisibility),
 		HasIssues:     Pointer(true),
 		HasProjects:   Pointer(true),
 		HasWiki:       Pointer(true),

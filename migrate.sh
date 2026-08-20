@@ -56,6 +56,7 @@ fi
 # arguments+=("-max-concurrency" "8")
 # arguments+=("-merge-requests-max-age" "365")
 arguments+=("-detailed-report")
+# arguments+=("-repo-visibility" "internal")  # or "public"; default is "private"
 # arguments+=("-storage-type" "filesystem")
 # arguments+=("-storage-dir" "/tmp/migration")
 # arguments+=("-state-dir" "./state")

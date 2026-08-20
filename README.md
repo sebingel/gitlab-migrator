@@ -81,6 +81,8 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)
   -rename-trunk-branch string
         specifies the new trunk branch name (incompatible with -rename-master-to-main)
+  -repo-visibility string
+        visibility for newly created GitHub repos: 'private', 'internal', or 'public' ('internal' requires a GitHub Enterprise organization) (default "private")
   -report
         report on primitives to be migrated instead of beginning migration
   -skip-invalid-merge-requests
@@ -119,7 +121,7 @@ Alternatively, you can supply the path to a CSV file with the `-projects-csv` ar
 gitlab-group/gitlab-project-name,github-org-or-user/github-repo-name
 ```
 
-If the destination repository does not exist, this tool will attempt to create a private repository. If the destination repo already exists, it will be used unless you specify `-delete-existing-repos`
+If the destination repository does not exist, this tool will attempt to create it as private by default. Use `-repo-visibility=internal` or `-repo-visibility=public` to change this (`internal` requires a GitHub Enterprise organization that supports it). If the destination repo already exists, it will be used unless you specify `-delete-existing-repos`; visibility of an already-existing repo is left untouched.
 
 > [!WARNING]  
 > To delete existing GitHub repos prior to migrating, pass the `-delete-existing-repos` argument. _This is potentially dangerous, you won't be asked for confirmation!_
