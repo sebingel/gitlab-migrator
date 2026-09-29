@@ -110,6 +110,36 @@ func TestListMergeRequestCommits_ReadsAllPages(t *testing.T) {
 	}
 }
 
+func TestListMergeRequestAwardEmoji_ReadsAllPages(t *testing.T) {
+	// A thumbs up after the first 100 award emoji is on the second page.
+	const total = 130
+	awards := make([]*gogitlab.AwardEmoji, total)
+	for i := range awards {
+		awards[i] = &gogitlab.AwardEmoji{ID: i + 1, Name: "rocket"}
+	}
+	awards[119].Name = "thumbsup"
+	awards[119].User.Username = "late-approver"
+
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/7/award_emoji", awards, &calls)
+	p := newGitLabTestProject(t, mux)
+
+	got, err := p.listMergeRequestAwardEmoji(7)
+	if err != nil {
+		t.Fatalf("listMergeRequestAwardEmoji: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("got %d award emoji, want %d", len(got), total)
+	}
+	if got[119].Name != "thumbsup" || got[119].User.Username != "late-approver" {
+		t.Errorf("award 120 = %s by %q, want thumbsup by late-approver", got[119].Name, got[119].User.Username)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("GitLab requests = %d, want 2 (100 award emoji per page)", n)
+	}
+}
+
 // failingSearchGitHub is a GitHubClient whose search always fails. A merge
 // request that reaches migrateMergeRequest ends as failed right after the
 // search, without any other GitHub call.

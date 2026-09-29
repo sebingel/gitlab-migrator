@@ -880,7 +880,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	p.log.Debug("determining merge request approvers", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
 	approvers := make([]string, 0)
-	awards, _, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mergeRequest.IID, &gogitlab.ListAwardEmojiOptions{PerPage: 100})
+	awards, err := p.listMergeRequestAwardEmoji(mergeRequest.IID)
 	if err != nil {
 		p.log.Error("listing merge request awards", "error", err)
 	} else {
@@ -1199,6 +1199,27 @@ func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error)
 		return commits[i].CommittedDate.Before(*commits[j].CommittedDate)
 	})
 	return commits, nil
+}
+
+// listMergeRequestAwardEmoji returns all award emoji of the merge request.
+func (p *project) listMergeRequestAwardEmoji(mrIID int) ([]*gogitlab.AwardEmoji, error) {
+	var awards []*gogitlab.AwardEmoji
+	opts := &gogitlab.ListAwardEmojiOptions{PerPage: 100}
+	for {
+		page, resp, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mrIID, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		awards = append(awards, page...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+	return awards, nil
 }
 
 // createLocalBranch creates a branch ref at hash in the local mirror. Only the ref
