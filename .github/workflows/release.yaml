@@ -34,19 +34,24 @@ on:
 permissions:
   contents: read
 
-# Releases run one after another, and a running release is never cancelled,
-# so two merges close together cannot get the same version. Limit: GitHub
-# keeps only one waiting run per group. If a third release run starts while
-# one runs and one waits, the waiting run is cancelled. If the newest run
-# creates a release, it includes all changes, but it uses only the labels of
-# its own pull request. If the newest run creates no release (for example
-# release:skip), the changes of the cancelled run stay unreleased until the
-# next release. "queue: max" would fix this, but actionlint does not support
-# it yet.
-# A new dry run of a pull request cancels the older dry run of the same
-# pull request.
+# Only runs that can release (push and manual runs on main) share the group
+# "release". They run one after another, and a running release is never
+# cancelled, so two merges close together cannot get the same version.
+# Limit: GitHub keeps only one waiting run per group. If a third release run
+# starts while one runs and one waits, the waiting run is cancelled. If the
+# newest run creates a release, it includes all changes, but it uses only the
+# labels of its own pull request. If the newest run creates no release (for
+# example release:skip), the changes of the cancelled run stay unreleased
+# until the next release. "queue: max" would fix this, but actionlint does
+# not support it yet.
+# A manual run on another branch gets its own group, so it cannot take the
+# waiting place of a real release. It fails in the plan job.
+# A new dry run of a pull request cancels the older dry run of the same pull
+# request.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('release-dry-run-{0}', github.event.pull_request.number) || 'release' }}
+  group: >-
+    ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'release'
+    || format('release-{0}-{1}', github.event_name, github.event.pull_request.number || github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -56,6 +61,9 @@ defaults:
 jobs:
   plan:
     name: Plan release
+    # A label change on a closed or merged pull request starts this workflow
+    # too. Its merge ref is stale, so there is nothing to check.
+    if: github.event_name != 'pull_request' || github.event.pull_request.state == 'open'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -116,7 +124,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false # no shared cache in a release build
+          # Dry runs use the Go cache, so a label change does not rebuild
+          # everything from scratch. A real release never uses a cache.
+          cache: ${{ github.event_name == 'pull_request' }}
 
       - name: Build
         env:
@@ -144,7 +154,9 @@ jobs:
           name: release-assets
           path: dist/
           if-no-files-found: error
-          retention-days: 7
+          # "Re-run failed jobs" of a release needs this artifact, so keep it
+          # as long as the repository allows (90 days).
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}
 
   publish:
     name: Publish release
