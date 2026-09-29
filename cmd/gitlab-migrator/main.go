@@ -76,27 +76,25 @@ func createLogWriter(logOutput, logDirectory, sessionID string) (io.Writer, *os.
 			}
 		}
 
-		fullPath := filepath.Join(targetDir, sessionID+"-gitlab-migrator.log")
-
-		f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
-		if err != nil {
-			if os.IsExist(err) {
-				for i := 2; i <= 10; i++ {
-					fullPath = filepath.Join(targetDir, fmt.Sprintf("%s-%d-gitlab-migrator.log", sessionID, i))
-					f, err = os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
-					if err == nil {
-						break
-					}
-					if !os.IsExist(err) {
-						return nil, nil, fmt.Errorf("opening log file: %v", err)
-					}
-				}
-				if err != nil {
-					return nil, nil, fmt.Errorf("failed to generate unique log filename after retries")
-				}
-			} else {
-				return nil, nil, fmt.Errorf("opening log file: %v", err)
+		var fullPath string
+		var f *os.File
+		var err error
+		for i := 1; i <= 10; i++ {
+			name := sessionID + "-gitlab-migrator.log"
+			if i > 1 {
+				name = fmt.Sprintf("%s-%d-gitlab-migrator.log", sessionID, i)
 			}
+			fullPath = filepath.Join(targetDir, name)
+			f, err = os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
+			if !os.IsExist(err) {
+				break
+			}
+		}
+		if os.IsExist(err) {
+			return nil, nil, fmt.Errorf("failed to generate unique log filename after retries")
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening log file: %v", err)
 		}
 
 		fmt.Fprintf(os.Stderr, "Logging to file: %s\n", fullPath)

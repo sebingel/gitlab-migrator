@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ func newPreparer(logger hclog.Logger) *preparer {
 }
 
 // run orchestrates the prepare mode workflow.
-func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode string, batchCount int) error {
+func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode string, batchCount int) (err error) {
 	start := time.Now()
 	report := &prepareReport{
 		CloneURL:  cloneURL,
@@ -57,6 +58,9 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	}
 
 	defer func() {
+		if err != nil {
+			report.Error = err.Error()
+		}
 		report.Duration = time.Since(start)
 		printPrepareReport(report)
 	}()
@@ -66,21 +70,18 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	// Check prerequisites
 	pythonCmd, err := p.checkPrerequisites(ctx, largeFileMode)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 
 	// Clone repository
 	repoDir, err := p.clone(ctx, cloneURL)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 
 	// Detect default branch
 	defaultBranch, err := p.detectDefaultBranch(ctx, repoDir)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 	report.DefaultBranch = defaultBranch
@@ -89,7 +90,6 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	// Estimate repo size
 	repoSizeBefore, err := estimateRepoSize(repoDir)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 	report.RepoSizeBefore = repoSizeBefore
@@ -99,7 +99,6 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	p.logger.Info("scanning for large files (>100MB)")
 	largeFiles, err := scanLargeFiles(ctx, repoDir)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 	report.LargeFiles = largeFiles
@@ -111,9 +110,7 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	// Decide cleanup strategy
 	needsCleanup := len(largeFiles) > 0
 	if needsCleanup && largeFileMode == "" {
-		err := fmt.Errorf("found %d files >100MB, use -prepare-large-files=remove or -prepare-large-files=lfs", len(largeFiles))
-		report.Error = err.Error()
-		return err
+		return fmt.Errorf("found %d files >100MB, use -prepare-large-files=remove or -prepare-large-files=lfs", len(largeFiles))
 	}
 	if !needsCleanup && largeFileMode != "" {
 		p.logger.Info("no large files found, skipping cleanup")
@@ -125,7 +122,6 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 
 		// Remove origin remote (required by filter-repo)
 		if err := p.removeRemote(ctx, repoDir, "origin"); err != nil {
-			report.Error = err.Error()
 			return err
 		}
 
@@ -133,32 +129,27 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 		switch largeFileMode {
 		case "remove":
 			if err := p.executeFilterRepo(ctx, repoDir, pythonCmd, largeFiles); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 			p.logger.Info("filter-repo complete", "files_removed", len(uniquePaths(largeFiles)))
 
 		case "lfs":
 			if err := p.executeLFSMigrate(ctx, repoDir); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 			p.logger.Info("lfs migrate complete")
 
 			// Add remote temporarily for LFS push
 			if err := p.addRemote(ctx, repoDir, "origin", targetURL); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 			if err := p.executeLFSPush(ctx, repoDir, "origin"); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 			p.logger.Info("lfs objects pushed")
 
 			// Remove remote again for clean state before configuring target
 			if err := p.removeRemote(ctx, repoDir, "origin"); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 		}
@@ -172,15 +163,12 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 		if lfsConfigured, _ := hasLFSTracking(repoDir); lfsConfigured {
 			p.logger.Info("LFS tracking detected from previous run, pushing LFS objects")
 			if err := p.addRemote(ctx, repoDir, "origin", targetURL); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 			if err := p.executeLFSPush(ctx, repoDir, "origin"); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 			if err := p.removeRemote(ctx, repoDir, "origin"); err != nil {
-				report.Error = err.Error()
 				return err
 			}
 		}
@@ -188,7 +176,6 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 
 	// Configure target remote
 	if err := p.addRemote(ctx, repoDir, "origin", targetURL); err != nil {
-		report.Error = err.Error()
 		return err
 	}
 	p.logger.Info("configured target remote", "url", targetURL)
@@ -196,7 +183,6 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	// Measure repo size after cleanup
 	repoSizeAfter, err := estimateRepoSize(repoDir)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 	report.RepoSizeAfter = repoSizeAfter
@@ -204,7 +190,6 @@ func (p *preparer) run(ctx context.Context, cloneURL, targetURL, largeFileMode s
 	// Push to target
 	batched, usedBatchCount, err := p.pushRepo(ctx, repoDir, "origin", defaultBranch, batchCount, repoSizeAfter)
 	if err != nil {
-		report.Error = err.Error()
 		return err
 	}
 	report.BatchPush = batched
@@ -524,10 +509,7 @@ func (p *preparer) batchPush(ctx context.Context, repoDir, remote, branch string
 				if batchSize <= 1 {
 					return fmt.Errorf("single commit exceeds GitHub 2 GiB push limit: %s", sha)
 				}
-				batchSize = batchSize / 2
-				if batchSize < 1 {
-					batchSize = 1
-				}
+				batchSize /= 2
 				p.logger.Warn("push rejected (payload too large), halving batch size",
 					"new_batch_size", batchSize, "retrying_from", lastSuccessIdx+1)
 				i = lastSuccessIdx + batchSize
@@ -586,15 +568,7 @@ func parseToolVersion(raw, prefix string) ([3]int, error) {
 
 // versionAtLeast returns true if ver >= min.
 func versionAtLeast(ver, min [3]int) bool {
-	for i := 0; i < 3; i++ {
-		if ver[i] > min[i] {
-			return true
-		}
-		if ver[i] < min[i] {
-			return false
-		}
-	}
-	return true // equal
+	return slices.Compare(ver[:], min[:]) >= 0
 }
 
 // repoNameFromURL extracts a directory name like "repo.git" from a clone URL.

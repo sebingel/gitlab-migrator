@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,8 +37,6 @@ type GitHubError struct {
 
 // App holds all runtime dependencies for the migration tool.
 type App struct {
-	cfg      *config.Config
-	logger   hclog.Logger
 	migrator *migration.Migrator
 }
 
@@ -76,11 +75,7 @@ func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
 
 	migrator := migration.NewMigrator(cfg, gh, gl, ghClient, glClient, logger)
 
-	return &App{
-		cfg:      cfg,
-		logger:   logger,
-		migrator: migrator,
-	}, nil
+	return &App{migrator: migrator}, nil
 }
 
 // Run performs the migration for the given projects.
@@ -107,11 +102,7 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
 		if resp == nil {
-			mult := math.Pow(2, float64(attemptNum)) * float64(min)
-			wait := time.Duration(mult)
-			if float64(wait) != mult || wait > max {
-				wait = max
-			}
+			wait := retryablehttp.DefaultBackoff(min, max, attemptNum, nil)
 			jitter := time.Duration(rand.Float64() * 0.2 * float64(wait))
 			wait += jitter
 			logger.Trace("waiting before retrying after network error", "sleep", wait, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
@@ -190,13 +181,8 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			}
 		}
 
-		mult := math.Pow(2, float64(attemptNum)) * float64(min)
-		wait := time.Duration(mult)
-		if float64(wait) != mult || wait > max {
-			wait = max
-		}
-
-		sleep = wait
+		// nil response: Retry-After was already handled above.
+		sleep = retryablehttp.DefaultBackoff(min, max, attemptNum, nil)
 		return
 	}
 
@@ -234,9 +220,7 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 		}
 
 		if resp.StatusCode == http.StatusForbidden {
-			if match, err := regexp.MatchString("SAML enforcement", errResp.Message); err != nil {
-				return false, fmt.Errorf("matching 403 response: %v", err)
-			} else if match {
+			if strings.Contains(errResp.Message, "SAML enforcement") {
 				msg := errResp.Message
 				if errResp.DocumentationURL != "" {
 					msg += fmt.Sprintf(" - %s", errResp.DocumentationURL)
@@ -264,11 +248,9 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			http.StatusGatewayTimeout,
 		}
 
-		for _, status := range retryableStatuses {
-			if resp.StatusCode == status {
-				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "message", errResp.Message)
-				return true, nil
-			}
+		if slices.Contains(retryableStatuses, resp.StatusCode) {
+			logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "message", errResp.Message)
+			return true, nil
 		}
 
 		return false, nil
