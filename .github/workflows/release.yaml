@@ -12,11 +12,20 @@ on:
   push:
     branches:
       - main
-    # A push that changes only these files creates no release. The next
-    # release picks the changes up.
-    paths-ignore:
-      - '**.md'
-      - '**.jpeg'
+    # Only a push that changes one of these files creates a release. They are
+    # the inputs of the binaries (Go code without tests, go.mod with the Go
+    # version, go.sum) and of the archives (build-release.sh and LICENSE).
+    # README.md is in the archives too, but documentation edits alone do not
+    # need a new version; the next release ships the current README.md.
+    # Workflow changes (for example Dependabot action updates) do not change
+    # the assets either. The code has no go:embed files.
+    paths:
+      - '**.go'
+      - '!**_test.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/scripts/build-release.sh'
+      - 'LICENSE'
   pull_request:
     # labeled and unlabeled update the version preview of the dry run.
     types: [opened, synchronize, reopened, labeled, unlabeled]

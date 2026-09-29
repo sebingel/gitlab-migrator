@@ -9,9 +9,6 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
-      # Action updates do not change the binaries, so merging them creates
-      # no release. See CONTRIBUTING.md.
-      - "release:skip"
     commit-message:
       prefix: "chore"
       include: "scope"
