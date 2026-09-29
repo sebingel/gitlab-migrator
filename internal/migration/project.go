@@ -1329,16 +1329,25 @@ func (p *project) findExistingPRByList(ctx context.Context, mr *gogitlab.MergeRe
 		fmt.Sprintf("%s:%s", p.githubPath[0], mr.SourceBranch),
 		fmt.Sprintf("%s:migration-source-%d/%s", p.githubPath[0], mr.IID, mr.SourceBranch),
 	} {
-		// The paginated transport (app.go) follows all pages, so one call returns every PR.
-		opts := &gogithub.PullRequestListOptions{Head: head, State: "all"}
-		prs, _, err := p.m.gh.PullRequests.List(ctx, p.githubPath[0], p.githubPath[1], opts)
-		if err != nil {
-			return nil, err
+		opts := &gogithub.PullRequestListOptions{
+			Head:        head,
+			State:       "all",
+			ListOptions: gogithub.ListOptions{PerPage: 100},
 		}
-		for _, pr := range prs {
-			if bodyMatchesMergeRequest(pr.GetBody(), mr.IID) {
-				return pr, nil
+		for {
+			prs, resp, err := p.m.gh.PullRequests.List(ctx, p.githubPath[0], p.githubPath[1], opts)
+			if err != nil {
+				return nil, err
 			}
+			for _, pr := range prs {
+				if bodyMatchesMergeRequest(pr.GetBody(), mr.IID) {
+					return pr, nil
+				}
+			}
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
 		}
 	}
 	return nil, nil
