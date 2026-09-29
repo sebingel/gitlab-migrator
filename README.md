@@ -12,7 +12,7 @@ Both gitlab.com and GitLab self-hosted are supported, as well as github.com and 
 
 ## Installing
 
-Download the [latest release](https://github.com/sebingel/gitlab-migrator/releases/latest) for your platform & architecture. Alternatively,
+Download the [latest release](https://github.com/sebingel/gitlab-migrator/releases/latest) for your platform & architecture. Linux and macOS builds are `.tar.gz` archives, Windows builds are `.zip` archives, and each release has a checksums file. Alternatively,
 
 ```
 go install github.com/sebingel/gitlab-migrator/cmd/gitlab-migrator@latest
@@ -251,4 +251,4 @@ Use `-report` to get a summary of what would be migrated without actually perfor
 
 ## Contributing, reporting bugs etc...
 
-Please use GitHub issues & pull requests. This project is licensed under the MIT license.
+Please use GitHub issues & pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and how releases are made. This project is licensed under the MIT license.
