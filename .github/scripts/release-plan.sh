@@ -132,14 +132,18 @@ find_pull_labels() {
 }
 
 # GitHub starts no push workflow if any commit message of the push contains
-# one of its skip markers. The push of a merge contains the merge commit,
-# whose message contains the pull request title, and every commit of the pull
-# request. So a marker in the title or in any of these commit messages stops
-# the release in silence. The dry run warns about it.
+# one of its skip markers or a "skip-checks: true" trailer. The push of a
+# merge contains the merge commit, whose message contains the pull request
+# title, and every commit of the pull request. So a marker in the title or a
+# marker or trailer in any of these commit messages stops the release in
+# silence. The dry run warns about it. The trailer is matched on any line,
+# not only at the end of the message: a false warning costs little, a missed
+# release is what this check prevents.
 warn_skip_markers() {
   local marker title line commit="" found=""
   local -a markers=('[skip ci]' '[ci skip]' '[no ci]' '[skip actions]' '[actions skip]')
   local commit_re='^@@@ ([0-9a-f]+)$'
+  local trailer_re='^skip-checks: ?true[[:space:]]*$'
   title="$(tr '[:upper:]' '[:lower:]' <<< "${PR_TITLE:-}")"
   for marker in "${markers[@]}"; do
     if [[ "$title" == *"$marker"* ]]; then
@@ -157,6 +161,10 @@ warn_skip_markers() {
         warn "Commit $commit of this pull request contains '$marker' in its message. GitHub starts no push workflow if any commit of a push has it, so the merge creates no release. Change the commit message (for example with git rebase) if you want a release."
       fi
     done
+    if [[ "$line" =~ $trailer_re ]] && ! has_line "$found" "$commit skip-checks"; then
+      found="$found"$'\n'"$commit skip-checks"
+      warn "Commit $commit of this pull request has a 'skip-checks: true' trailer in its message. GitHub starts no push workflow if any commit of a push has it, so the merge creates no release. Remove the trailer (for example with git rebase) if you want a release."
+    fi
   done <<< "$(tr '[:upper:]' '[:lower:]' <<< "${PR_COMMIT_MESSAGES:-}")"
 }
 

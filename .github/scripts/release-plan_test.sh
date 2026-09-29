@@ -222,6 +222,34 @@ else
   report "and does not blame the clean commit" ""
 fi
 
+expect "a skip-checks trailer in a commit message does not change the plan" \
+  "release=true publish=false" \
+  "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='adds x' \
+  PR_COMMIT_MESSAGES=$'@@@ aaaaaaa\nadds x\n@@@ bbbbbbb\nfixes y\n\n\nskip-checks: true'
+expect_message "but the dry run warns about that commit" "Commit bbbbbbb"
+expect_message "and names the trailer" "skip-checks"
+
+run plan "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='adds x' \
+  PR_COMMIT_MESSAGES=$'@@@ aaaaaaa\nadds x\n\n\nSkip-Checks:true\n@@@ bbbbbbb\nfixes y\n\n\nskip-checks: true\r'
+expect_message "the trailer without a space and in mixed case warns" "Commit aaaaaaa"
+expect_message "the trailer with a CRLF line end warns" "Commit bbbbbbb"
+
+run plan "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='adds x' \
+  PR_COMMIT_MESSAGES=$'@@@ aaaaaaa\nadds x\n\n\nskip-checks: false\n@@@ bbbbbbb\nfixes y\n\nskip-checks: truely\nwe removed skip-checks: true handling\nwe removed skip-checks: true'
+if [ "$status" -eq 0 ] && ! grep -qF "::warning::" <<< "$out"; then
+  report "no warning for skip-checks: false, other words or the text in a sentence" ""
+else
+  report "no warning for skip-checks: false, other words or the text in a sentence" "exit status $status, output: $out"
+fi
+
+run plan "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='adds x' \
+  PR_COMMIT_MESSAGES=$'@@@ aaaaaaa\nadds x\n\n\nskip-checks: true\nskip-checks:true'
+if [ "$(grep -c "has a 'skip-checks: true' trailer" <<< "$out")" = "1" ]; then
+  report "a trailer twice in one commit warns once" ""
+else
+  report "a trailer twice in one commit warns once" "output: $out"
+fi
+
 echo "--- push to main"
 
 expect "merge of a pull request without labels" \
