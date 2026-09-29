@@ -12,7 +12,8 @@
 # file names. OUT_DIR defaults to dist. Old gitlab-migrator_* files in OUT_DIR
 # are removed first.
 #
-# Needs: go, tar, zip, sha256sum.
+# Needs: bash, go, zip, GNU tar or bsdtar (macOS), and sha256sum or
+# shasum (macOS). The script checks them before it builds anything.
 
 set -euo pipefail
 
@@ -24,6 +25,34 @@ targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows
 # The version goes into file names and into -ldflags, so keep it simple.
 if ! [[ "$version" =~ ^[0-9A-Za-z._-]+$ ]]; then
   echo "invalid version '$version', allowed characters: 0-9 A-Z a-z . _ -" >&2
+  exit 1
+fi
+
+for tool in go zip tar; do
+  if ! command -v "$tool" > /dev/null; then
+    echo "$tool is missing" >&2
+    exit 1
+  fi
+done
+
+# Every archive entry belongs to root (uid and gid 0). GNU tar and bsdtar
+# name these options differently.
+tar_version="$(tar --version 2>&1 || true)"
+case "$tar_version" in
+  *"GNU tar"*) tar_owner=(--owner=0 --group=0 --numeric-owner) ;;
+  *bsdtar*) tar_owner=(--uid 0 --gid 0 --numeric-owner) ;;
+  *)
+    echo "unsupported tar '${tar_version%%$'\n'*}', expected GNU tar or bsdtar" >&2
+    exit 1
+    ;;
+esac
+
+if command -v sha256sum > /dev/null; then
+  sha256=(sha256sum)
+elif command -v shasum > /dev/null; then
+  sha256=(shasum -a 256)
+else
+  echo "sha256sum or shasum is missing" >&2
   exit 1
 fi
 
@@ -71,13 +100,13 @@ for target in "${targets[@]}"; do
     (cd "$stage" && zip -q -X "$out_dir/$asset" "$binary" LICENSE README.md)
   else
     asset="$base.tar.gz"
-    tar -C "$stage" --owner=0 --group=0 --numeric-owner -czf "$out_dir/$asset" "$binary" LICENSE README.md
+    tar -C "$stage" "${tar_owner[@]}" -czf "$out_dir/$asset" "$binary" LICENSE README.md
   fi
   assets+=("$asset")
 done
 
 checksums="${name}_${version#v}_checksums.txt"
-(cd "$out_dir" && sha256sum -- "${assets[@]}" > "$checksums")
+(cd "$out_dir" && "${sha256[@]}" -- "${assets[@]}" > "$checksums")
 
 echo "assets in $out_dir:"
 (cd "$out_dir" && ls -l -- "${assets[@]}" "$checksums")
