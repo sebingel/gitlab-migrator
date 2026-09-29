@@ -69,26 +69,18 @@ func (sf *StateFile) MarshalJSON() ([]byte, error) {
 		mrParts = append(mrParts, fmt.Sprintf("%q:%s", strconv.Itoa(k), v))
 	}
 
-	// Marshal the other fields via an alias to avoid infinite recursion
-	type Alias struct {
-		Version       int       `json:"version"`
-		GitLabProject string    `json:"gitlab_project"`
-		GitHubRepo    string    `json:"github_repo"`
-		UpdatedAt     time.Time `json:"updated_at"`
-	}
-	outer, err := json.Marshal(&Alias{
-		Version:       sf.Version,
-		GitLabProject: sf.GitLabProject,
-		GitHubRepo:    sf.GitHubRepo,
-		UpdatedAt:     sf.UpdatedAt,
+	// stateFileAlias has the same fields but no MarshalJSON method, which avoids
+	// infinite recursion. The outer MergeRequests field is less deeply nested than
+	// the embedded map field with the same JSON name, so encoding/json uses the
+	// ordered raw object and ignores the map.
+	type stateFileAlias StateFile
+	return json.Marshal(struct {
+		*stateFileAlias
+		MergeRequests json.RawMessage `json:"merge_requests"`
+	}{
+		stateFileAlias: (*stateFileAlias)(sf),
+		MergeRequests:  json.RawMessage("{" + strings.Join(mrParts, ",") + "}"),
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Splice the ordered merge_requests into the outer JSON object
-	// outer is like `{"version":1,...,"updated_at":"..."}` — insert before closing brace
-	return []byte(string(outer[:len(outer)-1]) + `,"merge_requests":{` + strings.Join(mrParts, ",") + `}}`), nil
 }
 
 // MigrationState manages the on-disk migration state for a single project pair.
@@ -173,57 +165,34 @@ func (s *MigrationState) GetState(mrIID int) *MRState {
 	return &cp
 }
 
-// RecordSuccess records a successful MR migration.
-func (s *MigrationState) RecordSuccess(mrIID int, githubPRNum *int) {
+// record stores st for the MR with the given IID and marks the state dirty.
+func (s *MigrationState) record(mrIID int, st MRState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.data.MergeRequests[strconv.Itoa(mrIID)] = &MRState{
-		Status:      MRStateSuccess,
-		GitHubPRNum: githubPRNum,
-		UpdatedAt:   time.Now(),
-	}
+	st.UpdatedAt = time.Now()
+	s.data.MergeRequests[strconv.Itoa(mrIID)] = &st
 	s.dirty = true
+}
+
+// RecordSuccess records a successful MR migration.
+func (s *MigrationState) RecordSuccess(mrIID int, githubPRNum *int) {
+	s.record(mrIID, MRState{Status: MRStateSuccess, GitHubPRNum: githubPRNum})
 }
 
 // RecordFailure records a failed MR migration.
 func (s *MigrationState) RecordFailure(mrIID int, errMsg string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.data.MergeRequests[strconv.Itoa(mrIID)] = &MRState{
-		Status:    MRStateFailed,
-		Error:     errMsg,
-		UpdatedAt: time.Now(),
-	}
-	s.dirty = true
+	s.record(mrIID, MRState{Status: MRStateFailed, Error: errMsg})
 }
 
 // RecordSkipped records a skipped MR migration.
 func (s *MigrationState) RecordSkipped(mrIID int, reason string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.data.MergeRequests[strconv.Itoa(mrIID)] = &MRState{
-		Status:     MRStateSkipped,
-		SkipReason: reason,
-		UpdatedAt:  time.Now(),
-	}
-	s.dirty = true
+	s.record(mrIID, MRState{Status: MRStateSkipped, SkipReason: reason})
 }
 
 // RecordPartial records a partially successful MR migration (PR created but some comments failed).
 func (s *MigrationState) RecordPartial(mrIID int, githubPRNum *int, errMsg string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.data.MergeRequests[strconv.Itoa(mrIID)] = &MRState{
-		Status:      MRStatePartial,
-		GitHubPRNum: githubPRNum,
-		Error:       errMsg,
-		UpdatedAt:   time.Now(),
-	}
-	s.dirty = true
+	s.record(mrIID, MRState{Status: MRStatePartial, GitHubPRNum: githubPRNum, Error: errMsg})
 }
 
 // Flush writes the current state to disk atomically (write to temp file, fsync, then rename).
