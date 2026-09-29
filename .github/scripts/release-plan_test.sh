@@ -202,11 +202,24 @@ expect "a GitHub skip marker in the title does not change the plan" \
   "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='fixes the docs [Skip CI]'
 expect_message "but the dry run warns that the merge will not release" "[skip ci]"
 
-run plan "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='fixes the ci skip logic'
-if grep -qF "::warning::" <<< "$out"; then
-  report "no warning for a normal title" "unexpected warning: $out"
+run plan "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='fixes the ci skip logic' \
+  PR_COMMIT_MESSAGES=$'@@@ aaaaaaa\nadds x\n\nno markers here\n@@@ bbbbbbb\nfixes y'
+if [ "$status" -eq 0 ] && ! grep -qF "::warning::" <<< "$out"; then
+  report "no warning for a normal title and normal commits" ""
 else
-  report "no warning for a normal title" ""
+  report "no warning for a normal title and normal commits" "exit status $status, output: $out"
+fi
+
+expect "a GitHub skip marker in a commit message does not change the plan" \
+  "release=true publish=false" \
+  "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='adds x' \
+  PR_COMMIT_MESSAGES=$'@@@ aaaaaaa\nadds x\n@@@ bbbbbbb\nfixes y\n\nthe text [No CI] in the body'
+expect_message "but the dry run warns about that commit" "Commit bbbbbbb"
+expect_message "and names the marker" "[no ci]"
+if grep -qF "Commit aaaaaaa" <<< "$out"; then
+  report "and does not blame the clean commit" "output: $out"
+else
+  report "and does not blame the clean commit" ""
 fi
 
 echo "--- push to main"

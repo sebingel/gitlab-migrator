@@ -114,7 +114,12 @@ jobs:
           MERGED_TAGS="$(git tag --list 'v*' --merged "$SHA")"
           SHA_TAGS="$(git tag --list 'v*' --points-at "$SHA")"
           COMMIT_MESSAGE="$(git log -1 --format=%B "$SHA")"
-          export TAGS MERGED_TAGS SHA_TAGS COMMIT_MESSAGE
+          PR_COMMIT_MESSAGES=""
+          if [ "$EVENT" = "pull_request" ]; then
+            # SHA is the merge ref: base as first, pull request head as second parent.
+            PR_COMMIT_MESSAGES="$(git log --format='@@@ %h%n%B' "$SHA^1..$SHA^2")"
+          fi
+          export TAGS MERGED_TAGS SHA_TAGS COMMIT_MESSAGE PR_COMMIT_MESSAGES
           RESULT_FILE="$GITHUB_OUTPUT" SUMMARY_FILE="$GITHUB_STEP_SUMMARY" \
             bash .github/scripts/release-plan.sh plan
 

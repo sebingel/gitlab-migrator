@@ -25,6 +25,9 @@
 #   PR_LABELS       labels of the pull request as a JSON array (pull_request)
 #   PR_HEAD_SHA     head commit of the pull request (pull_request)
 #   PR_TITLE        title of the pull request (pull_request)
+#   PR_COMMIT_MESSAGES
+#                   messages of all commits of the pull request, each one
+#                   after a line "@@@ <short sha>" (pull_request)
 #   BUMP            patch, minor or major (workflow_dispatch)
 #   RESULT_FILE     file for the key=value results (default: stdout)
 #   SUMMARY_FILE    file for a Markdown summary (optional)
@@ -128,17 +131,33 @@ find_pull_labels() {
   warn "$SHA is not the merge commit of a pull request into main of $REPO (first line: '$first_line'). So no labels apply and this is a patch release. For another bump, start a manual release."
 }
 
-# GitHub starts no push workflow if the pushed commit message contains one of
-# its skip markers. The merge commit contains the pull request title, so such
-# a title stops the release in silence. The dry run warns about it.
+# GitHub starts no push workflow if any commit message of the push contains
+# one of its skip markers. The push of a merge contains the merge commit,
+# whose message contains the pull request title, and every commit of the pull
+# request. So a marker in the title or in any of these commit messages stops
+# the release in silence. The dry run warns about it.
 warn_skip_markers() {
-  local marker title
+  local marker title line commit="" found=""
+  local -a markers=('[skip ci]' '[ci skip]' '[no ci]' '[skip actions]' '[actions skip]')
+  local commit_re='^@@@ ([0-9a-f]+)$'
   title="$(tr '[:upper:]' '[:lower:]' <<< "${PR_TITLE:-}")"
-  for marker in '[skip ci]' '[ci skip]' '[no ci]' '[skip actions]' '[actions skip]'; do
-    if grep -qF -- "$marker" <<< "$title"; then
+  for marker in "${markers[@]}"; do
+    if [[ "$title" == *"$marker"* ]]; then
       warn "The title contains '$marker'. GitHub puts the title into the merge commit and then starts no push workflow, so the merge creates no release. Remove it from the title if you want a release."
     fi
   done
+  while IFS= read -r line; do
+    if [[ "$line" =~ $commit_re ]]; then
+      commit="${BASH_REMATCH[1]}"
+      continue
+    fi
+    for marker in "${markers[@]}"; do
+      if [[ "$line" == *"$marker"* ]] && ! has_line "$found" "$commit $marker"; then
+        found="$found"$'\n'"$commit $marker"
+        warn "Commit $commit of this pull request contains '$marker' in its message. GitHub starts no push workflow if any commit of a push has it, so the merge creates no release. Change the commit message (for example with git rebase) if you want a release."
+      fi
+    done
+  done <<< "$(tr '[:upper:]' '[:lower:]' <<< "${PR_COMMIT_MESSAGES:-}")"
 }
 
 plan() {
