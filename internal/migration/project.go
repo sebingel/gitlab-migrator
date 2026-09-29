@@ -721,7 +721,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		mergeRequest.TargetBranch = targetBranchForClosedMergeRequest
 
 		p.log.Trace("retrieving commits for merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
-		mergeRequestCommits, _, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mergeRequest.IID, &gogitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
+		mergeRequestCommits, err := p.listMergeRequestCommits(mergeRequest.IID)
 		if err != nil {
 			return result, fmt.Errorf("retrieving merge request commits: %w", err)
 		}
@@ -731,10 +731,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			result.SkipReason = "merge request has no commits"
 			return result, nil
 		}
-
-		sort.Slice(mergeRequestCommits, func(i, j int) bool {
-			return mergeRequestCommits[i].CommittedDate.Before(*mergeRequestCommits[j].CommittedDate)
-		})
 
 		if mergeRequestCommits[0] == nil {
 			return result, fmt.Errorf("start commit for merge request %d is nil", mergeRequest.IID)
@@ -1175,6 +1171,33 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	}
 
 	return result, nil
+}
+
+// listMergeRequestCommits returns all commits of the merge request, oldest
+// first. GitLab lists the newest commits first, so it reads every page before
+// it sorts.
+func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error) {
+	var commits []*gogitlab.Commit
+	opts := &gogitlab.GetMergeRequestCommitsOptions{PerPage: 100, OrderBy: "created_at", Sort: "asc"}
+	for {
+		page, resp, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mrIID, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		commits = append(commits, page...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+
+	sort.Slice(commits, func(i, j int) bool {
+		return commits[i].CommittedDate.Before(*commits[j].CommittedDate)
+	})
+	return commits, nil
 }
 
 // createLocalBranch creates a branch ref at hash in the local mirror. Only the ref
