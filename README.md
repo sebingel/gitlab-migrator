@@ -15,7 +15,7 @@ Both gitlab.com and GitLab self-hosted are supported, as well as github.com and 
 Download the [latest release](https://github.com/sebingel/gitlab-migrator/releases/latest) for your platform & architecture. Alternatively,
 
 ```
-go install github.com/sebingel/gitlab-migrator@latest
+go install github.com/sebingel/gitlab-migrator/cmd/gitlab-migrator@latest
 ```
 
 Golang 1.25 was used, you may have luck with earlier releases.
