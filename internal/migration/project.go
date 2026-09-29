@@ -757,11 +757,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				p.deleteTempBranchesViaAPI(ctx, mergeRequest)
 			}()
 		} else {
-			worktree, err := p.repo.Worktree()
-			if err != nil {
-				return result, fmt.Errorf("creating worktree: %w", err)
-			}
-
 			p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
 			startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
 			if err != nil {
@@ -800,13 +795,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				}
 
 				p.log.Trace("creating target branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startCommitParent.Hash)
-				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: true,
-					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
-					Hash:   startCommitParent.Hash,
-				}); err != nil {
-					return result, fmt.Errorf("checking out temporary target branch: %w", err)
+				if err = p.createLocalBranch(plumbing.NewBranchReferenceName(mergeRequest.TargetBranch), startCommitParent.Hash); err != nil {
+					return result, fmt.Errorf("creating temporary target branch: %w", err)
 				}
 			}
 
@@ -823,13 +813,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				return result, fmt.Errorf("loading end commit %s: %w", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err)
 			}
 
-			if err = worktree.Checkout(&git.CheckoutOptions{
-				Create: true,
-				Force:  true,
-				Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
-				Hash:   endHash,
-			}); err != nil {
-				return result, fmt.Errorf("checking out temporary source branch: %w", err)
+			if err = p.createLocalBranch(plumbing.NewBranchReferenceName(mergeRequest.SourceBranch), endHash); err != nil {
+				return result, fmt.Errorf("creating temporary source branch: %w", err)
 			}
 
 			p.log.Debug("pushing branches for merged/closed merge request", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -1187,6 +1172,22 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	}
 
 	return result, nil
+}
+
+// createLocalBranch creates a branch ref at hash in the local mirror. Only the ref
+// is needed for the push, so it skips the worktree checkout that
+// Worktree.Checkout would do. Like Checkout with Create, it fails when the
+// branch already exists.
+func (p *project) createLocalBranch(name plumbing.ReferenceName, hash plumbing.Hash) error {
+	if err := name.Validate(); err != nil {
+		return err
+	}
+	if _, err := p.repo.Storer.Reference(name); err == nil {
+		return fmt.Errorf("a branch named %q already exists", name)
+	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return err
+	}
+	return p.repo.Storer.SetReference(plumbing.NewHashReference(name, hash))
 }
 
 // editPullRequest edits a pull request and retries on 404. The result goes to a
