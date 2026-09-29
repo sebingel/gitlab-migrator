@@ -1,0 +1,7 @@
+paths:
+  .github/workflows/release.yaml:
+    ignore:
+      # actionlint 1.7.12 does not know concurrency.queue yet
+      # (rhysd/actionlint#654 is open). GitHub supports "queue: max" since
+      # 2026-05-07. Remove this entry once an actionlint release knows it.
+      - 'unexpected key "queue" for "concurrency" section'

@@ -333,6 +333,7 @@ expect "other tags on the commit do not count as a release" \
 expect_error "commit that does not contain the previous release" \
   "does not contain the previous release v0.16.0" plan \
   "${push_env[@]}" MERGED_TAGS=$'v0.9.0\nv0.15.1' STUB_PULL="$(pull 41 "$sha" '[]')"
+expect_message "and names the queue order as a cause" "run of a newer merge first"
 
 expect "first release without any tag" \
   "previous= version=v0.0.1 publish=true" \

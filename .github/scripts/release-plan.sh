@@ -193,9 +193,11 @@ plan() {
         fail "$SHA is already released as $released. There is nothing new to release."
       fi
       # "Re-run all jobs" on an old run keeps the old commit, but sees the
-      # new tags. Never release a commit that is older than the last release.
+      # new tags. Queued release runs (queue: max) can also start in another
+      # order than the merges. Never release a commit that is older than the
+      # last release.
       if [ -n "$previous" ] && ! has_line "${MERGED_TAGS:-}" "$previous"; then
-        fail "$SHA does not contain the previous release $previous. An old run was probably started again. Use a manual release on main instead."
+        fail "$SHA does not contain the previous release $previous. This happens when an old run is started again, or when GitHub started the release run of a newer merge first. Use a manual release on main if you need another bump."
       fi
       if [ "$event" = "push" ]; then
         : "${REPO:?REPO is required}"
