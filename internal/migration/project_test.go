@@ -16,6 +16,26 @@ func makeGitHubError(statusCode int, message string, errors []gogithub.Error) er
 	}
 }
 
+// A typed nil *ErrorResponse passes errors.As with a nil target. The
+// classifiers must return false for it, not panic on ghErr.Response.
+func TestGitHubErrorClassifiersTypedNil(t *testing.T) {
+	var err error = (*gogithub.ErrorResponse)(nil)
+	classifiers := map[string]func(error) bool{
+		"isAlreadyExistsError":         isAlreadyExistsError,
+		"isAlreadyExistsPRError":       isAlreadyExistsPRError,
+		"isSearchSyntaxError":          isSearchSyntaxError,
+		"isReferenceUpdateFailedError": isReferenceUpdateFailedError,
+		"isGitHubNotFound":             isGitHubNotFound,
+	}
+	for name, classify := range classifiers {
+		t.Run(name, func(t *testing.T) {
+			if classify(err) {
+				t.Errorf("%s(typed nil) = true, want false", name)
+			}
+		})
+	}
+}
+
 func TestIsAlreadyExistsPRError(t *testing.T) {
 	tests := []struct {
 		name string

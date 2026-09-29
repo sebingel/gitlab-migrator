@@ -1344,12 +1344,21 @@ func (p *project) findExistingPRByList(ctx context.Context, mr *gogitlab.MergeRe
 	return nil, nil
 }
 
+// as422 returns the GitHub error response when err is a 422 Unprocessable Entity.
+func as422(err error) (*gogithub.ErrorResponse, bool) {
+	var ghErr *gogithub.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr == nil || ghErr.Response == nil ||
+		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+		return nil, false
+	}
+	return ghErr, true
+}
+
 // is422Matching reports whether err is a GitHub 422 response whose top-level
 // message or any of its detail messages satisfies match.
 func is422Matching(err error, match func(string) bool) bool {
-	var ghErr *gogithub.ErrorResponse
-	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
-		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
+	ghErr, ok := as422(err)
+	if !ok {
 		return false
 	}
 	if match(ghErr.Message) {
@@ -1368,14 +1377,10 @@ func isAlreadyExistsError(err error) bool {
 }
 
 func isReferenceUpdateFailedError(err error) bool {
-	var ghErr *gogithub.ErrorResponse
-	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
-		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
-		return false
-	}
+	ghErr, ok := as422(err)
 	// GitHub returns "Reference update failed" with an empty errors array for this condition,
 	// so checking only the top-level message is sufficient and intentional.
-	return strings.Contains(ghErr.Message, "Reference update failed")
+	return ok && strings.Contains(ghErr.Message, "Reference update failed")
 }
 
 func isAlreadyExistsPRError(err error) bool {
