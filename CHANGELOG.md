@@ -1,5 +1,7 @@
 ## Changelog
 
+This file is not updated anymore. It lists the changes up to v0.9.0. For v0.10.0 to v0.16.0, see the [upstream releases](https://github.com/manicminer/gitlab-migrator/releases). Newer releases have generated release notes on the [releases page](https://github.com/sebingel/gitlab-migrator/releases).
+
 ### v0.9.0
 
 - Update `github.com/google/go-github` to v74
