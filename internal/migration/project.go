@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1193,11 +1192,14 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 }
 
 // listMergeRequestCommits returns all commits of the merge request, oldest
-// first. GitLab lists the newest commits first, so it reads every page before
-// it sorts.
+// first. GitLab lists them in git order, newest first, and has no option to
+// change that, so it reads every page and reverses the list. GitLab itself
+// takes the last commit of its list as the first commit of the merge request.
+// A sort by committed date would be wrong for commits with the same date,
+// which is common after a rebase, and for commits with a wrong clock.
 func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error) {
 	var commits []*gogitlab.Commit
-	opts := &gogitlab.GetMergeRequestCommitsOptions{PerPage: 100, OrderBy: "created_at", Sort: "asc"}
+	opts := &gogitlab.GetMergeRequestCommitsOptions{PerPage: 100}
 	for {
 		page, resp, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mrIID, opts)
 		if err != nil {
@@ -1213,9 +1215,7 @@ func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error)
 		opts.Page = resp.NextPage
 	}
 
-	sort.Slice(commits, func(i, j int) bool {
-		return commits[i].CommittedDate.Before(*commits[j].CommittedDate)
-	})
+	slices.Reverse(commits)
 	return commits, nil
 }
 

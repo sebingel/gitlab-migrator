@@ -110,6 +110,53 @@ func TestListMergeRequestCommits_ReadsAllPages(t *testing.T) {
 	}
 }
 
+func TestListMergeRequestCommits_UsesGitLabOrder(t *testing.T) {
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		// dates[i] is the committed date of commit-(i+1) after base. The
+		// commits are in git order, oldest first.
+		dates []time.Duration
+	}{
+		// A rebase can give all commits the same committed date, because the
+		// date has only one second resolution.
+		{"same date, one page", make([]time.Duration, 3)},
+		{"same date, two pages", make([]time.Duration, 130)},
+		// A wrong clock can give an older commit a later date.
+		{"first commit has the latest date", []time.Duration{time.Hour, 0, time.Minute}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			total := len(tt.dates)
+			commits := make([]*gogitlab.Commit, 0, total)
+			// GitLab lists the newest commit first.
+			for i := total; i >= 1; i-- {
+				committed := base.Add(tt.dates[i-1])
+				commits = append(commits, &gogitlab.Commit{ID: fmt.Sprintf("commit-%03d", i), CommittedDate: &committed})
+			}
+
+			mux := http.NewServeMux()
+			var calls atomic.Int32
+			servePages(t, mux, "/api/v4/projects/1/merge_requests/7/commits", commits, &calls)
+			p := newGitLabTestProject(t, mux)
+
+			got, err := p.listMergeRequestCommits(7)
+			if err != nil {
+				t.Fatalf("listMergeRequestCommits: %v", err)
+			}
+			if len(got) != total {
+				t.Fatalf("got %d commits, want %d", len(got), total)
+			}
+			for i, c := range got {
+				if want := fmt.Sprintf("commit-%03d", i+1); c.ID != want {
+					t.Fatalf("commit %d = %s, want %s (oldest first)", i, c.ID, want)
+				}
+			}
+		})
+	}
+}
+
 func TestListMergeRequestAwardEmoji_ReadsAllPages(t *testing.T) {
 	// A thumbs up after the first 100 award emoji is on the second page.
 	const total = 130
