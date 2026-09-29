@@ -567,23 +567,24 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			}
 		}
 
-		var mrResult MergeRequestResult
 		if p.m.cfg.SkipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
-			mrResult = MergeRequestResult{
+			// The state file does not get this skip. It depends on the flags of
+			// this run, and the MR can be merged or closed before the next run.
+			results = append(results, MergeRequestResult{
 				GitLabMRID:    mergeRequest.IID,
 				GitLabMRTitle: mergeRequest.Title,
 				GitLabState:   mergeRequest.State,
 				Status:        StatusSkipped,
-				SkipReason:    "open merge request skipped (-skip-open-merge-requests)",
-			}
-		} else {
-			var err error
-			mrResult, err = p.migrateMergeRequest(ctx, mergeRequest)
-			if err != nil {
-				p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
-				mrResult.Status = StatusFailed
-				mrResult.Error = err.Error()
-			}
+				SkipReason:    skipReasonOpenMergeRequest,
+			})
+			continue
+		}
+
+		mrResult, err := p.migrateMergeRequest(ctx, mergeRequest)
+		if err != nil {
+			p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
+			mrResult.Status = StatusFailed
+			mrResult.Error = err.Error()
 		}
 		results = append(results, mrResult)
 

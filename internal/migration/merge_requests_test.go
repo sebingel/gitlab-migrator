@@ -1,15 +1,20 @@
 package migration
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/sebingel/gitlab-migrator/internal/config"
 	gogitlab "github.com/xanzy/go-gitlab"
@@ -103,4 +108,115 @@ func TestListMergeRequestCommits_ReadsAllPages(t *testing.T) {
 	if n := calls.Load(); n != 2 {
 		t.Errorf("GitLab requests = %d, want 2 (100 commits per page)", n)
 	}
+}
+
+// failingSearchGitHub is a GitHubClient whose search always fails. A merge
+// request that reaches migrateMergeRequest ends as failed right after the
+// search, without any other GitHub call.
+type failingSearchGitHub struct {
+	searches int
+}
+
+func (f *failingSearchGitHub) GetBranches(context.Context, string, string) ([]*gogithub.Branch, error) {
+	return nil, errors.New("GetBranches is not expected in this test")
+}
+
+func (f *failingSearchGitHub) GetPullRequest(context.Context, string, string, int) (*gogithub.PullRequest, error) {
+	return nil, errors.New("GetPullRequest is not expected in this test")
+}
+
+func (f *failingSearchGitHub) GetSearchResults(context.Context, string) (*gogithub.IssuesSearchResult, error) {
+	f.searches++
+	return nil, errors.New("search failed in test")
+}
+
+func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
+	// migrate runs migrateMergeRequests like a new process of the tool: it
+	// loads the state file and migrates MR !3 in the given GitLab state. It
+	// returns the results and the number of GitHub searches, which is 1 when
+	// the merge request was really processed.
+	migrate := func(t *testing.T, statePath, mrState string, skipOpen bool) ([]MergeRequestResult, int) {
+		t.Helper()
+		mux := http.NewServeMux()
+		var calls atomic.Int32
+		servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.MergeRequest{
+			{IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "main"},
+		}, &calls)
+		p := newGitLabTestProject(t, mux)
+		p.m.cfg.SkipOpenMergeRequests = skipOpen
+		gh := &failingSearchGitHub{}
+		p.m.ghClient = gh
+
+		state, err := LoadOrCreate(statePath, "group/project", "owner/repo", testLogger())
+		if err != nil {
+			t.Fatalf("LoadOrCreate: %v", err)
+		}
+		p.state = state
+
+		return p.migrateMergeRequests(context.Background()), gh.searches
+	}
+
+	// wantProcessed checks that MR !3 went through migrateMergeRequest. The
+	// fake search makes the migration fail.
+	wantProcessed := func(t *testing.T, results []MergeRequestResult, searches int) {
+		t.Helper()
+		if len(results) != 1 || results[0].Status != StatusFailed || searches != 1 {
+			t.Fatalf("results = %+v, searches = %d, want MR !3 processed (1 search, failed at the fake search)", results, searches)
+		}
+	}
+
+	runWithFlag := func(t *testing.T, statePath string) {
+		t.Helper()
+		results, searches := migrate(t, statePath, "opened", true)
+		if len(results) != 1 || results[0].Status != StatusSkipped || results[0].SkipReason != skipReasonOpenMergeRequest || searches != 0 {
+			t.Fatalf("run with -skip-open-merge-requests: results = %+v, searches = %d, want MR !3 skipped without a search", results, searches)
+		}
+
+		saved, err := LoadOrCreate(statePath, "group/project", "owner/repo", testLogger())
+		if err != nil {
+			t.Fatalf("reloading state: %v", err)
+		}
+		if st := saved.GetState(3); st != nil {
+			t.Fatalf("state for MR !3 = %+v, want no entry: the skip depends on the flags of this run", *st)
+		}
+	}
+
+	t.Run("next run without the flag", func(t *testing.T) {
+		statePath := filepath.Join(t.TempDir(), "state.json")
+		runWithFlag(t, statePath)
+
+		results, searches := migrate(t, statePath, "opened", false)
+		wantProcessed(t, results, searches)
+	})
+
+	t.Run("merged before the next run with the flag", func(t *testing.T) {
+		statePath := filepath.Join(t.TempDir(), "state.json")
+		runWithFlag(t, statePath)
+
+		results, searches := migrate(t, statePath, "merged", true)
+		wantProcessed(t, results, searches)
+	})
+
+	// writeOldStateFile writes a state file as older versions wrote it after a
+	// run with -skip-open-merge-requests.
+	writeOldStateFile := func(t *testing.T) string {
+		t.Helper()
+		statePath := filepath.Join(t.TempDir(), "state.json")
+		old := `{"version":1,"gitlab_project":"group/project","github_repo":"owner/repo","updated_at":"2026-01-01T00:00:00Z",` +
+			`"merge_requests":{"3":{"status":"skipped","skip_reason":"open merge request skipped (-skip-open-merge-requests)","updated_at":"2026-01-01T00:00:00Z"}}}`
+		if err := os.WriteFile(statePath, []byte(old), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return statePath
+	}
+
+	t.Run("state file of an older version, next run without the flag", func(t *testing.T) {
+		results, searches := migrate(t, writeOldStateFile(t), "opened", false)
+		wantProcessed(t, results, searches)
+	})
+
+	t.Run("state file of an older version, merged before the next run with the flag", func(t *testing.T) {
+		results, searches := migrate(t, writeOldStateFile(t), "merged", true)
+		wantProcessed(t, results, searches)
+	})
 }
