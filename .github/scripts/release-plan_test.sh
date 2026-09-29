@@ -127,12 +127,13 @@ expect_api_calls() {
   fi
 }
 
-# pull NUMBER MERGE_COMMIT_SHA LABELS [BASE_REF] prints a pull request as the
-# API returns it. LABELS is a JSON array of label names.
+# pull NUMBER MERGE_COMMIT_SHA LABELS [BASE_REF] [MERGED] [BASE_REPO] prints a
+# pull request as the API returns it. LABELS is a JSON array of label names.
 pull() {
   jq -cn --argjson n "$1" --arg sha "$2" --argjson labels "$3" --arg base "${4:-main}" \
-    '{number: $n, merged: true, merge_commit_sha: $sha,
-      base: {ref: $base, repo: {full_name: "sebingel/gitlab-migrator"}},
+    --argjson merged "${5:-true}" --arg repo "${6:-sebingel/gitlab-migrator}" \
+    '{number: $n, merged: $merged, merge_commit_sha: $sha,
+      base: {ref: $base, repo: {full_name: $repo}},
       labels: ($labels | map({name: .}))}'
 }
 
@@ -257,6 +258,17 @@ expect_message "warns about the other commit" "not the merge commit of a pull re
 expect "pull request into another branch" \
   "release=true publish=true pull_request=" \
   "${push_env[@]}" STUB_PULL="$(pull 41 "$sha" '["release:skip"]' develop)"
+
+expect "pull request that is not merged" \
+  "release=true publish=true pull_request=" \
+  "${push_env[@]}" STUB_PULL="$(pull 41 "$sha" '["release:skip"]' main false)"
+
+expect "pull request of another repository" \
+  "release=true publish=true pull_request=" \
+  "${push_env[@]}" STUB_PULL="$(pull 41 "$sha" '["release:skip"]' main true manicminer/gitlab-migrator)"
+
+expect_error "API answer that is not a JSON object" "is not a JSON object" plan \
+  "${push_env[@]}" STUB_PULL='[]'
 
 expect "direct push without a pull request (finding 6)" \
   "bump=patch version=v0.16.1 release=true publish=true pull_request=" \

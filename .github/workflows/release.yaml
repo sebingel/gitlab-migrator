@@ -1,8 +1,9 @@
 name: Release
 
-# Every push to main (a merged pull request) creates a GitHub release with
-# binaries for all platforms. Pull requests run the same build as a dry run
-# and publish nothing. CONTRIBUTING.md explains the version labels.
+# A push to main that changes the binaries or the release assets (see paths
+# below) creates a GitHub release with binaries for all platforms, unless the
+# merged pull request has the label release:skip. Pull requests run the same
+# build as a dry run and publish nothing. CONTRIBUTING.md explains the rules.
 #
 # Build and publish happen in this one run on purpose. A tag or release that
 # is created with GITHUB_TOKEN does not start other workflows, so a separate

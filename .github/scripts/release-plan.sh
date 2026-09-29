@@ -26,17 +26,15 @@
 #   PR_HEAD_SHA     head commit of the pull request (pull_request)
 #   PR_TITLE        title of the pull request (pull_request)
 #   BUMP            patch, minor or major (workflow_dispatch)
+#   RESULT_FILE     file for the key=value results (default: stdout)
+#   SUMMARY_FILE    file for a Markdown summary (optional)
+#   API_RETRIES     calls to the pull request API before giving up (3)
+#   API_RETRY_DELAY seconds between these calls (10)
 #
 # verify:
 #   TAGS            all tags of the repository, one per line
 #   PREVIOUS        "previous" from the plan
 #   VERSION         "version" from the plan
-#
-# Both:
-#   RESULT_FILE      file for the key=value results (default: stdout)
-#   SUMMARY_FILE     file for a Markdown summary (optional)
-#   API_RETRIES      calls to the pull request API before giving up (3)
-#   API_RETRY_DELAY  seconds between these calls (10)
 #
 # plan writes these keys:
 #   previous       highest vMAJOR.MINOR.PATCH tag, empty if there is none
