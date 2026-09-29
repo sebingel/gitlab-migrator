@@ -181,7 +181,8 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			}
 		}
 
-		// nil response: Retry-After was already handled above.
+		// resp is not passed on purpose: Retry-After in seconds was handled above,
+		// and a Retry-After HTTP date is ignored, as before.
 		sleep = retryablehttp.DefaultBackoff(min, max, attemptNum, nil)
 		return
 	}

@@ -52,9 +52,9 @@ gitlab-migrator -github-user=mytokenuser -projects-csv=projects.csv -migrate-pul
 - `state.go`: Per-project JSON state file for resumable migrations (opt-in via `-state-dir`).
 
 **`internal/clients/`** — API client wrappers:
-- `github.go`: Thin `GitHubClient` interface over go-github (branches, PRs, users).
+- `github.go`: Thin `GitHubClient` interface over go-github (branches, PRs, issue search).
 - `gitlab.go`: GitLab client wrapper.
-- `cache.go`: Thread-safe in-memory cache for GitHub PRs, issues, and user profiles to reduce API calls.
+- `cache.go`: Thread-safe in-memory cache for GitHub branches, PRs, issue search results, and GitLab user profiles to reduce API calls.
 
 **`internal/config/`**:
 - `config.go`: Central `Config` struct, JSON config file loading, `Validate()` for cross-flag consistency checks.

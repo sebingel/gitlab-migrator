@@ -1304,8 +1304,9 @@ func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	}
 }
 
-// githubMention returns "@<handle>" when the GitLab user's website points to their
-// GitHub profile, or fallback when no website is set.
+// githubMention returns fallback when the GitLab user has no website set. Otherwise it
+// returns "@" plus the lowercased website URL without a leading "https://github.com/".
+// The URL is not checked to be a GitHub profile.
 func githubMention(u *gogitlab.User, fallback string) string {
 	if u.WebsiteURL == "" {
 		return fallback
