@@ -14,7 +14,6 @@ type cache struct {
 	githubBranches      map[string][]*gogithub.Branch
 	githubPullRequests  map[string]gogithub.PullRequest
 	githubSearchResults map[string]gogithub.IssuesSearchResult
-	githubUsers         map[string]gogithub.User
 
 	gitlabUsers map[string]gogitlab.User
 }
@@ -24,7 +23,6 @@ func newCache() *cache {
 		githubBranches:      make(map[string][]*gogithub.Branch),
 		githubPullRequests:  make(map[string]gogithub.PullRequest),
 		githubSearchResults: make(map[string]gogithub.IssuesSearchResult),
-		githubUsers:         make(map[string]gogithub.User),
 		gitlabUsers:         make(map[string]gogitlab.User),
 	}
 }
@@ -69,21 +67,6 @@ func (c *cache) setGithubSearchResults(key string, v gogithub.IssuesSearchResult
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.githubSearchResults[key] = v
-}
-
-func (c *cache) getGithubUser(key string) *gogithub.User {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if v, ok := c.githubUsers[key]; ok {
-		return &v
-	}
-	return nil
-}
-
-func (c *cache) setGithubUser(key string, v gogithub.User) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.githubUsers[key] = v
 }
 
 func (c *cache) getGitlabUser(key string) *gogitlab.User {
