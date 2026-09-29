@@ -144,10 +144,28 @@ func (p *project) pushErrHint(err error) string {
 	if err != nil && strings.Contains(err.Error(), "without 'workflow' scope") {
 		hint = " (hint: add 'workflow' scope to your GitHub token to push workflow files)"
 	}
-	if p.m.cfg.NoForce {
+	if p.m.cfg.NoForce && isNonFastForwardPushError(err) {
 		hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 	}
 	return hint
+}
+
+// isNonFastForwardPushError reports whether a push failed because the remote
+// ref has commits that the pushed ref does not have, so that only a force
+// push can update it. go-git does not wrap git.ErrNonFastForwardUpdate for a
+// push. Its own check before the push returns "non-fast-forward update:
+// <ref>", and a rejection by the remote returns "command error on <ref>:
+// non-fast-forward". A ref name cannot contain ":", so a ref name cannot
+// cause a false match. When a tag on the remote differs from a local
+// annotated tag, go-git returns "object not found" instead. That error can
+// have other causes, so it gets no hint.
+func isNonFastForwardPushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "non-fast-forward update: ") ||
+		(strings.HasPrefix(msg, "command error on ") && strings.HasSuffix(msg, ": non-fast-forward"))
 }
 
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
