@@ -214,9 +214,9 @@ The `-prepare-batch-count` flag overrides the automatic batch calculation (defau
 
 The tool maintains a thread-safe in-memory cache for certain primitives, in order to help reduce the number of API requests being made. At this time, the following are cached the first time they are encountered, and thereafter retrieved from the cache until the tool is restarted:
 
+- GitHub branches
 - GitHub pull requests
 - GitHub issue search results
-- GitHub user profiles
 - GitLab user profiles
 
 ## Idempotence

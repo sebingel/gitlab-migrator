@@ -293,5 +293,5 @@ func escapeMDCell(s string) string {
 	if i := strings.Index(s, "\n"); i >= 0 {
 		s = s[:i] + " [...]"
 	}
-	return strings.ReplaceAll(s, "|", "\\|")
+	return escapeMD(s)
 }
