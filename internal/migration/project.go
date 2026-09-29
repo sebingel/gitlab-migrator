@@ -505,8 +505,9 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 	var mergeRequests []*gogitlab.MergeRequest
 
 	opts := &gogitlab.ListProjectMergeRequestsOptions{
-		OrderBy: Pointer("created_at"),
-		Sort:    Pointer("asc"),
+		ListOptions: gogitlab.ListOptions{PerPage: 100},
+		OrderBy:     Pointer("created_at"),
+		Sort:        Pointer("asc"),
 	}
 
 	if p.m.cfg.MergeRequestsAge > 0 {
@@ -1042,8 +1043,9 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	var comments []*gogitlab.Note
 	noteOpts := &gogitlab.ListMergeRequestNotesOptions{
-		OrderBy: Pointer("created_at"),
-		Sort:    Pointer("asc"),
+		ListOptions: gogitlab.ListOptions{PerPage: 100},
+		OrderBy:     Pointer("created_at"),
+		Sort:        Pointer("asc"),
 	}
 
 	p.log.Debug("retrieving GitLab merge request comments", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
