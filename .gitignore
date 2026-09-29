@@ -121,6 +121,9 @@ logs/
 reports/
 state/
 
+# Release assets from .github/scripts/build-release.sh
+dist/
+
 # Gas Town runtime directories (not part of the repo)
 .beads/
 .runtime/
