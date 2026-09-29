@@ -25,6 +25,13 @@ const (
 	MRStatePartial MRStateStatus = "partial"
 
 	stateFileVersion = 1
+
+	// skipReasonOpenMergeRequest is the skip reason for an open merge request
+	// when -skip-open-merge-requests is set (-pull-requests-only sets it too).
+	// This version does not save that skip, but older versions did. Their
+	// state files contain this text, and ShouldSkip checks for it, so do not
+	// change it.
+	skipReasonOpenMergeRequest = "open merge request skipped (-skip-open-merge-requests)"
 )
 
 // MRState holds the persisted migration state for a single merge request.
@@ -140,7 +147,10 @@ func LoadOrCreate(filePath, gitlabProject, githubRepo string, logger hclog.Logge
 }
 
 // ShouldSkip returns true if the MR with the given IID was previously completed
-// successfully or skipped, and does not need reprocessing.
+// successfully or skipped, and does not need reprocessing. A skip because of
+// -skip-open-merge-requests, saved by an older version, is not final: it
+// depends on the flags of the run that saved it, and the MR can be merged or
+// closed later.
 func (s *MigrationState) ShouldSkip(mrIID int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,7 +159,10 @@ func (s *MigrationState) ShouldSkip(mrIID int) bool {
 	if !ok {
 		return false
 	}
-	return st.Status == MRStateSuccess || st.Status == MRStateSkipped
+	if st.Status == MRStateSkipped {
+		return st.SkipReason != skipReasonOpenMergeRequest
+	}
+	return st.Status == MRStateSuccess
 }
 
 // GetState returns a copy of the stored state for a specific MR IID, or nil if not found.

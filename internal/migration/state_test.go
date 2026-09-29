@@ -154,6 +154,10 @@ func TestShouldSkip(t *testing.T) {
 				"2": {Status: MRStateSkipped},
 				"3": {Status: MRStateFailed},
 				"4": {Status: MRStatePartial},
+				// Older versions saved this skip. The literal text is what is
+				// in their state files, so it must not follow the constant.
+				"6": {Status: MRStateSkipped, SkipReason: "open merge request skipped (-skip-open-merge-requests)"},
+				"7": {Status: MRStateSkipped, SkipReason: "source branch does not exist"},
 			},
 		},
 		logger: testLogger(),
@@ -168,6 +172,8 @@ func TestShouldSkip(t *testing.T) {
 		{3, false}, // failed → retry
 		{4, false}, // partial → retry
 		{5, false}, // not found → process
+		{6, false}, // skipped only because of -skip-open-merge-requests → process
+		{7, true},  // skipped for a reason in the merge request → skip
 	}
 
 	for _, tt := range tests {

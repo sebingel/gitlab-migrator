@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -144,10 +143,28 @@ func (p *project) pushErrHint(err error) string {
 	if err != nil && strings.Contains(err.Error(), "without 'workflow' scope") {
 		hint = " (hint: add 'workflow' scope to your GitHub token to push workflow files)"
 	}
-	if p.m.cfg.NoForce {
+	if p.m.cfg.NoForce && isNonFastForwardPushError(err) {
 		hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
 	}
 	return hint
+}
+
+// isNonFastForwardPushError reports whether a push failed because the remote
+// ref has commits that the pushed ref does not have, so that only a force
+// push can update it. go-git does not wrap git.ErrNonFastForwardUpdate for a
+// push. Its own check before the push returns "non-fast-forward update:
+// <ref>", and a rejection by the remote returns "command error on <ref>:
+// non-fast-forward". A ref name cannot contain ":", so a ref name cannot
+// cause a false match. When a tag on the remote differs from a local
+// annotated tag, go-git returns "object not found" instead. That error can
+// have other causes, so it gets no hint.
+func isNonFastForwardPushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "non-fast-forward update: ") ||
+		(strings.HasPrefix(msg, "command error on ") && strings.HasSuffix(msg, ": non-fast-forward"))
 }
 
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -567,23 +584,24 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			}
 		}
 
-		var mrResult MergeRequestResult
 		if p.m.cfg.SkipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
-			mrResult = MergeRequestResult{
+			// The state file does not get this skip. It depends on the flags of
+			// this run, and the MR can be merged or closed before the next run.
+			results = append(results, MergeRequestResult{
 				GitLabMRID:    mergeRequest.IID,
 				GitLabMRTitle: mergeRequest.Title,
 				GitLabState:   mergeRequest.State,
 				Status:        StatusSkipped,
-				SkipReason:    "open merge request skipped (-skip-open-merge-requests)",
-			}
-		} else {
-			var err error
-			mrResult, err = p.migrateMergeRequest(ctx, mergeRequest)
-			if err != nil {
-				p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
-				mrResult.Status = StatusFailed
-				mrResult.Error = err.Error()
-			}
+				SkipReason:    skipReasonOpenMergeRequest,
+			})
+			continue
+		}
+
+		mrResult, err := p.migrateMergeRequest(ctx, mergeRequest)
+		if err != nil {
+			p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
+			mrResult.Status = StatusFailed
+			mrResult.Error = err.Error()
 		}
 		results = append(results, mrResult)
 
@@ -721,7 +739,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		mergeRequest.TargetBranch = targetBranchForClosedMergeRequest
 
 		p.log.Trace("retrieving commits for merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
-		mergeRequestCommits, _, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mergeRequest.IID, &gogitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
+		mergeRequestCommits, err := p.listMergeRequestCommits(mergeRequest.IID)
 		if err != nil {
 			return result, fmt.Errorf("retrieving merge request commits: %w", err)
 		}
@@ -731,10 +749,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			result.SkipReason = "merge request has no commits"
 			return result, nil
 		}
-
-		sort.Slice(mergeRequestCommits, func(i, j int) bool {
-			return mergeRequestCommits[i].CommittedDate.Before(*mergeRequestCommits[j].CommittedDate)
-		})
 
 		if mergeRequestCommits[0] == nil {
 			return result, fmt.Errorf("start commit for merge request %d is nil", mergeRequest.IID)
@@ -883,7 +897,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	p.log.Debug("determining merge request approvers", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
 	approvers := make([]string, 0)
-	awards, _, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mergeRequest.IID, &gogitlab.ListAwardEmojiOptions{PerPage: 100})
+	awards, err := p.listMergeRequestAwardEmoji(mergeRequest.IID)
 	if err != nil {
 		p.log.Error("listing merge request awards", "error", err)
 	} else {
@@ -1175,6 +1189,55 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	}
 
 	return result, nil
+}
+
+// listMergeRequestCommits returns all commits of the merge request, oldest
+// first. GitLab lists them in git order, newest first, and has no option to
+// change that, so it reads every page and reverses the list. GitLab itself
+// takes the last commit of its list as the first commit of the merge request.
+// A sort by committed date would be wrong for commits with the same date,
+// which is common after a rebase, and for commits with a wrong clock.
+func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error) {
+	var commits []*gogitlab.Commit
+	opts := &gogitlab.GetMergeRequestCommitsOptions{PerPage: 100}
+	for {
+		page, resp, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mrIID, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		commits = append(commits, page...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+
+	slices.Reverse(commits)
+	return commits, nil
+}
+
+// listMergeRequestAwardEmoji returns all award emoji of the merge request.
+func (p *project) listMergeRequestAwardEmoji(mrIID int) ([]*gogitlab.AwardEmoji, error) {
+	var awards []*gogitlab.AwardEmoji
+	opts := &gogitlab.ListAwardEmojiOptions{PerPage: 100}
+	for {
+		page, resp, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mrIID, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		awards = append(awards, page...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+	return awards, nil
 }
 
 // createLocalBranch creates a branch ref at hash in the local mirror. Only the ref
