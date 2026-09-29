@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
@@ -357,10 +356,10 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 		return fmt.Errorf("creating git storage: %w", err)
 	}
 
-	fs := memfs.New()
-
 	p.log.Debug("cloning repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", p.project.HTTPURLToRepo)
-	p.repo, err = git.CloneContext(ctx, stor, fs, &git.CloneOptions{
+	// A nil worktree makes a bare clone. The pushes need only refs and objects,
+	// so the default branch is not checked out into memory.
+	p.repo, err = git.CloneContext(ctx, stor, nil, &git.CloneOptions{
 		URL:        cloneUrlWithCredentials,
 		Auth:       nil,
 		RemoteName: "gitlab",
