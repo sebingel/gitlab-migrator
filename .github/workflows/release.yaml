@@ -29,7 +29,8 @@ on:
       - 'LICENSE'
   pull_request:
     # labeled and unlabeled update the version preview of the dry run.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # edited checks a new title for GitHub skip markers.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       bump:

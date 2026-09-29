@@ -50,7 +50,7 @@ Each pull request runs the same workflow as a dry run. The dry run builds all re
 * `release:major` wins over `release:minor`.
 * `release:skip` wins over all other labels. It is the only skip rule of the Release workflow.
 * Set the label before you merge. The workflow reads the labels when the merge arrives on `main`.
-* Do not put `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]` or `[actions skip]` in the pull request title. The merge commit contains the title, and GitHub itself then starts no push workflow, so the merge creates no release and shows no warning. The dry run warns about such a title.
+* Do not put `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]` or `[actions skip]` in the pull request title. The merge commit contains the title, and GitHub itself then starts no push workflow, so the merge creates no release and shows no warning. The dry run runs again when the title changes and warns about such a title.
 
 ### Pushes that are not a pull request merge
 
