@@ -449,8 +449,10 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 			return fmt.Errorf("listing branches from GitHub: %w", err)
 		}
 		for _, githubBranch := range githubBranches {
-			if !slices.Contains(p.result.BranchesMigrated, githubBranch.GetName()) {
-				refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", githubBranch.GetName())))
+			// Dereference Name on purpose: a branch without a name must fail loudly,
+			// not become the refspec ":refs/heads/" in the delete batch.
+			if !slices.Contains(p.result.BranchesMigrated, *githubBranch.Name) {
+				refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", *githubBranch.Name)))
 			}
 		}
 
