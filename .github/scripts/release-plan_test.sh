@@ -196,6 +196,18 @@ expect "dry run version uses the head commit, not the merge ref (finding 10)" \
 
 expect_api_calls "dry run makes no API call" 0
 
+expect "a GitHub skip marker in the title does not change the plan" \
+  "release=true publish=false" \
+  "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='fixes the docs [Skip CI]'
+expect_message "but the dry run warns that the merge will not release" "[skip ci]"
+
+run plan "${pr_env[@]}" PR_LABELS='[]' PR_TITLE='fixes the ci skip logic'
+if grep -qF "::warning::" <<< "$out"; then
+  report "no warning for a normal title" "unexpected warning: $out"
+else
+  report "no warning for a normal title" ""
+fi
+
 echo "--- push to main"
 
 expect "merge of a pull request without labels" \

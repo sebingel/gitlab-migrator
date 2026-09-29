@@ -105,6 +105,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
           BUMP: ${{ inputs.bump }}
         run: |
           TAGS="$(git tag --list 'v*')"

@@ -24,6 +24,7 @@
 #   COMMIT_MESSAGE  full message of SHA (push)
 #   PR_LABELS       labels of the pull request as a JSON array (pull_request)
 #   PR_HEAD_SHA     head commit of the pull request (pull_request)
+#   PR_TITLE        title of the pull request (pull_request)
 #   BUMP            patch, minor or major (workflow_dispatch)
 #
 # verify:
@@ -129,6 +130,19 @@ find_pull_labels() {
   warn "$SHA is not the merge commit of a pull request into main of $REPO (first line: '$first_line'). So no labels apply and this is a patch release. For another bump, start a manual release."
 }
 
+# GitHub starts no push workflow if the pushed commit message contains one of
+# its skip markers. The merge commit contains the pull request title, so such
+# a title stops the release in silence. The dry run warns about it.
+warn_skip_markers() {
+  local marker title
+  title="$(tr '[:upper:]' '[:lower:]' <<< "${PR_TITLE:-}")"
+  for marker in '[skip ci]' '[ci skip]' '[no ci]' '[skip actions]' '[actions skip]'; do
+    if grep -qF -- "$marker" <<< "$title"; then
+      warn "The title contains '$marker'. GitHub puts the title into the merge commit and then starts no push workflow, so the merge creates no release. Remove it from the title if you want a release."
+    fi
+  done
+}
+
 plan() {
   local event="${EVENT:?EVENT is required}" ref="${REF:?REF is required}"
   local previous released reason bump release="true" publish="false"
@@ -140,6 +154,7 @@ plan() {
     pull_request)
       labels="$(jq -r '.[]' <<< "${PR_LABELS:-[]}")"
       reason="labels of this pull request"
+      warn_skip_markers
       ;;
     push | workflow_dispatch)
       if [ "$ref" != "$main_ref" ]; then
