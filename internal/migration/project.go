@@ -42,22 +42,14 @@ type project struct {
 	defaultBranch string
 	gitlabPath    []string
 	githubPath    []string
-	storageType   string
-	storageDir    string
 	storagePath   string
-	pushBatchSize int
 	result        ProjectResult
 	state         *MigrationState // nil when -state-dir not set
 }
 
 func (m *Migrator) newProject(slugs []string) (*project, error) {
 	var err error
-	p := &project{
-		m:             m,
-		storageType:   m.cfg.StorageType,
-		storageDir:    m.cfg.StorageDir,
-		pushBatchSize: m.cfg.PushBatchSize,
-	}
+	p := &project{m: m}
 	p.log = m.logger.Named(slugs[0])
 
 	p.gitlabPath, p.githubPath, err = ParseProjectSlugs(slugs)
@@ -86,15 +78,9 @@ func (m *Migrator) newProject(slugs []string) (*project, error) {
 }
 
 func (p *project) createGitStorage() (storage.Storer, error) {
-	if p.storageType == "filesystem" {
-		var baseDir string
-		if p.storageDir != "" {
-			baseDir = p.storageDir
-		} else {
-			baseDir = os.TempDir()
-		}
-
-		tempDir, err := os.MkdirTemp(baseDir, fmt.Sprintf("gitlab-migrator-%s-%s-*", p.gitlabPath[0], p.gitlabPath[1]))
+	if p.m.cfg.StorageType == "filesystem" {
+		// An empty StorageDir makes MkdirTemp use os.TempDir().
+		tempDir, err := os.MkdirTemp(p.m.cfg.StorageDir, fmt.Sprintf("gitlab-migrator-%s-%s-*", p.gitlabPath[0], p.gitlabPath[1]))
 		if err != nil {
 			return nil, fmt.Errorf("creating storage directory: %w", err)
 		}
@@ -154,11 +140,15 @@ func (p *project) createRepo(ctx context.Context, homepage string, repoDeleted b
 	return nil
 }
 
-func pushErrHint(err error) string {
+func (p *project) pushErrHint(err error) string {
+	hint := ""
 	if err != nil && strings.Contains(err.Error(), "without 'workflow' scope") {
-		return " (hint: add 'workflow' scope to your GitHub token to push workflow files)"
+		hint = " (hint: add 'workflow' scope to your GitHub token to push workflow files)"
 	}
-	return ""
+	if p.m.cfg.NoForce {
+		hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
+	}
+	return hint
 }
 
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -219,8 +209,7 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	p.log.Debug("checking for existing repository on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1])
 	githubRepo, _, err := p.m.gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
 
-	var githubError *gogithub.ErrorResponse
-	if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
+	if err != nil && !isGitHubNotFound(err) {
 		return p.result, fmt.Errorf("retrieving github repo: %w", err)
 	}
 
@@ -243,221 +232,17 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		}()
 	}
 
+	// The storage is created by mirrorRepository and is still needed by migrateMergeRequests.
+	defer p.cleanupStorage()
+
 	if p.m.cfg.PullRequestsOnly {
 		if err != nil {
 			return p.result, fmt.Errorf("GitHub repository %s/%s not found (-pull-requests-only requires the repository to already exist on GitHub)", p.githubPath[0], p.githubPath[1])
 		}
 		p.log.Info("pull-requests-only mode: skipping repository clone and push", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
-	} else {
-		cloneUrl, parseErr := url.Parse(p.project.HTTPURLToRepo)
-		if parseErr != nil {
-			return p.result, fmt.Errorf("parsing clone URL: %v", parseErr)
-		}
-
-		p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !p.m.cfg.NoForce)
-
-		homepage := fmt.Sprintf("https://%s/%s/%s", p.m.cfg.GitlabDomain, p.gitlabPath[0], p.gitlabPath[1])
-
-		if err != nil {
-			if err = p.createRepo(ctx, homepage, false); err != nil {
-				return p.result, err
-			}
-		} else if p.m.cfg.DeleteExistingRepos {
-			p.log.Warn("existing repository was found on GitHub, proceeding to delete", "owner", p.githubPath[0], "repo", p.githubPath[1])
-			if _, err = p.m.gh.Repositories.Delete(ctx, p.githubPath[0], p.githubPath[1]); err != nil {
-				return p.result, fmt.Errorf("deleting existing github repo: %w", err)
-			}
-
-			if err = p.createRepo(ctx, homepage, true); err != nil {
-				return p.result, err
-			}
-		}
-
-		p.log.Debug("updating repository settings", "owner", p.githubPath[0], "repo", p.githubPath[1])
-		description := sanitizeDescription(p.project.Description)
-		updateRepo := gogithub.Repository{
-			Name:              Pointer(p.githubPath[1]),
-			Description:       &description,
-			Homepage:          &homepage,
-			AllowAutoMerge:    Pointer(true),
-			AllowMergeCommit:  Pointer(true),
-			AllowRebaseMerge:  Pointer(true),
-			AllowSquashMerge:  Pointer(true),
-			AllowUpdateBranch: Pointer(true),
-		}
-		if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
-			return p.result, fmt.Errorf("updating github repo: %w", err)
-		}
-
-		cloneUrl.User = url.UserPassword("oauth2", p.m.cfg.GitlabToken)
-		cloneUrlWithCredentials := cloneUrl.String()
-
-		stor, err := p.createGitStorage()
-		if err != nil {
-			return p.result, fmt.Errorf("creating git storage: %w", err)
-		}
-
-		defer p.cleanupStorage()
-
-		fs := memfs.New()
-
-		p.log.Debug("cloning repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", p.project.HTTPURLToRepo)
-		p.repo, err = git.CloneContext(ctx, stor, fs, &git.CloneOptions{
-			URL:        cloneUrlWithCredentials,
-			Auth:       nil,
-			RemoteName: "gitlab",
-			Mirror:     true,
-		})
-		if err != nil {
-			return p.result, fmt.Errorf("cloning gitlab repo: %w", err)
-		}
-
-		if p.defaultBranch != p.project.DefaultBranch {
-			if gitlabTrunk, err := p.repo.Reference(plumbing.NewBranchReferenceName(p.project.DefaultBranch), false); err == nil {
-				p.log.Info("renaming trunk branch prior to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "gitlab_trunk", p.project.DefaultBranch, "github_trunk", p.defaultBranch, "sha", gitlabTrunk.Hash())
-
-				p.log.Debug("creating new trunk branch", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_trunk", p.defaultBranch, "sha", gitlabTrunk.Hash())
-				githubTrunk := plumbing.NewHashReference(plumbing.NewBranchReferenceName(p.defaultBranch), gitlabTrunk.Hash())
-				if err = p.repo.Storer.SetReference(githubTrunk); err != nil {
-					return p.result, fmt.Errorf("creating trunk branch: %w", err)
-				}
-
-				p.log.Debug("deleting old trunk branch", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "gitlab_trunk", p.project.DefaultBranch, "sha", gitlabTrunk.Hash())
-				if err = p.repo.Storer.RemoveReference(gitlabTrunk.Name()); err != nil {
-					return p.result, fmt.Errorf("deleting old trunk branch: %w", err)
-				}
-			}
-		}
-
-		githubUrl := fmt.Sprintf("https://%s/%s/%s", p.m.cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
-		githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", p.m.cfg.GithubUser, p.m.cfg.GithubToken, p.m.cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
-
-		p.log.Debug("adding remote for GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		if _, err = p.repo.CreateRemote(&gitconfig.RemoteConfig{
-			Name:   "github",
-			URLs:   []string{githubUrlWithCredentials},
-			Mirror: true,
-		}); err != nil {
-			return p.result, fmt.Errorf("adding github remote: %w", err)
-		}
-
-		p.log.Debug("determining branches to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		branches, err := p.repo.Branches()
-		if err != nil {
-			return p.result, fmt.Errorf("retrieving branches: %w", err)
-		}
-
-		gitlabBranches := make([]string, 0)
-		refSpecs := make([]gitconfig.RefSpec, 0)
-		if err = branches.ForEach(func(ref *plumbing.Reference) error {
-			branchName := ref.Name().Short()
-			gitlabBranches = append(gitlabBranches, branchName)
-			p.result.BranchesMigrated = append(p.result.BranchesMigrated, branchName)
-			refSpecs = append(refSpecs, gitconfig.RefSpec(fmt.Sprintf("%[1]s:%[1]s", ref.Name())))
-			return nil
-		}); err != nil {
-			return p.result, fmt.Errorf("parsing branches: %w", err)
-		}
-
-		batches := ChunkRefSpecs(refSpecs, p.pushBatchSize)
-		pushMode := "force-pushing"
-		if p.m.cfg.NoForce {
-			pushMode = "pushing"
-		}
-		p.log.Debug(pushMode+" branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecs), "batches", len(batches), "batch_size", p.pushBatchSize)
-
-		for batchNum, batch := range batches {
-			p.log.Debug("pushing branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
-
-			opts := &git.PushOptions{
-				RemoteName: "github",
-				Force:      !p.m.cfg.NoForce,
-				RefSpecs:   batch,
-			}
-			sideband, err := p.pushWithSideband(ctx, opts)
-			if err != nil {
-				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					p.log.Debug("batch already up-to-date", "batch", batchNum+1)
-				} else {
-					msg := fmt.Sprintf("pushing branch batch %d/%d to github", batchNum+1, len(batches))
-					hint := pushErrHint(err)
-					if p.m.cfg.NoForce {
-						hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
-					}
-					return p.result, formatPushError(msg, hint, err, sideband)
-				}
-			}
-		}
-
-		if p.m.cfg.TrimGithubBranches {
-			p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-			refSpecsToDelete := make([]gitconfig.RefSpec, 0)
-			githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
-			if err != nil {
-				return p.result, fmt.Errorf("listing branches from GitHub: %w", err)
-			}
-			for _, githubBranch := range githubBranches {
-				found := false
-				for _, gitlabBranch := range gitlabBranches {
-					if githubBranch.Name != nil && *githubBranch.Name == gitlabBranch {
-						found = true
-						break
-					}
-				}
-				if !found {
-					refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", *githubBranch.Name)))
-				}
-			}
-
-			batches := ChunkRefSpecs(refSpecsToDelete, p.pushBatchSize)
-			p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
-
-			for batchNum, batch := range batches {
-				p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
-
-				trimOpts := &git.PushOptions{
-					RemoteName: "github",
-					Force:      true,
-					RefSpecs:   batch,
-				}
-				sideband, err := p.pushWithSideband(ctx, trimOpts)
-				if err != nil {
-					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						p.log.Debug("batch already up-to-date", "batch", batchNum+1)
-					} else {
-						return p.result, formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
-					}
-				}
-			}
-		}
-
-		p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		tagOpts := &git.PushOptions{
-			RemoteName: "github",
-			Force:      !p.m.cfg.NoForce,
-			RefSpecs:   []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
-		}
-		tagSideband, err := p.pushWithSideband(ctx, tagOpts)
-		if err != nil {
-			if errors.Is(err, git.NoErrAlreadyUpToDate) {
-				p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-			} else {
-				hint := pushErrHint(err)
-				if p.m.cfg.NoForce {
-					hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
-				}
-				return p.result, formatPushError("pushing tags to github repo", hint, err, tagSideband)
-			}
-		}
-
-		p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
-		updateRepoDefault := gogithub.Repository{
-			DefaultBranch: &p.defaultBranch,
-		}
-		if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
-			return p.result, fmt.Errorf("setting default branch: %w", err)
-		}
-	} // end else !pullRequestsOnly
+	} else if mirrorErr := p.mirrorRepository(ctx, err == nil); mirrorErr != nil {
+		return p.result, mirrorErr
+	}
 
 	if p.m.cfg.StateDir != "" && p.m.cfg.EnablePullRequests {
 		if err := os.MkdirAll(p.m.cfg.StateDir, 0755); err != nil {
@@ -516,6 +301,204 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	}
 
 	return p.result, nil
+}
+
+// mirrorRepository creates or updates the GitHub repository and mirror-pushes
+// all branches and tags from GitLab. It leaves the local clone in p.repo for
+// the merge request migration.
+func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
+	var err error
+
+	cloneUrl, parseErr := url.Parse(p.project.HTTPURLToRepo)
+	if parseErr != nil {
+		return fmt.Errorf("parsing clone URL: %v", parseErr)
+	}
+
+	p.log.Info("mirroring repository from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_org", p.githubPath[0], "github_repo", p.githubPath[1], "force", !p.m.cfg.NoForce)
+
+	homepage := fmt.Sprintf("https://%s/%s/%s", p.m.cfg.GitlabDomain, p.gitlabPath[0], p.gitlabPath[1])
+
+	if !repoExists {
+		if err = p.createRepo(ctx, homepage, false); err != nil {
+			return err
+		}
+	} else if p.m.cfg.DeleteExistingRepos {
+		p.log.Warn("existing repository was found on GitHub, proceeding to delete", "owner", p.githubPath[0], "repo", p.githubPath[1])
+		if _, err = p.m.gh.Repositories.Delete(ctx, p.githubPath[0], p.githubPath[1]); err != nil {
+			return fmt.Errorf("deleting existing github repo: %w", err)
+		}
+
+		if err = p.createRepo(ctx, homepage, true); err != nil {
+			return err
+		}
+	}
+
+	p.log.Debug("updating repository settings", "owner", p.githubPath[0], "repo", p.githubPath[1])
+	description := sanitizeDescription(p.project.Description)
+	updateRepo := gogithub.Repository{
+		Name:              Pointer(p.githubPath[1]),
+		Description:       &description,
+		Homepage:          &homepage,
+		AllowAutoMerge:    Pointer(true),
+		AllowMergeCommit:  Pointer(true),
+		AllowRebaseMerge:  Pointer(true),
+		AllowSquashMerge:  Pointer(true),
+		AllowUpdateBranch: Pointer(true),
+	}
+	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
+		return fmt.Errorf("updating github repo: %w", err)
+	}
+
+	cloneUrl.User = url.UserPassword("oauth2", p.m.cfg.GitlabToken)
+	cloneUrlWithCredentials := cloneUrl.String()
+
+	stor, err := p.createGitStorage()
+	if err != nil {
+		return fmt.Errorf("creating git storage: %w", err)
+	}
+
+	fs := memfs.New()
+
+	p.log.Debug("cloning repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", p.project.HTTPURLToRepo)
+	p.repo, err = git.CloneContext(ctx, stor, fs, &git.CloneOptions{
+		URL:        cloneUrlWithCredentials,
+		Auth:       nil,
+		RemoteName: "gitlab",
+		Mirror:     true,
+	})
+	if err != nil {
+		return fmt.Errorf("cloning gitlab repo: %w", err)
+	}
+
+	if p.defaultBranch != p.project.DefaultBranch {
+		if gitlabTrunk, err := p.repo.Reference(plumbing.NewBranchReferenceName(p.project.DefaultBranch), false); err == nil {
+			p.log.Info("renaming trunk branch prior to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "gitlab_trunk", p.project.DefaultBranch, "github_trunk", p.defaultBranch, "sha", gitlabTrunk.Hash())
+
+			p.log.Debug("creating new trunk branch", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "github_trunk", p.defaultBranch, "sha", gitlabTrunk.Hash())
+			githubTrunk := plumbing.NewHashReference(plumbing.NewBranchReferenceName(p.defaultBranch), gitlabTrunk.Hash())
+			if err = p.repo.Storer.SetReference(githubTrunk); err != nil {
+				return fmt.Errorf("creating trunk branch: %w", err)
+			}
+
+			p.log.Debug("deleting old trunk branch", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "gitlab_trunk", p.project.DefaultBranch, "sha", gitlabTrunk.Hash())
+			if err = p.repo.Storer.RemoveReference(gitlabTrunk.Name()); err != nil {
+				return fmt.Errorf("deleting old trunk branch: %w", err)
+			}
+		}
+	}
+
+	githubUrl := fmt.Sprintf("https://%s/%s/%s", p.m.cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
+	githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", p.m.cfg.GithubUser, p.m.cfg.GithubToken, p.m.cfg.GithubDomain, p.githubPath[0], p.githubPath[1])
+
+	p.log.Debug("adding remote for GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	if _, err = p.repo.CreateRemote(&gitconfig.RemoteConfig{
+		Name:   "github",
+		URLs:   []string{githubUrlWithCredentials},
+		Mirror: true,
+	}); err != nil {
+		return fmt.Errorf("adding github remote: %w", err)
+	}
+
+	p.log.Debug("determining branches to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	branches, err := p.repo.Branches()
+	if err != nil {
+		return fmt.Errorf("retrieving branches: %w", err)
+	}
+
+	refSpecs := make([]gitconfig.RefSpec, 0)
+	if err = branches.ForEach(func(ref *plumbing.Reference) error {
+		branchName := ref.Name().Short()
+		p.result.BranchesMigrated = append(p.result.BranchesMigrated, branchName)
+		refSpecs = append(refSpecs, gitconfig.RefSpec(fmt.Sprintf("%[1]s:%[1]s", ref.Name())))
+		return nil
+	}); err != nil {
+		return fmt.Errorf("parsing branches: %w", err)
+	}
+
+	batches := ChunkRefSpecs(refSpecs, p.m.cfg.PushBatchSize)
+	pushMode := "force-pushing"
+	if p.m.cfg.NoForce {
+		pushMode = "pushing"
+	}
+	p.log.Debug(pushMode+" branches to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecs), "batches", len(batches), "batch_size", p.m.cfg.PushBatchSize)
+
+	for batchNum, batch := range batches {
+		p.log.Debug("pushing branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
+
+		opts := &git.PushOptions{
+			RemoteName: "github",
+			Force:      !p.m.cfg.NoForce,
+			RefSpecs:   batch,
+		}
+		sideband, err := p.pushWithSideband(ctx, opts)
+		if err != nil {
+			if errors.Is(err, git.NoErrAlreadyUpToDate) {
+				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
+			} else {
+				msg := fmt.Sprintf("pushing branch batch %d/%d to github", batchNum+1, len(batches))
+				return formatPushError(msg, p.pushErrHint(err), err, sideband)
+			}
+		}
+	}
+
+	if p.m.cfg.TrimGithubBranches {
+		p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+		refSpecsToDelete := make([]gitconfig.RefSpec, 0)
+		githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+		if err != nil {
+			return fmt.Errorf("listing branches from GitHub: %w", err)
+		}
+		for _, githubBranch := range githubBranches {
+			if !slices.Contains(p.result.BranchesMigrated, githubBranch.GetName()) {
+				refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", githubBranch.GetName())))
+			}
+		}
+
+		batches := ChunkRefSpecs(refSpecsToDelete, p.m.cfg.PushBatchSize)
+		p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
+
+		for batchNum, batch := range batches {
+			p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
+
+			trimOpts := &git.PushOptions{
+				RemoteName: "github",
+				Force:      true,
+				RefSpecs:   batch,
+			}
+			sideband, err := p.pushWithSideband(ctx, trimOpts)
+			if err != nil {
+				if errors.Is(err, git.NoErrAlreadyUpToDate) {
+					p.log.Debug("batch already up-to-date", "batch", batchNum+1)
+				} else {
+					return formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
+				}
+			}
+		}
+	}
+
+	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	tagOpts := &git.PushOptions{
+		RemoteName: "github",
+		Force:      !p.m.cfg.NoForce,
+		RefSpecs:   []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
+	}
+	tagSideband, err := p.pushWithSideband(ctx, tagOpts)
+	if err != nil {
+		if errors.Is(err, git.NoErrAlreadyUpToDate) {
+			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+		} else {
+			return formatPushError("pushing tags to github repo", p.pushErrHint(err), err, tagSideband)
+		}
+	}
+
+	p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
+	updateRepoDefault := gogithub.Repository{
+		DefaultBranch: &p.defaultBranch,
+	}
+	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
+		return fmt.Errorf("setting default branch: %w", err)
+	}
+	return nil
 }
 
 func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult {
@@ -582,29 +565,23 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 			}
 		}
 
+		var mrResult MergeRequestResult
 		if p.m.cfg.SkipOpenMergeRequests && strings.EqualFold(mergeRequest.State, "opened") {
-			skipReason := "open merge request skipped (-skip-open-merge-requests)"
-			results = append(results, MergeRequestResult{
+			mrResult = MergeRequestResult{
 				GitLabMRID:    mergeRequest.IID,
 				GitLabMRTitle: mergeRequest.Title,
 				GitLabState:   mergeRequest.State,
 				Status:        StatusSkipped,
-				SkipReason:    skipReason,
-			})
-			if p.state != nil {
-				p.state.RecordSkipped(mergeRequest.IID, skipReason)
-				if flushErr := p.state.Flush(); flushErr != nil {
-					p.log.Error("failed to persist migration state", "error", flushErr)
-				}
+				SkipReason:    "open merge request skipped (-skip-open-merge-requests)",
 			}
-			continue
-		}
-
-		mrResult, err := p.migrateMergeRequest(ctx, mergeRequest)
-		if err != nil {
-			p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
-			mrResult.Status = StatusFailed
-			mrResult.Error = err.Error()
+		} else {
+			var err error
+			mrResult, err = p.migrateMergeRequest(ctx, mergeRequest)
+			if err != nil {
+				p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
+				mrResult.Status = StatusFailed
+				mrResult.Error = err.Error()
+			}
 		}
 		results = append(results, mrResult)
 
@@ -869,11 +846,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					p.log.Trace("branch already exists and is up-to-date on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
-					hint := pushErrHint(err)
-					if p.m.cfg.NoForce {
-						hint = " (hint: remove -no-force if push is rejected due to conflicts)" + hint
-					}
-					return result, formatPushError("pushing temporary branches to github", hint, err, mrSideband)
+					return result, formatPushError("pushing temporary branches to github", p.pushErrHint(err), err, mrSideband)
 				}
 			}
 
@@ -909,15 +882,11 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	githubAuthorName := "Unknown Author"
 	if mergeRequest.Author != nil {
-		githubAuthorName = mergeRequest.Author.Name
-
 		author, err := p.m.glClient.GetUser(mergeRequest.Author.Username)
 		if err != nil {
 			return result, fmt.Errorf("retrieving gitlab user: %w", err)
 		}
-		if author.WebsiteURL != "" {
-			githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.WebsiteURL), "https://github.com/")
-		}
+		githubAuthorName = githubMention(author, mergeRequest.Author.Name)
 	}
 
 	originalState := ""
@@ -933,18 +902,12 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	} else {
 		for _, award := range awards {
 			if award.Name == "thumbsup" {
-				approver := award.User.Name
-
 				approverUser, err := p.m.glClient.GetUser(award.User.Username)
 				if err != nil {
 					p.log.Error("retrieving gitlab user for approver", "username", award.User.Username, "error", err)
 					continue
 				}
-				if approverUser.WebsiteURL != "" {
-					approver = "@" + strings.TrimPrefix(strings.ToLower(approverUser.WebsiteURL), "https://github.com/")
-				}
-
-				approvers = append(approvers, approver)
+				approvers = append(approvers, githubMention(approverUser, award.User.Name))
 			}
 		}
 	}
@@ -1045,16 +1008,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			p.log.Debug("closing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
 
 			pullRequest.State = Pointer("closed")
-			prNumber := pullRequest.GetNumber()
-			editReqVal := *pullRequest // shallow copy — isolate retry input from closure's pullRequest writes
-			editReq := &editReqVal
-			// Closure writes to outer pullRequest — inputs are captured separately so a failed
-			// attempt (which nils pullRequest) does not corrupt the retry.
-			err = p.retryOnNotFound(ctx, "closing pull request", func() error {
-				var editErr error
-				pullRequest, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], prNumber, editReq)
-				return editErr
-			})
+			pullRequest, err = p.editPullRequest(ctx, "closing pull request", pullRequest.GetNumber(), pullRequest)
 			if err != nil {
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
@@ -1071,17 +1025,11 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		}
 
 		if pullRequest.State != nil && newState != nil && *pullRequest.State != *newState {
-			prNumber := pullRequest.GetNumber()
 			editReq := &gogithub.PullRequest{
 				Number: pullRequest.Number,
 				State:  newState,
 			}
-
-			err = p.retryOnNotFound(ctx, "updating pull request state", func() error {
-				var editErr error
-				pullRequest, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], prNumber, editReq)
-				return editErr
-			})
+			pullRequest, err = p.editPullRequest(ctx, "updating pull request state", pullRequest.GetNumber(), editReq)
 			if err != nil {
 				return result, fmt.Errorf("updating pull request state: %w", err)
 			}
@@ -1098,14 +1046,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			pullRequest.Draft = &mergeRequest.Draft
 			pullRequest.MaintainerCanModify = nil
 
-			prNumber := pullRequest.GetNumber()
-			editReqVal := *pullRequest // shallow copy — isolate retry input from closure's pullRequest writes
-			editReq := &editReqVal
-			err = p.retryOnNotFound(ctx, "updating pull request", func() error {
-				var editErr error
-				pullRequest, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], prNumber, editReq)
-				return editErr
-			})
+			pullRequest, err = p.editPullRequest(ctx, "updating pull request", pullRequest.GetNumber(), pullRequest)
 			if err != nil {
 				return result, fmt.Errorf("updating pull request: %w", err)
 			}
@@ -1161,8 +1102,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				CreatedAt:      *comment.CreatedAt,
 			}
 
-			githubCommentAuthorName := comment.Author.Name
-
 			commentAuthor, err := p.m.glClient.GetUser(comment.Author.Username)
 			if err != nil {
 				commentResult.Status = StatusFailed
@@ -1172,9 +1111,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				p.log.Error("retrieving gitlab user for comment", "comment_id", comment.ID, "error", err)
 				continue
 			}
-			if commentAuthor.WebsiteURL != "" {
-				githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.WebsiteURL), "https://github.com/")
-			}
+			githubCommentAuthorName := githubMention(commentAuthor, comment.Author.Name)
 
 			commentBody := fmt.Sprintf(`> [!NOTE]
 > This comment was migrated from GitLab
@@ -1189,7 +1126,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 ## Original Comment
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format("Mon, 2 Jan 2006"), comment.Body)
+%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format(config.DateFormat), comment.Body)
 
 			foundExistingComment := false
 			for _, prComment := range prComments {
@@ -1250,6 +1187,19 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	}
 
 	return result, nil
+}
+
+// editPullRequest edits a pull request and retries on 404. The result goes to a
+// local variable, so req stays unchanged between attempts and may be the
+// caller's own pull request.
+func (p *project) editPullRequest(ctx context.Context, desc string, number int, req *gogithub.PullRequest) (*gogithub.PullRequest, error) {
+	var pr *gogithub.PullRequest
+	err := p.retryOnNotFound(ctx, desc, func() error {
+		var editErr error
+		pr, _, editErr = p.m.gh.PullRequests.Edit(ctx, p.githubPath[0], p.githubPath[1], number, req)
+		return editErr
+	})
+	return pr, err
 }
 
 func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.MergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (bool, error) {
@@ -1351,6 +1301,15 @@ func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	}
 }
 
+// githubMention returns "@<handle>" when the GitLab user's website points to their
+// GitHub profile, or fallback when no website is set.
+func githubMention(u *gogitlab.User, fallback string) string {
+	if u.WebsiteURL == "" {
+		return fallback
+	}
+	return "@" + strings.TrimPrefix(strings.ToLower(u.WebsiteURL), "https://github.com/")
+}
+
 func bodyMatchesMergeRequest(body string, mrIID int) bool {
 	return strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | %d |", mrIID)) ||
 		strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | [%d]", mrIID))
@@ -1364,45 +1323,42 @@ func (p *project) findExistingPRByList(ctx context.Context, mr *gogitlab.MergeRe
 		fmt.Sprintf("%s:%s", p.githubPath[0], mr.SourceBranch),
 		fmt.Sprintf("%s:migration-source-%d/%s", p.githubPath[0], mr.IID, mr.SourceBranch),
 	} {
-		opts := &gogithub.PullRequestListOptions{
-			Head:        head,
-			State:       "all",
-			ListOptions: gogithub.ListOptions{PerPage: 100},
+		// The paginated transport (app.go) follows all pages, so one call returns every PR.
+		opts := &gogithub.PullRequestListOptions{Head: head, State: "all"}
+		prs, _, err := p.m.gh.PullRequests.List(ctx, p.githubPath[0], p.githubPath[1], opts)
+		if err != nil {
+			return nil, err
 		}
-		for {
-			prs, resp, err := p.m.gh.PullRequests.List(ctx, p.githubPath[0], p.githubPath[1], opts)
-			if err != nil {
-				return nil, err
+		for _, pr := range prs {
+			if bodyMatchesMergeRequest(pr.GetBody(), mr.IID) {
+				return pr, nil
 			}
-			for _, pr := range prs {
-				if bodyMatchesMergeRequest(pr.GetBody(), mr.IID) {
-					return pr, nil
-				}
-			}
-			if resp.NextPage == 0 {
-				break
-			}
-			opts.Page = resp.NextPage
 		}
 	}
 	return nil, nil
 }
 
-func isAlreadyExistsError(err error) bool {
+// is422Matching reports whether err is a GitHub 422 response whose top-level
+// message or any of its detail messages satisfies match.
+func is422Matching(err error, match func(string) bool) bool {
 	var ghErr *gogithub.ErrorResponse
 	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
 		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
-	if strings.Contains(ghErr.Message, "Reference already exists") {
+	if match(ghErr.Message) {
 		return true
 	}
 	for _, e := range ghErr.Errors {
-		if strings.Contains(e.Message, "Reference already exists") {
+		if match(e.Message) {
 			return true
 		}
 	}
 	return false
+}
+
+func isAlreadyExistsError(err error) bool {
+	return is422Matching(err, func(m string) bool { return strings.Contains(m, "Reference already exists") })
 }
 
 func isReferenceUpdateFailedError(err error) bool {
@@ -1417,37 +1373,11 @@ func isReferenceUpdateFailedError(err error) bool {
 }
 
 func isAlreadyExistsPRError(err error) bool {
-	var ghErr *gogithub.ErrorResponse
-	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
-		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
-		return false
-	}
-	if strings.Contains(ghErr.Message, "A pull request already exists") {
-		return true
-	}
-	for _, e := range ghErr.Errors {
-		if strings.Contains(e.Message, "A pull request already exists") {
-			return true
-		}
-	}
-	return false
+	return is422Matching(err, func(m string) bool { return strings.Contains(m, "A pull request already exists") })
 }
 
 func isSearchSyntaxError(err error) bool {
-	var ghErr *gogithub.ErrorResponse
-	if !errors.As(err, &ghErr) || ghErr.Response == nil ||
-		ghErr.Response.StatusCode != http.StatusUnprocessableEntity {
-		return false
-	}
-	if containsSearchSyntaxHint(ghErr.Message) {
-		return true
-	}
-	for _, e := range ghErr.Errors {
-		if containsSearchSyntaxHint(e.Message) {
-			return true
-		}
-	}
-	return false
+	return is422Matching(err, containsSearchSyntaxHint)
 }
 
 func containsSearchSyntaxHint(msg string) bool {
@@ -1459,7 +1389,7 @@ func containsSearchSyntaxHint(msg string) bool {
 func isGitHubNotFound(err error) bool {
 	var ghErr *gogithub.ErrorResponse
 	if errors.As(err, &ghErr) {
-		return ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound
+		return ghErr != nil && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound
 	}
 	return false
 }
