@@ -136,6 +136,13 @@ jobs:
           # Dry runs use the Go cache, so a label change does not rebuild
           # everything from scratch. A real release never uses a cache.
           cache: ${{ github.event_name == 'pull_request' }}
+          # The other workflows save a cache under the go.sum key first, and
+          # setup-go does not save again after a hit, so the cross compiled
+          # packages would never be cached. build-release.sh in the key gives
+          # the dry runs a cache of their own.
+          cache-dependency-path: |
+            go.sum
+            .github/scripts/build-release.sh
 
       - name: Build
         env:
@@ -163,9 +170,9 @@ jobs:
           name: release-assets
           path: dist/
           if-no-files-found: error
-          # "Re-run failed jobs" of a release needs this artifact, so keep it
-          # as long as the repository allows (90 days).
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}
+          # "Re-run failed jobs" of a release needs this artifact. GitHub
+          # allows re-runs for 30 days, so keep it that long.
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
 
   publish:
     name: Publish release

@@ -61,7 +61,7 @@ Open the Actions tab, select the Release workflow, click "Run workflow" on `main
 
 ### When a release run fails or is cancelled
 
-* For a temporary problem, for example a GitHub API error, use "Re-run failed jobs". This works for 90 days (the release assets are kept that long), and only if no other release was made in between. Otherwise the run stops, and you start a manual release instead.
+* For a temporary problem, for example a GitHub API error, use "Re-run failed jobs". GitHub allows this for 30 days (the release assets are kept that long), and it only works if no other release was made in between. Otherwise the run stops, and you start a manual release instead.
 * If the cause is in the code, merge a fix. That merge creates the release.
 * "Re-run all jobs" never publishes the same commit twice: it fails if the commit already has a release tag, or if a newer release exists.
 * Release runs wait for each other, but GitHub keeps only one waiting run. If you merge three pull requests within a few minutes, the middle run can be cancelled. If the last run creates a release, that release includes all changes, but it only uses the labels of the last pull request. If the last run creates no release (for example because of `release:skip`), the changes of the cancelled run are not released. In both cases, start a manual release with the right bump, or wait for a release run to finish before you merge the next pull request.
