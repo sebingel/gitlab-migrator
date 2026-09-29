@@ -1,8 +1,34 @@
 package migration
 
 import (
+	"reflect"
 	"testing"
+
+	gitconfig "github.com/go-git/go-git/v5/config"
 )
+
+func TestChunkRefSpecs(t *testing.T) {
+	five := []gitconfig.RefSpec{"a", "b", "c", "d", "e"}
+	tests := []struct {
+		name      string
+		items     []gitconfig.RefSpec
+		chunkSize int
+		want      [][]gitconfig.RefSpec
+	}{
+		{name: "uneven split", items: five, chunkSize: 2, want: [][]gitconfig.RefSpec{{"a", "b"}, {"c", "d"}, {"e"}}},
+		{name: "chunk larger than input", items: five, chunkSize: 10, want: [][]gitconfig.RefSpec{five}},
+		{name: "zero size returns one chunk", items: five, chunkSize: 0, want: [][]gitconfig.RefSpec{five}},
+		{name: "empty input returns no chunks", items: nil, chunkSize: 2, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ChunkRefSpecs(tt.items, tt.chunkSize); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ChunkRefSpecs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestParseProjectSlugs(t *testing.T) {
 	tests := []struct {

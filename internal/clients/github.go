@@ -17,7 +17,6 @@ type GitHubClient interface {
 	GetBranches(ctx context.Context, owner, repo string) ([]*gogithub.Branch, error)
 	GetPullRequest(ctx context.Context, org, repo string, prNumber int) (*gogithub.PullRequest, error)
 	GetSearchResults(ctx context.Context, query string) (*gogithub.IssuesSearchResult, error)
-	GetUser(ctx context.Context, username string) (*gogithub.User, error)
 }
 
 // githubClient is the concrete implementation of GitHubClient.
@@ -90,27 +89,6 @@ func (c *githubClient) GetSearchResults(ctx context.Context, query string) (*gog
 		c.cache.setGithubSearchResults(query, *result)
 	}
 	return result, nil
-}
-
-// GetUser returns a GitHub user, using the cache.
-func (c *githubClient) GetUser(ctx context.Context, username string) (*gogithub.User, error) {
-	user := c.cache.getGithubUser(username)
-	if user == nil {
-		c.logger.Debug("retrieving user details", "username", username)
-		var err error
-		if user, _, err = c.gh.Users.Get(ctx, username); err != nil {
-			return nil, err
-		}
-		if user == nil {
-			return nil, fmt.Errorf("nil user was returned: %s", username)
-		}
-		c.logger.Trace("caching GitHub user", "username", username)
-		c.cache.setGithubUser(username, *user)
-	}
-	if user.Type == nil {
-		return nil, fmt.Errorf("unable to determine whether owner is a user or organisation: %s", username)
-	}
-	return user, nil
 }
 
 // SearchModder is an http.RoundTripper that enables advanced search on GitHub issue searches.

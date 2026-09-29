@@ -2,6 +2,7 @@ package migration
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	gitconfig "github.com/go-git/go-git/v5/config"
@@ -40,15 +41,5 @@ func ChunkRefSpecs(items []gitconfig.RefSpec, chunkSize int) [][]gitconfig.RefSp
 	if chunkSize <= 0 {
 		return [][]gitconfig.RefSpec{items}
 	}
-
-	var chunks [][]gitconfig.RefSpec
-	for i := 0; i < len(items); i += chunkSize {
-		end := i + chunkSize
-		if end > len(items) {
-			end = len(items)
-		}
-		chunks = append(chunks, items[i:end])
-	}
-
-	return chunks
+	return slices.Collect(slices.Chunk(items, chunkSize))
 }
