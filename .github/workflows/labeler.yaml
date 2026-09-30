@@ -1,25 +1,32 @@
 name: Labeler
 
-# Adds one label to a new pull request, chosen by the prefix of its branch.
-# The label chooses the section of the pull request in the release notes
+# Adds one label to a pull request, chosen by the prefix of its branch. The
+# label chooses the section of the pull request in the release notes
 # (.github/release.yaml). CONTRIBUTING.md (section "Release notes") lists
 # the prefixes and the sections.
 #
-# It runs once, when the pull request is opened, because the branch of a
-# pull request never changes. It only adds a label and never sets the whole
-# list, so it never removes a label that someone set by hand, not even one
-# that was set while the job ran. A label that GITHUB_TOKEN adds starts no
-# workflow, so it starts no new dry run of the Release workflow.
+# The job only runs while the pull request has none of the labels that
+# choose a section. So a section label that someone set by hand always
+# wins, and Dependabot pull requests (label dependencies) are skipped. The
+# job runs on every push, not only when the pull request is opened, because
+# GitHub starts no pull_request workflow while a pull request has a merge
+# conflict, and a run can fail. The next push then adds the label.
+#
+# It only adds a label (POST) and never sets the whole list (PUT), so it
+# never removes a label, not even one that was set while the job ran. A
+# label that GITHUB_TOKEN adds starts no workflow, so it starts no new dry
+# run of the Release workflow.
 #
 # The trigger is pull_request and not pull_request_target, so no job ever
 # gets write access for a pull request from a fork. Such a pull request only
 # gets a read-only token, which cannot add labels, so the job skips it.
-# Dependabot sets its own labels (.github/dependabot.yaml), so the job skips
-# its branches too.
+#
+# The labels must exist in the repository, because this token cannot create
+# labels. The list in "if" must match the labels in .github/release.yaml.
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: read
@@ -29,7 +36,12 @@ jobs:
     name: Label pull request
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
-      && !startsWith(github.head_ref, 'dependabot/')
+      && !contains(github.event.pull_request.labels.*.name, 'release:major')
+      && !contains(github.event.pull_request.labels.*.name, 'release:minor')
+      && !contains(github.event.pull_request.labels.*.name, 'enhancement')
+      && !contains(github.event.pull_request.labels.*.name, 'bug')
+      && !contains(github.event.pull_request.labels.*.name, 'documentation')
+      && !contains(github.event.pull_request.labels.*.name, 'dependencies')
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write # add the label

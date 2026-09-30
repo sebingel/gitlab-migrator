@@ -8,7 +8,7 @@ This project uses [GitHub Flow](https://docs.github.com/en/get-started/using-git
 2. Use one branch per change, for example `feat/short-name`, `fix/short-name` or `docs/short-name`. The prefix gives the pull request a label for the release notes (see [Release notes](#release-notes)).
 3. Commit your work. Commit titles are short and in present tense, for example "adds -repo-visibility flag" or "fixes retry on 404".
 4. Push the branch and open a pull request into `main`.
-5. Wait for the checks: CI (build and vet), Lint, Test, Vulnerabilities (govulncheck) and Release (dry run). All of them must pass. There is one exception: govulncheck can fail because of a vulnerability that the pull request did not cause (see [Vulnerabilities](#vulnerabilities)). When the pull request is opened, the Labeler also runs once (see [Release notes](#release-notes)).
+5. Wait for the checks: CI (build and vet), Lint, Test, Vulnerabilities (govulncheck) and Release (dry run). All of them must pass. There is one exception: govulncheck can fail because of a vulnerability that the pull request did not cause (see [Vulnerabilities](#vulnerabilities)). The Labeler check can add a label for the release notes (see [Release notes](#release-notes)).
 6. Check the labels of the pull request. If the change needs more than a patch release, or no release at all, add a release label (see [Version labels](#version-labels)). The labels also choose the section of the pull request in the release notes (see [Release notes](#release-notes)).
 7. Merge the pull request with "Create a merge commit". This is the only merge method that the repository allows. The Release workflow then builds the binaries and publishes a GitHub release.
 8. Delete the branch.
@@ -56,27 +56,29 @@ Each pull request runs the same workflow as a dry run. The dry run builds all re
 
 The release notes are the changelog of this repository. `CHANGELOG.md` is not updated any more. The Release workflow creates every release with notes that GitHub generates (`gh release create --generate-notes`). They list every pull request that was merged since the previous release, also the ones that created no release of their own, for example documentation changes or pull requests with `release:skip`. Each entry is the title of the pull request with its author and a link, so write the title for the users of the tool. Commits that reach `main` without a pull request of this repository, for example a direct push or a sync from the upstream repository, get no entry. Only the "Full Changelog" link at the end of the notes shows them.
 
-`.github/release.yaml` sorts the pull requests into sections by their labels. A pull request goes into the first section of this table that lists one of its labels:
+`.github/release.yaml` sorts the pull requests into sections by their labels. A pull request goes into the first section of this table that lists one of its labels. The only exception: a pull request with `bug` is never under "New features", so a fix that also has `enhancement` or `release:minor` is under "Bug fixes".
 
 | Section | Labels |
 |---|---|
 | Breaking changes | `release:major` |
-| New features | `release:minor`, `enhancement` |
+| New features | `release:minor`, `enhancement` (but not with `bug`) |
 | Bug fixes | `bug` |
 | Documentation | `documentation` |
 | Dependencies | `dependencies` |
 | Other changes | all other pull requests |
 
+These labels must exist in the repository. If you rename one, also change `.github/release.yaml` and `.github/workflows/labeler.yaml`.
+
 The labels come from three places:
 
-* The Labeler workflow (`.github/workflows/labeler.yaml`) adds one label to a new pull request, from the prefix of its branch:
+* The Labeler workflow (`.github/workflows/labeler.yaml`) adds one label from the prefix of the branch:
   * `feat/` or `feature/` gets `enhancement`,
   * `fix/`, `bugfix/` or `hotfix/` gets `bug`,
   * `docs/` gets `documentation`,
   * other prefixes, for example `chore/`, `ci/` or `refactor/`, get no label.
 
-  It runs only once, when the pull request is opened, and it only adds this one label. So you can change the labels by hand afterwards, and it never removes a label. It never adds a `release:` label. It skips pull requests from forks, because their token cannot add labels, and Dependabot branches. If it skips or fails, add the label by hand.
-* Dependabot adds `dependencies` to its pull requests (`.github/dependabot.yaml`).
+  It runs when the pull request is opened and after every push, but only while the pull request has none of the labels in the table. So a section label that you set yourself, when you open the pull request or later, always wins. The Labeler only adds labels and never removes one. It never adds a `release:` label. If you remove its label and set no other one from the table, the next push adds it again. It skips pull requests from forks, because their token cannot add labels. Label them by hand.
+* Dependabot adds `dependencies` to its pull requests (`.github/dependabot.yaml`), so the Labeler skips them.
 * You add labels by hand, for example `release:minor`, or `documentation` for a `chore/` branch that only changes documentation.
 
 Only the `release:` labels change the version. The other labels only choose the section. For example, a pull request from a `feat/` branch without `release:minor` is listed under "New features", but it creates a patch release.
@@ -97,7 +99,7 @@ A push to `main` that is not the merge commit of a pull request into `main` of t
 
 Open the Actions tab, select the Release workflow, click "Run workflow" on `main` and choose patch, minor or major. Use this when you want a release for changes that did not create one, or another bump than a pull request got. Manual releases only work on `main`, and only if `main` has commits after the latest release.
 
-The notes of a manual release list the merged pull requests like any other release, sorted by their labels. To list a breaking change under "Breaking changes", add `release:major` to its merged pull request before you start the run. Once the Release run of that merge has made its plan (or if the merge started no Release run), a label on the merged pull request only changes the release notes.
+The notes of a manual release list the merged pull requests like any other release, sorted by their labels. For example, a breaking change that was merged without `release:major` is not under "Breaking changes". Edit the notes of the release afterwards if you want to move it. Do not add `release:major` to the merged pull request for this: if the Release run of that merge still waits in the queue, the label changes its version.
 
 ### When a release run fails or is cancelled
 

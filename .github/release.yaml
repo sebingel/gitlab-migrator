@@ -1,12 +1,13 @@
 # Sections of the release notes. The Release workflow creates every release
 # with "gh release create --generate-notes", and GitHub builds the notes from
 # the pull requests that were merged since the previous release. Each pull
-# request goes into the first section that lists one of its labels. "*"
-# takes all pull requests that no section above took.
+# request goes into the first section that lists one of its labels and does
+# not exclude it. "*" takes all pull requests that no section above took.
 #
 # CONTRIBUTING.md (section "Release notes") explains where the labels come
 # from. The Labeler workflow (.github/workflows/labeler.yaml) adds some of
-# them automatically.
+# them automatically. If you change the labels here, change the list in the
+# "if" of that workflow too.
 #
 # Docs: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
 
@@ -19,6 +20,11 @@ changelog:
       labels:
         - release:minor
         - enhancement
+      # A pull request with the label bug is a fix, also when it has
+      # enhancement or release:minor too.
+      exclude:
+        labels:
+          - bug
     - title: Bug fixes
       labels:
         - bug
