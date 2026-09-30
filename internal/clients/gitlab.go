@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-hclog"
-	gogitlab "github.com/xanzy/go-gitlab"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 // GitLabClient is the interface for GitLab API operations used by the migrator.

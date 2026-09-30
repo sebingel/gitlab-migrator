@@ -164,7 +164,7 @@ func TestShouldSkip(t *testing.T) {
 	}
 
 	tests := []struct {
-		iid  int
+		iid  int64
 		want bool
 	}{
 		{1, true},  // success → skip
@@ -390,7 +390,7 @@ func TestMarshalJSON_NumericKeyOrder(t *testing.T) {
 
 	// Record MRs in non-sequential order
 	for _, iid := range []int{100, 2, 30, 1, 10, 3, 20} {
-		s.RecordSuccess(iid, Pointer(iid))
+		s.RecordSuccess(int64(iid), Pointer(iid))
 	}
 
 	if err := s.Flush(); err != nil {

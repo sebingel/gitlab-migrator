@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,24 +56,24 @@ type StateFile struct {
 // instead of the default lexicographic order (which produces "1","10","100","2",...).
 func (sf *StateFile) MarshalJSON() ([]byte, error) {
 	// Sort MR keys numerically
-	keys := make([]int, 0, len(sf.MergeRequests))
+	keys := make([]int64, 0, len(sf.MergeRequests))
 	for k := range sf.MergeRequests {
-		n, err := strconv.Atoi(k)
+		n, err := strconv.ParseInt(k, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("non-numeric MR key %q: %w", k, err)
 		}
 		keys = append(keys, n)
 	}
-	sort.Ints(keys)
+	slices.Sort(keys)
 
 	// Build ordered merge_requests object as raw JSON
 	mrParts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		v, err := json.Marshal(sf.MergeRequests[strconv.Itoa(k)])
+		v, err := json.Marshal(sf.MergeRequests[strconv.FormatInt(k, 10)])
 		if err != nil {
 			return nil, err
 		}
-		mrParts = append(mrParts, fmt.Sprintf("%q:%s", strconv.Itoa(k), v))
+		mrParts = append(mrParts, fmt.Sprintf("%q:%s", strconv.FormatInt(k, 10), v))
 	}
 
 	// stateFileAlias has the same fields but no MarshalJSON method, which avoids
@@ -151,11 +151,11 @@ func LoadOrCreate(filePath, gitlabProject, githubRepo string, logger hclog.Logge
 // -skip-open-merge-requests, saved by an older version, is not final: it
 // depends on the flags of the run that saved it, and the MR can be merged or
 // closed later.
-func (s *MigrationState) ShouldSkip(mrIID int) bool {
+func (s *MigrationState) ShouldSkip(mrIID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	st, ok := s.data.MergeRequests[strconv.Itoa(mrIID)]
+	st, ok := s.data.MergeRequests[strconv.FormatInt(mrIID, 10)]
 	if !ok {
 		return false
 	}
@@ -166,11 +166,11 @@ func (s *MigrationState) ShouldSkip(mrIID int) bool {
 }
 
 // GetState returns a copy of the stored state for a specific MR IID, or nil if not found.
-func (s *MigrationState) GetState(mrIID int) *MRState {
+func (s *MigrationState) GetState(mrIID int64) *MRState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	st := s.data.MergeRequests[strconv.Itoa(mrIID)]
+	st := s.data.MergeRequests[strconv.FormatInt(mrIID, 10)]
 	if st == nil {
 		return nil
 	}
@@ -179,32 +179,32 @@ func (s *MigrationState) GetState(mrIID int) *MRState {
 }
 
 // record stores st for the MR with the given IID and marks the state dirty.
-func (s *MigrationState) record(mrIID int, st MRState) {
+func (s *MigrationState) record(mrIID int64, st MRState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	st.UpdatedAt = time.Now()
-	s.data.MergeRequests[strconv.Itoa(mrIID)] = &st
+	s.data.MergeRequests[strconv.FormatInt(mrIID, 10)] = &st
 	s.dirty = true
 }
 
 // RecordSuccess records a successful MR migration.
-func (s *MigrationState) RecordSuccess(mrIID int, githubPRNum *int) {
+func (s *MigrationState) RecordSuccess(mrIID int64, githubPRNum *int) {
 	s.record(mrIID, MRState{Status: MRStateSuccess, GitHubPRNum: githubPRNum})
 }
 
 // RecordFailure records a failed MR migration.
-func (s *MigrationState) RecordFailure(mrIID int, errMsg string) {
+func (s *MigrationState) RecordFailure(mrIID int64, errMsg string) {
 	s.record(mrIID, MRState{Status: MRStateFailed, Error: errMsg})
 }
 
 // RecordSkipped records a skipped MR migration.
-func (s *MigrationState) RecordSkipped(mrIID int, reason string) {
+func (s *MigrationState) RecordSkipped(mrIID int64, reason string) {
 	s.record(mrIID, MRState{Status: MRStateSkipped, SkipReason: reason})
 }
 
 // RecordPartial records a partially successful MR migration (PR created but some comments failed).
-func (s *MigrationState) RecordPartial(mrIID int, githubPRNum *int, errMsg string) {
+func (s *MigrationState) RecordPartial(mrIID int64, githubPRNum *int, errMsg string) {
 	s.record(mrIID, MRState{Status: MRStatePartial, GitHubPRNum: githubPRNum, Error: errMsg})
 }
 

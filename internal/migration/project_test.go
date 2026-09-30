@@ -301,7 +301,7 @@ func TestBodyMatchesMergeRequest(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
-		iid  int
+		iid  int64
 		want bool
 	}{
 		{"format 2 bare number", "**GitLab MR Number** | 42 |", 42, true},

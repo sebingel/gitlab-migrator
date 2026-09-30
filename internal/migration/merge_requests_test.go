@@ -17,7 +17,7 @@ import (
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/sebingel/gitlab-migrator/internal/config"
-	gogitlab "github.com/xanzy/go-gitlab"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 // servePages answers GET requests for path with items, split into pages like
@@ -162,7 +162,7 @@ func TestListMergeRequestAwardEmoji_ReadsAllPages(t *testing.T) {
 	const total = 130
 	awards := make([]*gogitlab.AwardEmoji, total)
 	for i := range awards {
-		awards[i] = &gogitlab.AwardEmoji{ID: i + 1, Name: "rocket"}
+		awards[i] = &gogitlab.AwardEmoji{ID: int64(i + 1), Name: "rocket"}
 	}
 	awards[119].Name = "thumbsup"
 	awards[119].User.Username = "late-approver"
@@ -216,7 +216,7 @@ func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 		t.Helper()
 		mux := http.NewServeMux()
 		var calls atomic.Int32
-		servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.MergeRequest{
+		servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{
 			{IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "main"},
 		}, &calls)
 		p := newGitLabTestProject(t, mux)

@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	gogithub "github.com/google/go-github/v84/github"
-	gogitlab "github.com/xanzy/go-gitlab"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 // cache holds cached API responses for both GitHub and GitLab clients.

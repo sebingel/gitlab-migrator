@@ -21,7 +21,7 @@ import (
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
-	gogitlab "github.com/xanzy/go-gitlab"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 
 	"github.com/sebingel/gitlab-migrator/internal/clients"
 	"github.com/sebingel/gitlab-migrator/internal/config"
