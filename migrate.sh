@@ -263,18 +263,19 @@ echo "Projects CSV:   $PROJECTS_CSV"
 echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
 echo "Log Level:      $LOG_LEVEL"
 echo ""
-echo "Flags:"
-echo "  - Migrate Pull Requests:       Enabled"
-echo "  - Skip Invalid Merge Requests: Enabled"
-echo "  - Trim Branches on GitHub:     Enabled"
-NO_FORCE="Disabled"
+# Print each flag with its value on one line, taken from the real arguments
+echo "Arguments:"
+line=""
 for arg in "${arguments[@]}"; do
-    if [ "$arg" = "-no-force" ]; then
-        NO_FORCE="Enabled"
-        break
+    if [[ "$arg" == -[[:lower:]]* && -n "$line" ]]; then
+        echo "  $line"
+        line=""
     fi
+    line="${line:+$line }$arg"
 done
-echo "  - No Force Push:               $NO_FORCE"
+if [ -n "$line" ]; then
+    echo "  $line"
+fi
 echo ""
 echo -e "\033[33mPress Ctrl+C to cancel...\033[0m"
 echo ""

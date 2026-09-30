@@ -262,11 +262,19 @@ Write-Host "Projects CSV:   $ProjectsCsv"
 Write-Host "Log Directory:  $(if ($LogDirectory) { $LogDirectory } else { '(default: ./logs)' })"
 Write-Host "Log Level:      $($env:LOG_LEVEL)"
 Write-Host ""
-Write-Host "Flags:"
-Write-Host "  - Migrate Pull Requests:       Enabled"
-Write-Host "  - Skip Invalid Merge Requests: Enabled"
-Write-Host "  - Trim Branches on GitHub:     Enabled"
-Write-Host "  - No Force Push:               $(if ($arguments -contains '-no-force') { 'Enabled' } else { 'Disabled' })"
+# Print each flag with its value on one line, taken from the real arguments
+Write-Host "Arguments:"
+$line = ""
+foreach ($arg in $arguments) {
+    if ($arg -cmatch "^-[a-z]" -and $line) {
+        Write-Host "  $line"
+        $line = ""
+    }
+    $line = "$line $arg".Trim()
+}
+if ($line) {
+    Write-Host "  $line"
+}
 Write-Host ""
 Write-Host "Press Ctrl+C to cancel..." -ForegroundColor Yellow
 Write-Host ""
