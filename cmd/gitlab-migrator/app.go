@@ -270,9 +270,10 @@ func isTransientNetworkError(err error) bool {
 // A leading UTF-8 byte order mark is removed, and an empty body gives an empty
 // GitHubError. After a successful read, resp.Body is always replaced with a
 // reader over the read bytes without the byte order mark, also when the body is
-// empty or no JSON, so resp never keeps a closed body. For a 4xx that is not
-// retried, the transports above the retry client and go-github get the body.
-// In all other cases retryablehttp drains it.
+// empty or no JSON, so resp never keeps a closed body. When CheckRetry returns
+// neither a retry nor an error (for example for a 404), the transports above the
+// retry client and go-github get the body. In all other cases retryablehttp
+// drains it.
 func parseGitHubError(resp *http.Response) (GitHubError, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
