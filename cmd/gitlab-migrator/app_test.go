@@ -70,9 +70,9 @@ func (h *retryHarness) logLines(serverURL string) []string {
 
 // expectResponse sends a GET through the retry client, expects a response with
 // the given status and returns its body.
-func (h *retryHarness) expectResponse(t *testing.T, url string, status int) string {
+func (h *retryHarness) expectResponse(t *testing.T, target string, status int) string {
 	t.Helper()
-	resp, err := h.client.Get(url)
+	resp, err := h.client.Get(target)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,17 +84,17 @@ func (h *retryHarness) expectResponse(t *testing.T, url string, status int) stri
 }
 
 // expectOK expects that the final response is 200 with the body "ok".
-func (h *retryHarness) expectOK(t *testing.T, url string) {
+func (h *retryHarness) expectOK(t *testing.T, target string) {
 	t.Helper()
-	if body := h.expectResponse(t, url, http.StatusOK); body != "ok" {
+	if body := h.expectResponse(t, target, http.StatusOK); body != "ok" {
 		t.Fatalf("got body %q, want ok", body)
 	}
 }
 
 // expectGiveUp expects no response and exactly the error want.
-func (h *retryHarness) expectGiveUp(t *testing.T, url, want string) {
+func (h *retryHarness) expectGiveUp(t *testing.T, target, want string) {
 	t.Helper()
-	resp, err := h.client.Get(url)
+	resp, err := h.client.Get(target)
 	if resp != nil {
 		_ = resp.Body.Close()
 		t.Errorf("got response with status %d, want nil", resp.StatusCode)
@@ -296,6 +296,28 @@ func TestRetryClient_ServerErrors(t *testing.T) {
 	})
 }
 
+// 408 and 424 are the other 4xx statuses in retryableStatuses. CheckRetry parses
+// their bodies, and they get the default backoff.
+func TestRetryClient_RequestTimeoutAndFailedDependency(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusRequestTimeout, nil, `{"message":"Request Timeout"}`),
+		respond(http.StatusFailedDependency, nil, `{"message":"Failed Dependency"}`),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t)
+
+	h.expectOK(t, srv.URL+"/repos/o/r")
+
+	assertCalls(t, calls, 3)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second, 60 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=408 message="Request Timeout"`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=408 sleep=30s attempt=0 max_attempts=15`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=424 message="Failed Dependency"`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=424 sleep=1m0s attempt=1 max_attempts=15`,
+	})
+}
+
 // A 4xx body that is no JSON stops the request, even for a retryable status.
 func TestRetryClient_BadJSON4xx(t *testing.T) {
 	srv, calls := sequenceServer(t,
@@ -404,35 +426,52 @@ func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
 	})
 }
 
+// The 5xx case never parses the body. The 403 case parses it on every attempt,
+// and retryablehttp drains the restored body after the last one.
 func TestRetryClient_GivesUpAfterRetryMax(t *testing.T) {
-	handlers := make([]http.HandlerFunc, 16)
-	for i := range handlers {
-		handlers[i] = respond(http.StatusInternalServerError, nil, "")
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		message string
+	}{
+		{name: "500 without body", status: http.StatusInternalServerError},
+		{name: "403 with JSON body", status: http.StatusForbidden, body: `{"message":"Must have admin rights to Repository."}`, message: "Must have admin rights to Repository."},
 	}
-	srv, calls := sequenceServer(t, handlers...)
-	h := newRetryHarness(t)
 
-	h.expectGiveUp(t, srv.URL+"/repos/o/r", "GET "+srv.URL+"/repos/o/r giving up after 16 attempt(s)")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers := make([]http.HandlerFunc, 16)
+			for i := range handlers {
+				handlers[i] = respond(tt.status, nil, tt.body)
+			}
+			srv, calls := sequenceServer(t, handlers...)
+			h := newRetryHarness(t)
 
-	assertCalls(t, calls, 16)
-	// DefaultBackoff doubles 30 s per attempt and stops at RetryWaitMax (900 s).
-	wantWaits := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 240 * time.Second, 480 * time.Second}
-	for len(wantWaits) < 15 {
-		wantWaits = append(wantWaits, 900*time.Second)
+			h.expectGiveUp(t, srv.URL+"/repos/o/r", "GET "+srv.URL+"/repos/o/r giving up after 16 attempt(s)")
+
+			assertCalls(t, calls, 16)
+			// DefaultBackoff doubles 30 s per attempt and stops at RetryWaitMax (900 s).
+			wantWaits := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 240 * time.Second, 480 * time.Second}
+			for len(wantWaits) < 15 {
+				wantWaits = append(wantWaits, 900*time.Second)
+			}
+			assertWaits(t, h.waits, wantWaits)
+
+			// CheckRetry logs every attempt. After the 16th, retryablehttp gives
+			// up without calling Backoff.
+			retrying := fmt.Sprintf(`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=%d message=%q`, tt.status, tt.message)
+			var wantLines []string
+			for i, wait := range wantWaits {
+				wantLines = append(wantLines,
+					retrying,
+					fmt.Sprintf(`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=%d sleep=%s attempt=%d max_attempts=15`, tt.status, wait, i),
+				)
+			}
+			wantLines = append(wantLines, retrying)
+			assertLines(t, h.logLines(srv.URL), wantLines)
+		})
 	}
-	assertWaits(t, h.waits, wantWaits)
-
-	// CheckRetry logs every attempt. After the 16th, retryablehttp gives up
-	// without calling Backoff.
-	var wantLines []string
-	for i, wait := range wantWaits {
-		wantLines = append(wantLines,
-			`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=500 message=""`,
-			fmt.Sprintf(`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=500 sleep=%s attempt=%d max_attempts=15`, wait, i),
-		)
-	}
-	wantLines = append(wantLines, `[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=500 message=""`)
-	assertLines(t, h.logLines(srv.URL), wantLines)
 }
 
 // CheckRetry reads the body of a 4xx response. The caller (go-github) reads it
@@ -463,9 +502,10 @@ func TestRetryClient_GoGitHubGetsNotFoundMessage(t *testing.T) {
 	)
 	h := newRetryHarness(t)
 
-	// The same transport chain as in NewApp.
+	// The transport chain of NewApp for github.com. Instead of the GitHub URL
+	// (or WithEnterpriseURLs for GitHub Enterprise), BaseURL points to the test server.
 	transport := &clients.SearchModder{Base: &retryablehttp.RoundTripper{Client: h.client}}
-	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100)))
+	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100))).WithAuthToken("test-token")
 	baseURL, err := url.Parse(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("parsing server URL: %v", err)
@@ -506,7 +546,7 @@ func TestRetryClient_EmptyBodyNotFoundIsReadable(t *testing.T) {
 // A body with only a UTF-8 byte order mark is empty after the mark is removed.
 // The caller can still read the (empty) body.
 func TestRetryClient_ByteOrderMarkOnlyIsReadable(t *testing.T) {
-	srv, _ := sequenceServer(t,
+	srv, calls := sequenceServer(t,
 		respond(http.StatusNotFound, nil, "\xef\xbb\xbf"),
 	)
 	h := newRetryHarness(t)
@@ -514,12 +554,16 @@ func TestRetryClient_ByteOrderMarkOnlyIsReadable(t *testing.T) {
 	if got := h.expectResponse(t, srv.URL+"/repos/o/missing", http.StatusNotFound); got != "" {
 		t.Errorf("got body %q, want empty body", got)
 	}
+
+	assertCalls(t, calls, 1)
+	assertWaits(t, h.waits, nil)
+	assertLines(t, h.logLines(srv.URL), nil)
 }
 
 // When the 4xx body is no JSON, CheckRetry returns an error. retryablehttp then
 // drains the body, so no caller reads it today. The test checks that CheckRetry
 // does not leave a closed body behind anyway.
-func TestCheckRetry_BadJSONKeepsBody(t *testing.T) {
+func TestRetryClient_CheckRetryBadJSONKeepsBody(t *testing.T) {
 	const body = "<html>forbidden</html>"
 	srv, _ := sequenceServer(t,
 		respond(http.StatusForbidden, nil, body),
@@ -545,7 +589,7 @@ func TestCheckRetry_BadJSONKeepsBody(t *testing.T) {
 // A UTF-8 byte order mark before the JSON is removed from the body.
 func TestRetryClient_ByteOrderMarkIsRemoved(t *testing.T) {
 	const body = `{"message":"Validation Failed"}`
-	srv, _ := sequenceServer(t,
+	srv, calls := sequenceServer(t,
 		respond(http.StatusUnprocessableEntity, nil, "\xef\xbb\xbf"+body),
 	)
 	h := newRetryHarness(t)
@@ -553,6 +597,10 @@ func TestRetryClient_ByteOrderMarkIsRemoved(t *testing.T) {
 	if got := h.expectResponse(t, srv.URL+"/repos/o/r/pulls", http.StatusUnprocessableEntity); got != body {
 		t.Errorf("got body %q, want %q", got, body)
 	}
+
+	assertCalls(t, calls, 1)
+	assertWaits(t, h.waits, nil)
+	assertLines(t, h.logLines(srv.URL), nil)
 }
 
 // The server sends fewer bytes than it declares, so reading the 4xx body fails.
@@ -576,7 +624,10 @@ func TestRetryClient_NetworkErrors(t *testing.T) {
 	h := newRetryHarness(t)
 	ctx := context.Background()
 
-	if retry, err := h.client.CheckRetry(ctx, nil, io.ErrUnexpectedEOF); !retry || err != nil {
+	// http.Client.Do wraps transport errors in a *url.Error, and retryablehttp
+	// passes it to CheckRetry as it is.
+	dropped := &url.Error{Op: "Get", URL: "https://api.github.com/user", Err: io.ErrUnexpectedEOF}
+	if retry, err := h.client.CheckRetry(ctx, nil, dropped); !retry || err != nil {
 		t.Errorf("transient error: got (%v, %v), want (true, nil)", retry, err)
 	}
 
@@ -587,8 +638,8 @@ func TestRetryClient_NetworkErrors(t *testing.T) {
 
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if retry, err := h.client.CheckRetry(cancelled, nil, io.ErrUnexpectedEOF); retry || err != io.ErrUnexpectedEOF {
-		t.Errorf("cancelled context: got (%v, %v), want (false, %v)", retry, err, io.ErrUnexpectedEOF)
+	if retry, err := h.client.CheckRetry(cancelled, nil, dropped); retry || err != dropped {
+		t.Errorf("cancelled context: got (%v, %v), want (false, %v)", retry, err, dropped)
 	}
 
 	// net/http never returns no response and no error, so this case cannot
@@ -608,7 +659,7 @@ func TestRetryClient_NetworkErrors(t *testing.T) {
 	}
 
 	assertLines(t, h.logLines("unused"), []string{
-		`[WARN]  transient network error - will retry: error="unexpected EOF"`,
+		`[WARN]  transient network error - will retry: error="Get \"https://api.github.com/user\": unexpected EOF"`,
 		`[TRACE] waiting before retrying after network error: sleep=` + h.waits[0].String() + ` attempt=0 max_attempts=15`,
 	})
 }
