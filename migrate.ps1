@@ -27,48 +27,223 @@ if (-not $env:GITLAB_TOKEN) {
     exit 1
 }
 
-# Build command arguments
-$arguments = @(
-    "-github-user", $GitHubUser,
-    "-gitlab-domain", $GitLabDomain,
-    "-github-domain", $GitHubDomain,
-    "-projects-csv", $ProjectsCsv,
-#     Alternative to -projects-csv: migrate a single project (mutually exclusive with -projects-csv)
-#     "-gitlab-project", "namespace/project",
-#     "-github-repo", "org/repo",
-    "-migrate-pull-requests",
-    "-skip-invalid-merge-requests",
-#     "-trim-branches-on-github",
-    "-log-output", "console,file"
-)
+# ============================================================================
+# Command arguments
+# ============================================================================
+# All flags of gitlab-migrator are listed below, grouped by topic.
+# To use a flag, remove the "#" at the start of its line. To stop, add it again.
+# The rules between flags use these words:
+#   Requires X        the tool stops with an error if X is not set
+#   Excludes X        the tool stops with an error if X is also set
+#   Implies X         the flag turns X on by itself
+#   Only with X       without X, the flag has no effect
+#   No effect with X  with X, the flag has no effect
+$arguments = @()
 
-# Add log directory only if explicitly set
+# ----------------------------------------------------------------------------
+# Connection (values from the Configuration block at the top, do not leave them empty)
+# ----------------------------------------------------------------------------
+
+# -github-user: GitHub user that owns GITHUB_TOKEN. Used as the user name for git pushes.
+#   Required. Migrated pull requests are created by the owner of the token.
+$arguments += "-github-user", $GitHubUser
+
+# -gitlab-domain: GitLab host (default: gitlab.com).
+$arguments += "-gitlab-domain", $GitLabDomain
+
+# -github-domain: GitHub host (default: github.com). Another host means GitHub Enterprise.
+$arguments += "-github-domain", $GitHubDomain
+
+# ----------------------------------------------------------------------------
+# Projects to migrate
+# ----------------------------------------------------------------------------
+# Use -projects-csv, or both -gitlab-project and -github-repo.
+# Without -projects-csv, the tool stops with an error if one of the pair is missing.
+# With -projects-csv, a single one of the pair is ignored.
+
+# -projects-csv: CSV file, one "gitlab-group/project,github-org/repo" per line, no header.
+#   Excludes: -gitlab-project together with -github-repo.
+$arguments += "-projects-csv", $ProjectsCsv
+
+# -gitlab-project and -github-repo: Migrate one project. Set both of them.
+#   Excludes: -projects-csv.
+# $arguments += "-gitlab-project", "namespace/project"
+# $arguments += "-github-repo", "org/repo"
+
+# ----------------------------------------------------------------------------
+# GitHub repository: creation and settings
+# ----------------------------------------------------------------------------
+
+# -delete-existing-repos: Delete an existing GitHub repo and create it again. It does not ask!
+#   With -loop, this happens again in every pass. With -state-dir, see the note there.
+#   Excludes: -pull-requests-only.
+# $arguments += "-delete-existing-repos"
+
+# -repo-visibility: private (default), internal or public, for repos the tool creates
+#   (also after -delete-existing-repos). "internal" needs a GitHub Enterprise organization.
+#   An existing repo keeps its visibility.
+#   No effect with: -pull-requests-only (it never creates a repo).
+# $arguments += "-repo-visibility", "internal"
+
+# -unarchive-archived-repos: Unarchive an archived GitHub repo for the run, archive it again after.
+#   Without it, the migration of an archived repo fails, possibly only after long API retries.
+#   If you stop the run with Ctrl+C, the repo can stay unarchived.
+#   No effect with: -delete-existing-repos (the new repo is not archived).
+$arguments += "-unarchive-archived-repos"
+
+# ----------------------------------------------------------------------------
+# Git push and branches
+# ----------------------------------------------------------------------------
+
+# -no-force: Push without force. Use it when work has already started in the GitHub repo.
+#   Also applies to the temporary branches of merged and closed merge requests.
+#   No effect with: -pull-requests-only (it does not push with git).
+$arguments += "-no-force"
+
+# -push-batch-size: Branches per push (default: all at once). Try 50 to 100 for large repos.
+#   Must be greater than 0. Also used by -trim-branches-on-github.
+#   No effect with: -pull-requests-only.
+# $arguments += "-push-batch-size", "100"
+
+# -trim-branches-on-github: Delete GitHub branches that do not exist in GitLab.
+#   It deletes them also with -no-force. With a rename flag below, it also deletes the old
+#   default branch on GitHub.
+#   Excludes: -pull-requests-only.
+# $arguments += "-trim-branches-on-github"
+
+# -rename-master-to-main: Rename the GitLab default branch (for example master) to main on GitHub.
+#   Same as -rename-trunk-branch "main".
+#   Excludes: -rename-trunk-branch, -pull-requests-only.
+# $arguments += "-rename-master-to-main"
+
+# -rename-trunk-branch: Rename the GitLab default branch to this name on GitHub.
+#   With -migrate-pull-requests, open merge requests into the old branch target the new one.
+#   Excludes: -rename-master-to-main, -pull-requests-only.
+# $arguments += "-rename-trunk-branch", "main"
+
+# ----------------------------------------------------------------------------
+# Storage of the local clone
+# ----------------------------------------------------------------------------
+
+# -storage-type: memory (default) or filesystem. Use filesystem for repos too big for memory.
+#   No effect with: -pull-requests-only (there is no clone).
+# $arguments += "-storage-type", "filesystem"
+
+# -storage-dir: Directory for the filesystem clone (default: the temp directory of the system).
+#   The directory must already exist. The clone is deleted after each project.
+#   Only with: -storage-type filesystem.
+# $arguments += "-storage-dir", "C:\temp\migration"
+
+# ----------------------------------------------------------------------------
+# Merge requests to pull requests
+# ----------------------------------------------------------------------------
+
+# -migrate-pull-requests: Migrate GitLab merge requests (open, merged, closed) as pull requests.
+$arguments += "-migrate-pull-requests"
+
+# -pull-requests-only: Migrate only merged and closed merge requests. No clone and no push.
+#   The GitHub repo must already exist.
+#   Implies: -migrate-pull-requests, -skip-open-merge-requests.
+#   Excludes: -delete-existing-repos, -trim-branches-on-github, -rename-master-to-main,
+#   -rename-trunk-branch.
+# $arguments += "-pull-requests-only"
+
+# -skip-open-merge-requests: Skip open merge requests. Only merged and closed ones are migrated.
+#   Only with: -migrate-pull-requests, or -report (then it lowers the count).
+$arguments += "-skip-open-merge-requests"
+
+# -skip-invalid-merge-requests: Log and skip broken merge requests (for example a missing
+#   branch or commit) instead of counting them as failed.
+#   Only with: -migrate-pull-requests.
+$arguments += "-skip-invalid-merge-requests"
+
+# -merge-requests-max-age: Only merge requests created in the last N days.
+#   Must be a whole number. 0 or less means no limit.
+#   Only with: -migrate-pull-requests. -report ignores it.
+# $arguments += "-merge-requests-max-age", "365"
+
+# ----------------------------------------------------------------------------
+# State and resume
+# ----------------------------------------------------------------------------
+
+# -state-dir: Save the progress of each merge request in a JSON file per project.
+#   A new run with the same directory skips merge requests that an earlier run migrated
+#   or skipped (for example as invalid). Failed and partly migrated ones are tried again.
+#   This also skips merge requests that were open when they were migrated, so their pull
+#   requests are not updated or closed later. -skip-open-merge-requests avoids this.
+#   With -delete-existing-repos, the new repo gets no pull requests for these merge
+#   requests: use an empty directory then.
+#   Only with: -migrate-pull-requests.
+$arguments += "-state-dir", ".\state"
+
+# ----------------------------------------------------------------------------
+# Run control and reports
+# ----------------------------------------------------------------------------
+
+# -max-concurrency: Number of projects migrated at the same time (default: 4).
+#   Use 1 or more. The tool does not check it, and 0 or less makes it hang or crash.
+#   No effect with: -report.
+# $arguments += "-max-concurrency", "8"
+
+# -loop: After the last project, start again with the first one, until you press Ctrl+C.
+#   A new pass does not wait for the last one to end, so with -max-concurrency above 1
+#   the same project can be migrated twice at the same time.
+#   No effect with: -report.
+# $arguments += "-loop"
+
+# -report: Only count the merge requests of each project. Nothing is migrated or changed.
+#   Most other flags have no effect then. -skip-open-merge-requests lowers the count.
+# $arguments += "-report"
+
+# -detailed-report: After the run, write a JSON and a Markdown report to the reports folder
+#   next to the executable.
+#   No effect with: -report.
+$arguments += "-detailed-report"
+
+# ----------------------------------------------------------------------------
+# Logging (the log level is LOG_LEVEL at the top of this script)
+# ----------------------------------------------------------------------------
+
+# -log-output: console (default), file, or console,file.
+$arguments += "-log-output", "console,file"
+
+# -log-directory: Directory for log files (default: the logs folder next to the executable).
+#   Set it with the log directory variable at the top. It is added only if it is not empty.
+#   Requires: -log-output with "file".
 if ($LogDirectory) {
     $arguments += "-log-directory", $LogDirectory
 }
 
-# Optional flags - uncomment as needed
-# $arguments += "-delete-existing-repos"
-$arguments += "-unarchive-archived-repos"
-# $arguments += "-rename-master-to-main"
-# $arguments += "-loop"
-# $arguments += "-max-concurrency", "8"
-# $arguments += "-merge-requests-max-age", "365"
-$arguments += "-detailed-report"
-# $arguments += "-repo-visibility", "internal"  # or "public"; default is "private"
-# $arguments += "-storage-type", "filesystem"
-# $arguments += "-storage-dir", "C:\temp\migration"
-$arguments += "-state-dir", ".\state"
-$arguments += "-no-force"
-# $arguments += "-push-batch-size", "100"
-$arguments += "-skip-open-merge-requests"
-# $arguments += "-pull-requests-only"
-# $arguments += "-report"
-# $arguments += "-rename-trunk-branch", "main"
+# ----------------------------------------------------------------------------
+# Other
+# ----------------------------------------------------------------------------
+
+# -config: JSON file with settings. Its values override the flags of this script,
+#   except -merge-requests-max-age: there the flag wins.
+#   Tokens are not allowed in it. They come from the environment only.
 # $arguments += "-config", "migration.json"
+
+# -version: Print the version and exit without migrating. Other flags must still be valid.
 # $arguments += "-version"
 
-# Prepare mode (standalone, incompatible with normal migration flags)
+# ----------------------------------------------------------------------------
+# Prepare mode (standalone): clone one repo, handle files over 100 MB, push it to a new remote
+# ----------------------------------------------------------------------------
+# Uncomment the block below to use it. It replaces all flags above. Of those, only
+# -log-output, -log-directory and -config still work in prepare mode: add them after the block.
+# In prepare mode, the tool does not check that -log-output has "file" for -log-directory.
+# Prepare mode needs no tokens, but this script checks them anyway.
+#
+# -prepare: Start prepare mode.
+#   Requires: -prepare-clone-url, -prepare-target-url.
+#   Excludes: -projects-csv, -gitlab-project, -github-repo (also when set in the -config file).
+# -prepare-clone-url: URL to clone from (https:// or git@).
+# -prepare-target-url: URL to push to (https:// or git@).
+# -prepare-large-files: remove (with git-filter-repo) or lfs (with git lfs migrate).
+#   Without it, prepare mode stops when it finds a file over 100 MB.
+# -prepare-batch-count: Number of push batches. Default: batches only for repos over 2 GiB,
+#   10 per GiB (at least 10). A value forces batches.
+# The -prepare-* flags have no effect without -prepare.
 # $arguments = @(
 #     "-prepare",
 #     "-prepare-clone-url", "https://gitlab.example.com/group/repo.git",
