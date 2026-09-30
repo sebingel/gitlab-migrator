@@ -8,7 +8,7 @@ This project uses [GitHub Flow](https://docs.github.com/en/get-started/using-git
 2. Use one branch per change, for example `feat/short-name`, `fix/short-name` or `docs/short-name`.
 3. Commit your work. Commit titles are short and in present tense, for example "adds -repo-visibility flag" or "fixes retry on 404".
 4. Push the branch and open a pull request into `main`.
-5. Wait for the checks: CI (build and vet), Lint, Test and Release (dry run). All of them must pass.
+5. Wait for the checks: CI (build and vet), Lint, Test, Vulnerabilities (govulncheck) and Release (dry run). All of them must pass. There is one exception: govulncheck can fail because of a vulnerability that the pull request did not cause (see [Vulnerabilities](#vulnerabilities)).
 6. If the change needs more than a patch release, or no release at all, add a release label (see below).
 7. Merge the pull request with "Create a merge commit". This is the only merge method that the repository allows. The Release workflow then builds the binaries and publishes a GitHub release.
 8. Delete the branch.
@@ -130,6 +130,17 @@ Also check:
 * `isTransientNetworkError` in `cmd/gitlab-migrator/app.go`. It finds some HTTP/2 errors by their text, and a new minor release can change these texts.
 * The Ports section of the release notes. The release binaries are for Linux, macOS and Windows on amd64 and arm64 (see `build-release.sh`). A new minor release can drop an old system version, for example Go 1.27 needs macOS 13 Ventura or later. Users of that version then cannot run the next release, so mention it in the release notes and think about the label `release:minor`. <https://go.dev/wiki/MinimumRequirements> lists the requirements of each Go release.
 
+## Vulnerabilities
+
+The Vulnerabilities workflow (`.github/workflows/govulncheck.yaml`) runs [govulncheck](https://go.dev/doc/tutorial/govulncheck) for every pull request, after every push to `main` and every Monday. It compares the Go standard library and the modules in `go.mod` with the [Go vulnerability database](https://vuln.go.dev), once for each release target (Linux, macOS and Windows, each for amd64 and arm64), because the targets use different source files. govulncheck does not filter the database by system here, so an entry for one system can show up for every target. It fails if the code can call a vulnerable function. The log shows each vulnerability, the version that fixes it and an example call path. Vulnerabilities in code that is not called are only counted in the log.
+
+* For a vulnerability in a module, update the module to the fixed version with `go get <module>@<fixed version>`, then run `go mod tidy`. If the fixed version needs a newer Go, `go get` also raises the `go` line in `go.mod`. Without a `toolchain` line, CI then builds with the first release of that Go version (for example 1.26.0), so also update the `toolchain` line as described in the next point.
+* For a vulnerability in the standard library, set the `toolchain` line in `go.mod` to the newest [Go release](https://go.dev/dl/), for example with `go get toolchain@go1.27.1`. This command adds the line if it is missing. The `toolchain` line can name a newer minor version than the `go` line. Do not raise the `go` line for this, because it is the minimum Go version for everyone who builds from source. CI and the Release workflow build with the version of the `toolchain` line (or of the `go` line if there is no `toolchain` line), and govulncheck checks the standard library of this version.
+
+Such an update changes `go.mod` or `go.sum`, so its merge creates a new release with fixed binaries. golangci-lint also reads the Go version from `go.mod` (the `toolchain` line first), and it fails if it was built with an older Go. If the Lint check fails for this reason, update the golangci-lint version in `.github/workflows/lint.yaml` in the same pull request.
+
+New vulnerabilities are published all the time, so govulncheck can fail on a pull request that did not cause the failure. govulncheck is not a required check, so such a pull request can still be merged, but first compare its log with the latest run on `main`: the pull request must not add a finding. Fix the other findings in their own pull request.
+
 ## Local checks
 
 Before you push, run:
@@ -139,9 +150,12 @@ go build ./...
 go vet ./...
 go test ./...
 golangci-lint run
+govulncheck ./...
 ```
 
 Use the golangci-lint version from `.github/workflows/lint.yaml`. An older one can stop with an error about the Go version (see [New minor Go releases](#new-minor-go-releases)).
+
+To install govulncheck, run `go install golang.org/x/vuln/cmd/govulncheck@v1.8.0` in the project directory. This is the same version as in the Vulnerabilities workflow. It needs Go 1.26 or newer to build. If your Go is older, `go install` downloads a newer Go for the build, if `GOTOOLCHAIN` allows it (the default `auto` does, `local` does not). Install it again when your Go or the Go version in `go.mod` changes, because govulncheck cannot check code for a newer Go than the one it was built with. govulncheck checks the standard library of the Go version that `go version` shows in the project directory. If this is not the version from `go.mod`, the results for the standard library differ from CI. It also only scans for your own system. CI scans every release target with `CGO_ENABLED=0`, like the release builds. To scan one target the same way, set these variables, for example in bash: `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 govulncheck ./...`.
 
 If you change files in `.github/`, also run:
 
