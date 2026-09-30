@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -71,13 +72,8 @@ func assertLines(t *testing.T, got, want []string) {
 
 func assertWaits(t *testing.T, got, want []time.Duration) {
 	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("got waits %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("wait %d: got %v, want %v", i, got[i], want[i])
-		}
+	if !slices.Equal(got, want) {
+		t.Errorf("got waits %v, want %v", got, want)
 	}
 }
 
@@ -121,11 +117,12 @@ func readBody(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
-// retryablehttp drains the response body before it calls Backoff. So Backoff
-// cannot read the secondary rate limit message, and it uses the default backoff.
-// The WARN line still says "extended backoff". The test pins the current
-// behavior, not the intended one: a change that adds an extended backoff for
-// secondary rate limits must update it.
+// Backoff does not read the body, so a secondary rate limit gets the default
+// backoff. (An earlier Backoff did parse the body, but retryablehttp drains it
+// before Backoff runs, so that parse never saw the message.) The WARN line still
+// says "extended backoff". The test pins the current behavior, not the intended
+// one: a change that adds an extended backoff for secondary rate limits must
+// update it.
 func TestRetryClient_SecondaryRateLimit403(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
@@ -151,6 +148,59 @@ func TestRetryClient_SecondaryRateLimit403(t *testing.T) {
 	})
 }
 
+// The removed Backoff branch parsed 429 bodies too. A 429 with a secondary rate
+// limit message gets the TRACE line (the WARN line is only for 403) and the
+// default backoff.
+func TestRetryClient_SecondaryRateLimit429(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusTooManyRequests, nil, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t)
+
+	resp, err := h.client.Get(srv.URL + "/repos/o/r/issues")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || readBody(t, resp) != "ok" {
+		t.Fatalf("got status %d, want 200 with body ok", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("got %d requests, want 2", got)
+	}
+
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/issues status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation."`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/issues status=429 sleep=30s attempt=0 max_attempts=15`,
+	})
+}
+
+func TestRetryClient_SecondaryRateLimitWithRetryAfter(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"Retry-After": {"45"}}, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t)
+
+	resp, err := h.client.Get(srv.URL + "/repos/o/r/pulls")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || readBody(t, resp) != "ok" {
+		t.Fatalf("got status %d, want 200 with body ok", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("got %d requests, want 2", got)
+	}
+
+	assertWaits(t, h.waits, []time.Duration{45 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=45s attempt=0 max_attempts=15`,
+	})
+}
+
 func TestRetryClient_SAMLEnforcement403(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, nil, `{"message":"Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization.","documentation_url":"https://docs.github.com/articles/authenticating-to-a-github-organization-with-saml-single-sign-on/"}`),
@@ -159,6 +209,7 @@ func TestRetryClient_SAMLEnforcement403(t *testing.T) {
 
 	resp, err := h.client.Get(srv.URL + "/orgs/o/repos")
 	if resp != nil {
+		_ = resp.Body.Close()
 		t.Errorf("got response with status %d, want nil", resp.StatusCode)
 	}
 	want := "GET " + srv.URL + "/orgs/o/repos giving up after 1 attempt(s): received 403 with response: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. - https://docs.github.com/articles/authenticating-to-a-github-organization-with-saml-single-sign-on/"
@@ -240,6 +291,7 @@ func TestRetryClient_BadJSON4xx(t *testing.T) {
 
 	resp, err := h.client.Get(srv.URL + "/repos/o/r")
 	if resp != nil {
+		_ = resp.Body.Close()
 		t.Errorf("got response with status %d, want nil", resp.StatusCode)
 	}
 	want := "GET " + srv.URL + "/repos/o/r giving up after 1 attempt(s): unmarshaling response body: invalid character '<' looking for beginning of value"
@@ -325,6 +377,72 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	})
 }
 
+func TestRetryClient_RetryAfterWinsOverRateLimitHeaders(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Unix()+600, 10)
+	srv, _ := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"Retry-After": {"5"}, "X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {reset}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t)
+
+	resp, err := h.client.Get(srv.URL + "/user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || readBody(t, resp) != "ok" {
+		t.Fatalf("got status %d, want 200 with body ok", resp.StatusCode)
+	}
+	assertWaits(t, h.waits, []time.Duration{5 * time.Second})
+}
+
+// Backoff reads Retry-After only in seconds. An HTTP date gives the default backoff.
+func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
+	date := time.Now().Add(10 * time.Minute).UTC().Format(http.TimeFormat)
+	srv, _ := sequenceServer(t,
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date}}, ""),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t)
+
+	resp, err := h.client.Get(srv.URL + "/repos/o/r")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || readBody(t, resp) != "ok" {
+		t.Fatalf("got status %d, want 200 with body ok", resp.StatusCode)
+	}
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+}
+
+func TestRetryClient_GivesUpAfterRetryMax(t *testing.T) {
+	handlers := make([]http.HandlerFunc, 16)
+	for i := range handlers {
+		handlers[i] = respond(http.StatusInternalServerError, nil, "")
+	}
+	srv, calls := sequenceServer(t, handlers...)
+	h := newRetryHarness(t)
+
+	resp, err := h.client.Get(srv.URL + "/repos/o/r")
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Errorf("got response with status %d, want nil", resp.StatusCode)
+	}
+	want := "GET " + srv.URL + "/repos/o/r giving up after 16 attempt(s)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got error %v\nwant %s", err, want)
+	}
+	if got := calls.Load(); got != 16 {
+		t.Errorf("got %d requests, want 16", got)
+	}
+
+	// DefaultBackoff doubles 30 s per attempt and stops at RetryWaitMax (900 s).
+	wantWaits := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 240 * time.Second, 480 * time.Second}
+	for len(wantWaits) < 15 {
+		wantWaits = append(wantWaits, 900*time.Second)
+	}
+	assertWaits(t, h.waits, wantWaits)
+}
+
 // CheckRetry reads the body of a 4xx response. The caller (go-github) reads it
 // again to build its error, so the body must still be readable.
 func TestRetryClient_NotFoundKeepsBody(t *testing.T) {
@@ -392,6 +510,7 @@ func TestCheckRetry_BadJSONKeepsBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	retry, err := h.client.CheckRetry(context.Background(), resp, nil)
 	want := "unmarshaling response body: invalid character '<' looking for beginning of value"
@@ -432,6 +551,7 @@ func TestRetryClient_BodyReadError4xx(t *testing.T) {
 
 	resp, err := h.client.Get(srv.URL + "/repos/o/r")
 	if resp != nil {
+		_ = resp.Body.Close()
 		t.Errorf("got response with status %d, want nil", resp.StatusCode)
 	}
 	want := "GET " + srv.URL + "/repos/o/r giving up after 1 attempt(s): parsing response body: unexpected EOF"
