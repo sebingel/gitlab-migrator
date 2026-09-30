@@ -9,7 +9,7 @@ This project uses [GitHub Flow](https://docs.github.com/en/get-started/using-git
 3. Commit your work. Commit titles are short and in present tense, for example "adds -repo-visibility flag" or "fixes retry on 404".
 4. Push the branch and open a pull request into `main`.
 5. Wait for the checks: CI (build and vet), Lint, Test, Vulnerabilities (govulncheck) and Release (dry run). All of them must pass. There is one exception: govulncheck can fail because of a vulnerability that the pull request did not cause (see [Vulnerabilities](#vulnerabilities)).
-6. If the change needs more than a patch release, or no release at all, add a release label (see below).
+6. Check the labels of the pull request. If the change needs more than a patch release, or no release at all, add a release label (see [Version labels](#version-labels)). The labels also choose the section of the pull request in the release notes (see [Release notes](#release-notes)).
 7. Merge the pull request with "Create a merge commit". This is the only merge method that the repository allows. The Release workflow then builds the binaries and publishes a GitHub release.
 8. Delete the branch.
 
@@ -24,7 +24,7 @@ A push to `main` runs the Release workflow (`.github/workflows/release.yaml`) if
 * `.github/scripts/build-release.sh` (build flags, asset names and archive content)
 * `LICENSE` (part of every archive)
 
-Other changes, for example documentation, tests, workflows or Dependabot updates of GitHub Actions, create no release. The next release includes them. `README.md` is part of the archives too, but a documentation edit alone does not need a new version.
+Other changes, for example documentation, tests, workflows or Dependabot updates of GitHub Actions, create no release. The next release includes them, and its notes list them. `README.md` is part of the archives too, but a documentation edit alone does not need a new version.
 
 The workflow:
 
@@ -32,7 +32,7 @@ The workflow:
 2. reads the pull request number from the first line of the merge commit and reads its labels through the API,
 3. computes the next version,
 4. builds `gitlab-migrator` for Linux, macOS and Windows, each for amd64 and arm64,
-5. creates the tag and the GitHub release with the archives, a checksums file and generated release notes.
+5. creates the tag and the GitHub release with the archives, a checksums file and generated release notes (see [Release notes](#release-notes)).
 
 All decisions are in `.github/scripts/release-plan.sh`, and `.github/scripts/release-plan_test.sh` tests them.
 
@@ -51,6 +51,42 @@ Each pull request runs the same workflow as a dry run. The dry run builds all re
 * `release:skip` wins over all other labels. It is the only skip rule of the Release workflow.
 * Set the label before you merge. The workflow reads the labels when the merge arrives on `main`.
 * Do not put `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]` or `[actions skip]` in the pull request title or in any commit message of the pull request, not even as a quote. Do not add a `skip-checks: true` (or `skip-checks:true`) trailer to any commit message of the pull request either. The push of a merge contains the merge commit (its message contains the title) and all commits of the pull request. GitHub itself starts no push workflow if any of these messages has such a marker or trailer, so the merge creates no release and shows no warning. The dry run warns about such a title or commit, and it runs again when the title changes. There is one exception: if the marker or trailer is in the last commit of the pull request, GitHub starts no checks for the pull request at all, so there is no dry run and no warning. Checks that do not start are the sign. To fix a commit message, rewrite it (for example with `git rebase`) and force push the branch.
+
+### Release notes
+
+The release notes are the changelog of this repository. `CHANGELOG.md` is not updated any more. The Release workflow creates every release with notes that GitHub generates (`gh release create --generate-notes`). They list every pull request that was merged since the previous release, also the ones that created no release of their own, for example documentation changes or pull requests with `release:skip`. Each entry is the title of the pull request with its author and a link, so write the title for the users of the tool.
+
+`.github/release.yaml` sorts the pull requests into sections by their labels. A pull request goes into the first section of this table that lists one of its labels:
+
+| Section | Labels |
+|---|---|
+| Breaking changes | `release:major` |
+| New features | `release:minor`, `enhancement` |
+| Bug fixes | `bug` |
+| Documentation | `documentation` |
+| Dependencies | `dependencies` |
+| Other changes | all other pull requests |
+
+The labels come from three places:
+
+* The Labeler workflow (`.github/workflows/labeler.yaml`, rules in `.github/labeler.yaml`) labels a new pull request once, when it is opened:
+  * a branch `feat/...` or `feature/...` gets `enhancement`,
+  * a branch `fix/...`, `bugfix/...` or `hotfix/...` gets `bug`,
+  * a branch `docs/...`, or a pull request that only changes Markdown files, gets `documentation`.
+
+  It never removes a label and does not run again, so you can change the labels by hand afterwards. It skips pull requests from forks, because their token cannot add labels. Label them by hand.
+* Dependabot adds `dependencies` to its pull requests (`.github/dependabot.yaml`).
+* You add labels by hand, for example `release:minor` or `bug`.
+
+Only the `release:` labels change the version. The other labels only choose the section. For example, a pull request from a `feat/` branch without `release:minor` is listed under "New features", but it creates a patch release.
+
+GitHub reads the labels when it creates the release. So set them before you merge a pull request that creates a release. For a pull request that creates no release, you can still change the labels until the next release.
+
+To see the notes that the next release would get, run the command below. It saves nothing, but it needs write access to the repository.
+
+```
+gh api repos/sebingel/gitlab-migrator/releases/generate-notes -f tag_name=<next version> -f target_commitish=main -f previous_tag_name=<latest version> --jq .body
+```
 
 ### Pushes that are not a pull request merge
 

@@ -1,0 +1,38 @@
+name: Labeler
+
+# Adds labels to a new pull request, from its branch name and its changed
+# files (rules in .github/labeler.yaml). The labels choose the section of the
+# pull request in the release notes (.github/release.yaml). CONTRIBUTING.md
+# explains the rules.
+#
+# It runs once, when the pull request is opened, and never removes a label.
+# After that the labels belong to the author: a label that you remove by hand
+# does not come back. Labels that GITHUB_TOKEN adds start no workflow, so they
+# start no new dry run of the Release workflow.
+#
+# The trigger is pull_request and not pull_request_target. So a pull request
+# that changes the labeler tests its own version, and no run of a fork pull
+# request ever gets a token with write access. A pull request from a fork
+# gets a read-only token, which cannot add labels, so the job skips it.
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  label:
+    name: Label pull request
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # read .github/labeler.yaml through the API
+      pull-requests: write # add the labels
+
+    steps:
+      - name: Add labels
+        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          configuration-path: .github/labeler.yaml
