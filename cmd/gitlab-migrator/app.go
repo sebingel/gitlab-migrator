@@ -168,9 +168,9 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			return true, nil
 		}
 
-		errResp := GitHubError{}
+		var errResp GitHubError
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			if err = unmarshalResp(resp, &errResp); err != nil {
+			if errResp, err = parseGitHubError(resp); err != nil {
 				return false, err
 			}
 		}
@@ -264,30 +264,31 @@ func isTransientNetworkError(err error) bool {
 	return false
 }
 
-func unmarshalResp(resp *http.Response, model interface{}) error {
-	if resp == nil {
-		return nil
-	}
-
+// parseGitHubError reads the body of resp once and decodes it as a GitHubError.
+// A leading UTF-8 byte order mark is removed, and an empty body gives an empty
+// GitHubError. After a successful read, resp.Body is replaced with a reader over
+// the same bytes, also when the body is no JSON: the caller of the retry client
+// (go-github) reads the body again to build its own error.
+func parseGitHubError(resp *http.Response) (GitHubError, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("parsing response body: %+v", err)
+		return GitHubError{}, fmt.Errorf("parsing response body: %+v", err)
 	}
 	_ = resp.Body.Close()
 
 	respBody = bytes.TrimPrefix(respBody, []byte("\xef\xbb\xbf"))
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
+	var errResp GitHubError
 	if len(respBody) == 0 {
-		return nil
+		return errResp, nil
 	}
 
-	if err := json.Unmarshal(respBody, model); err != nil {
-		return fmt.Errorf("unmarshaling response body: %+v", err)
+	if err := json.Unmarshal(respBody, &errResp); err != nil {
+		return GitHubError{}, fmt.Errorf("unmarshaling response body: %+v", err)
 	}
 
-	resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
-
-	return nil
+	return errResp, nil
 }
 
 func roundDuration(d, r time.Duration) time.Duration {

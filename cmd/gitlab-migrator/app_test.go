@@ -344,6 +344,55 @@ func TestRetryClient_NotFoundKeepsBody(t *testing.T) {
 	}
 }
 
+// An empty 4xx body is no error, and the caller can still read the (empty) body.
+// With "Content-Length: 0" net/http uses http.NoBody, which can be read after
+// Close. So the handler flushes the headers first: the response is then
+// chunked, and the client gets a real body stream without content.
+func TestRetryClient_EmptyBodyNotFoundIsReadable(t *testing.T) {
+	srv, _ := sequenceServer(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			w.(http.Flusher).Flush()
+		},
+	)
+	h := newRetryHarness(t)
+
+	resp, err := h.client.Get(srv.URL + "/repos/o/missing")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("got status %d, want 404", resp.StatusCode)
+	}
+	if got := readBody(t, resp); got != "" {
+		t.Errorf("got body %q, want empty body", got)
+	}
+}
+
+// When the 4xx body is no JSON, CheckRetry returns an error, and the body is
+// still readable for whoever handles that error.
+func TestCheckRetry_BadJSONKeepsBody(t *testing.T) {
+	const body = "<html>forbidden</html>"
+	srv, _ := sequenceServer(t,
+		respond(http.StatusForbidden, nil, body),
+	)
+	h := newRetryHarness(t)
+
+	resp, err := srv.Client().Get(srv.URL + "/repos/o/r")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	retry, err := h.client.CheckRetry(context.Background(), resp, nil)
+	want := "unmarshaling response body: invalid character '<' looking for beginning of value"
+	if retry || err == nil || err.Error() != want {
+		t.Fatalf("got (%v, %v), want (false, %s)", retry, err, want)
+	}
+	if got := readBody(t, resp); got != body {
+		t.Errorf("got body %q, want %q", got, body)
+	}
+}
+
 // A UTF-8 byte order mark before the JSON is removed from the body.
 func TestRetryClient_ByteOrderMarkIsRemoved(t *testing.T) {
 	const body = `{"message":"Validation Failed"}`
