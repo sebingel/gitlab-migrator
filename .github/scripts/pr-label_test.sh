@@ -20,7 +20,8 @@ failures=0
 # It runs the --jq filter of the call with the real jq.
 #   STUB_LABELS  JSON of GET repos/<repo>/issues/<n>/labels
 #   STUB_EVENTS  JSON of GET repos/<repo>/issues/<n>/events
-#   STUB_FAIL    GET or POST: this kind of call fails like gh does
+#   STUB_FAIL    "GET labels", "GET events" or "POST labels": this call
+#                fails like gh does
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" << 'EOF'
 #!/usr/bin/env bash
@@ -36,7 +37,7 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-if [ "${STUB_FAIL:-}" = "$method" ]; then
+if [ "${STUB_FAIL:-}" = "$method ${path##*/}" ]; then
   echo "gh: Server Error (HTTP 502)" >&2
   exit 1
 fi
@@ -49,13 +50,19 @@ esac
 EOF
 chmod +x "$work/bin/gh"
 
-# run [VAR=value ...] runs pr-label.sh with only these variables. It sets
-# $status, $out (all messages) and $calls (the gh calls, one per line).
+# run [VAR=value ...] runs pr-label.sh with only these variables, in the
+# directory $work/cwd. It sets $status, $out (all messages) and $calls (the
+# gh calls, one per line).
+mkdir -p "$work/cwd"
 run() {
   rm -f -- "$work/gh.log"
   status=0
-  out="$(env -i PATH="$work/bin:$PATH" STUB_DIR="$work" "$@" bash "$script" 2>&1)" || status=$?
-  calls="$(cat "$work/gh.log" 2> /dev/null || true)"
+  out="$(cd "$work/cwd" && env -i PATH="$work/bin:$PATH" STUB_DIR="$work" "$@" bash "$script" 2>&1)" ||
+    status=$?
+  calls=""
+  if [ -f "$work/gh.log" ]; then
+    calls="$(cat "$work/gh.log")"
+  fi
 }
 
 report() {
@@ -68,6 +75,10 @@ report() {
     echo "      gh calls: $(tr '\n' '|' <<< "$calls")"
     failures=$((failures + 1))
   fi
+}
+
+has_line() {
+  grep -qxF -- "$2" <<< "$1"
 }
 
 post_call() {
@@ -159,7 +170,7 @@ expect_label "docs/ gets documentation" documentation "${pr[@]}" BRANCH=docs/rea
 expect_label "upper case prefix counts" bug "${pr[@]}" BRANCH=Fix/Retry-404
 # shellcheck disable=SC2016 # the branch name must reach the script as text
 expect_label "a branch name is never run as code" enhancement "${pr[@]}" BRANCH='feat/$(touch pwned)'
-if [ -e pwned ] || [ -e "$work/pwned" ]; then
+if [ -e "$work/cwd/pwned" ]; then
   report "and creates no file" "a file 'pwned' exists"
 fi
 
@@ -195,11 +206,13 @@ expect_label "an unlabeled event alone does not count" enhancement \
 
 echo "--- errors"
 
-expect_error "a failed read stops the script" "HTTP 502" "${pr[@]}" BRANCH=feat/x STUB_FAIL=GET
-if grep -qF -- "--method POST" <<< "$calls"; then
-  report "and adds no label" "it added a label"
-fi
-expect_error "a failed POST fails the script" "HTTP 502" "${pr[@]}" BRANCH=feat/x STUB_FAIL=POST
+for call in "GET labels" "GET events"; do
+  expect_error "a failed $call stops the script" "HTTP 502" "${pr[@]}" BRANCH=feat/x STUB_FAIL="$call"
+  if grep -qF -- "--method POST" <<< "$calls"; then
+    report "and adds no label" "it added a label"
+  fi
+done
+expect_error "a failed POST fails the script" "HTTP 502" "${pr[@]}" BRANCH=feat/x STUB_FAIL="POST labels"
 expect_error "missing branch" "BRANCH is required" REPO=sebingel/gitlab-migrator NUMBER=7
 expect_error "missing number" "NUMBER is required" REPO=sebingel/gitlab-migrator BRANCH=feat/x
 expect_error "missing repository" "REPO is required" NUMBER=7 BRANCH=feat/x
@@ -208,18 +221,29 @@ echo "--- release.yaml"
 
 # The labels of the categories in release.yaml: list items under a
 # "labels:" key with six spaces of indent. Labels under "exclude:" have a
-# deeper indent and do not count.
+# deeper indent and do not count. The Labeler workflow also checks that
+# release.yaml is valid YAML with the expected structure.
 config_labels="$(tr -d '\r' < "$release_config" | awk '
   /^      labels:/ { on = 1; next }
   on && /^        - / { sub(/^        - /, ""); gsub(/"/, ""); print; next }
-  { on = 0 }' | grep -vx -e '\*' -e 'release:.*' | sort)"
-script_labels="$(tr -d '\r' < "$script" | sed -n 's/^section_labels=(\(.*\))$/\1/p' | tr ' ' '\n' | sort)"
+  { on = 0 }' | { grep -vx -e '\*' -e 'release:.*' || true; } | sort -u)"
+script_labels="$(tr -d '\r' < "$script" | sed -n 's/^section_labels=(\(.*\))$/\1/p' | tr ' ' '\n' | sort -u)"
 if [ -n "$config_labels" ] && [ "$config_labels" = "$script_labels" ]; then
   report "section_labels matches the categories of release.yaml" ""
 else
   report "section_labels matches the categories of release.yaml" \
     "release.yaml: $(paste -sd ' ' - <<< "$config_labels"), pr-label.sh: $(paste -sd ' ' - <<< "$script_labels")"
 fi
+
+# The labels that the tests above expect from the branch prefixes must be
+# section labels, or the Labeler adds a label that no section lists.
+for label in enhancement bug documentation; do
+  if has_line "$config_labels" "$label"; then
+    report "the prefix label $label is a section of release.yaml" ""
+  else
+    report "the prefix label $label is a section of release.yaml" "release.yaml has no category with $label"
+  fi
+done
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"

@@ -15,7 +15,8 @@ name: Labeler
 #
 # The trigger is pull_request and not pull_request_target, so no job ever
 # gets write access for a pull request from a fork. Such a pull request only
-# gets a read-only token, which cannot add labels, so the job skips it.
+# gets a read-only token, which cannot add labels, so the label job skips
+# it. The test job runs for every pull request, also from forks.
 
 on:
   pull_request:
@@ -24,18 +25,20 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  label:
-    name: Label pull request
-    if: github.event.pull_request.head.repo.full_name == github.repository
+  test:
+    name: Test label rules
     runs-on: ubuntu-latest
     permissions:
-      contents: read # check out the scripts
-      pull-requests: write # read the labels and events, add the label
+      contents: read
 
     steps:
       # Cone mode also checks out the files directly in .github, so the
-      # test finds .github/release.yaml.
+      # steps below find .github/release.yaml.
       - name: Checkout scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,6 +47,37 @@ jobs:
 
       - name: Test the label rules
         run: bash .github/scripts/pr-label_test.sh
+
+      # GitHub reads release.yaml only when it creates a release, after the
+      # build. yq (installed on the GitHub Ubuntu runners) fails on invalid
+      # YAML, and jq checks the structure: a list of categories, each with a
+      # title and labels, and "*" as the last one.
+      - name: Check .github/release.yaml
+        run: |
+          yq -o=json '.' .github/release.yaml |
+            jq --exit-status '.changelog.categories
+              | type == "array" and length > 0
+                and all(.[];
+                  (.title | type) == "string"
+                  and (.labels | type) == "array" and (.labels | length) > 0
+                  and all(.labels[]; type == "string"))
+                and .[-1].labels == ["*"]'
+
+  label:
+    name: Label pull request
+    needs: test
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # check out the script
+      pull-requests: write # read the labels and events, add the label
+
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
 
       - name: Add label
         env:

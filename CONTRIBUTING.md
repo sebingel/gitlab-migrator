@@ -67,7 +67,7 @@ The release notes are the changelog of this repository. `CHANGELOG.md` is not up
 | Dependencies | `dependencies` |
 | Other changes | all other pull requests |
 
-These labels must exist in the repository. If you rename one, also change `.github/release.yaml` and `.github/scripts/pr-label.sh`.
+These labels must exist in the repository. Several files use their names, so if you rename one, search the repository for the old name. For example, `enhancement`, `bug` and `documentation` are in `.github/release.yaml`, `.github/scripts/pr-label.sh` and its test, `dependencies` is also in `.github/dependabot.yaml`, and the `release:` labels are also in `.github/scripts/release-plan.sh`.
 
 The labels come from three places:
 
