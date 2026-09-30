@@ -123,6 +123,9 @@ func readBody(t *testing.T, resp *http.Response) string {
 
 // retryablehttp drains the response body before it calls Backoff. So Backoff
 // cannot read the secondary rate limit message, and it uses the default backoff.
+// The WARN line still says "extended backoff". The test pins the current
+// behavior, not the intended one: a change that adds an extended backoff for
+// secondary rate limits must update it.
 func TestRetryClient_SecondaryRateLimit403(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
@@ -279,7 +282,8 @@ func TestRetryClient_EmptyBody403(t *testing.T) {
 
 func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	const body = `{"message":"API rate limit exceeded for user ID 1."}`
-	reset := strconv.FormatInt(time.Now().Unix()+100, 10)
+	resetEpoch := time.Now().Unix() + 100
+	reset := strconv.FormatInt(resetEpoch, 10)
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {reset}}, body),
 		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}, body),
@@ -287,7 +291,9 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	)
 	h := newRetryHarness(t)
 
+	before := time.Now()
 	resp, err := h.client.Get(srv.URL + "/user")
+	after := time.Now()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -301,9 +307,12 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	if len(h.waits) != 2 {
 		t.Fatalf("got waits %v, want 2 waits", h.waits)
 	}
-	// The reset time has whole seconds, and Backoff adds 30 s and rounds to seconds.
-	if h.waits[0] < 129*time.Second || h.waits[0] > 130*time.Second {
-		t.Errorf("wait 0: got %v, want 2m9s or 2m10s", h.waits[0])
+	// Backoff waits until 30 s after the reset time, rounded to seconds. It runs
+	// between before and after, so its wait lies between these two bounds.
+	recovery := time.Unix(resetEpoch+30, 0)
+	lo, hi := recovery.Sub(after).Round(time.Second), recovery.Sub(before).Round(time.Second)
+	if h.waits[0] < lo || h.waits[0] > hi {
+		t.Errorf("wait 0: got %v, want between %v and %v", h.waits[0], lo, hi)
 	}
 	if h.waits[1] != 60*time.Second {
 		t.Errorf("wait 1: got %v, want 1m0s", h.waits[1])
@@ -369,8 +378,9 @@ func TestRetryClient_EmptyBodyNotFoundIsReadable(t *testing.T) {
 	}
 }
 
-// When the 4xx body is no JSON, CheckRetry returns an error, and the body is
-// still readable for whoever handles that error.
+// When the 4xx body is no JSON, CheckRetry returns an error. retryablehttp then
+// drains the body, so no caller reads it today. The test checks that CheckRetry
+// does not leave a closed body behind anyway.
 func TestCheckRetry_BadJSONKeepsBody(t *testing.T) {
 	const body = "<html>forbidden</html>"
 	srv, _ := sequenceServer(t,

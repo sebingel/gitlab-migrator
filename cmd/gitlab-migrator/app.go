@@ -194,8 +194,9 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 				return false, fmt.Errorf("received 403 with response: %v", msg)
 			}
 
-			// The message only decides that the request is retried. Backoff
-			// computes the wait from the status and the headers.
+			// A 403 is retried below anyway, so this branch only changes the
+			// log line. Backoff computes the wait from the status and the
+			// headers, not from the message.
 			if secondaryRateLimitPattern.MatchString(errResp.Message) {
 				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
 					"message", errResp.Message,
@@ -266,9 +267,10 @@ func isTransientNetworkError(err error) bool {
 
 // parseGitHubError reads the body of resp once and decodes it as a GitHubError.
 // A leading UTF-8 byte order mark is removed, and an empty body gives an empty
-// GitHubError. After a successful read, resp.Body is replaced with a reader over
-// the same bytes, also when the body is no JSON: the caller of the retry client
-// (go-github) reads the body again to build its own error.
+// GitHubError. After a successful read, resp.Body is always replaced with a
+// reader over the read bytes without the byte order mark, also when the body is
+// empty or no JSON, so resp never keeps a closed body. go-github reads the body
+// again for a 4xx that is not retried. In all other cases retryablehttp drains it.
 func parseGitHubError(resp *http.Response) (GitHubError, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
