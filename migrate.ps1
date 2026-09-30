@@ -191,7 +191,7 @@ $arguments += "-state-dir", ".\state"
 
 # -loop: After the last project, start again with the first one, until you press Ctrl+C.
 #   A new pass does not wait for the last one to end, so with -max-concurrency above 1
-#   the same project can be migrated twice at the same time.
+#   (the default is 4) the same project can be migrated twice at the same time.
 #   No effect with: -report.
 # $arguments += "-loop"
 
@@ -223,7 +223,8 @@ if ($LogDirectory) {
 # ----------------------------------------------------------------------------
 
 # -config: JSON file with settings. Its values override the flags of this script,
-#   except -merge-requests-max-age: there the flag wins.
+#   except -merge-requests-max-age (the flag wins) and the flags that -pull-requests-only
+#   implies (they stay on).
 #   Tokens are not allowed in it. They come from the environment only.
 # $arguments += "-config", "migration.json"
 
@@ -235,7 +236,8 @@ if ($LogDirectory) {
 # ----------------------------------------------------------------------------
 # Prepare mode (standalone): clone one repo, handle files over 100 MB, push it to a new remote
 # ----------------------------------------------------------------------------
-# Uncomment the block below to use it. It replaces all flags above. Of those, only
+# Uncomment the block below to use it. The two lines after it (large files, batch count) are
+# optional: add only what you need. The block replaces all flags above. Of those, only
 # -log-output, -log-directory and -config still work in prepare mode: add them after the block.
 # In prepare mode, the tool does not check that -log-output has "file" for -log-directory.
 # Prepare mode needs no tokens, but this script checks them anyway.
@@ -247,8 +249,9 @@ if ($LogDirectory) {
 # -prepare-target-url: URL to push to (https:// or git@).
 # -prepare-large-files: remove (with git-filter-repo) or lfs (with git lfs migrate).
 #   Without it, prepare mode stops when it finds a file over 100 MB.
-# -prepare-batch-count: Number of push batches. Default: batches only for repos over 2 GiB,
-#   10 per GiB (at least 10). A value forces batches.
+# -prepare-batch-count: Number of push batches. Default (and 0): batches only for repos over
+#   2 GiB, 10 per GiB (at least 10). A value above 0 forces batches, also for small repos.
+#   The tool does not reject negative values (they push one commit at a time): do not use them.
 # The -prepare-* flags have no effect without -prepare.
 # $arguments = @(
 #     "-prepare",
