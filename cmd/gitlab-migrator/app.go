@@ -348,7 +348,9 @@ func isTransientNetworkError(err error) bool {
 	}
 
 	// String matching for HTTP/2-specific errors where no concrete type is exported by Go.
-	// These patterns are based on Go 1.25 net/http2 error strings and may break on major updates.
+	// These patterns are based on the Go 1.25 net/http2 error strings. They were checked
+	// again for Go 1.27.1, where this code is in net/http/internal/http2. A new minor Go
+	// release can change them (see "New minor Go releases" in CONTRIBUTING.md).
 	msg := strings.ToLower(err.Error())
 	transientPatterns := []string{
 		"stream error",
