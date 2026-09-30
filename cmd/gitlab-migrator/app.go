@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -123,48 +122,14 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
 		}()
 
-		var errResp GitHubError
-
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			_ = unmarshalResp(resp, &errResp)
-		}
-
-		isSecondaryLimit := secondaryRateLimitPattern.MatchString(errResp.Message)
-
+		// Backoff uses the status and the headers only. retryablehttp drains
+		// resp.Body after CheckRetry and before Backoff, so the GitHub error
+		// message cannot be read here.
 		if s, ok := resp.Header["Retry-After"]; ok {
 			if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
 				sleep = time.Second * time.Duration(retryAfter)
 				return
 			}
-		}
-
-		if isSecondaryLimit {
-			baseWait := 120 * time.Second
-			mult := math.Pow(2, float64(attemptNum))
-			sleep = time.Duration(float64(baseWait) * mult)
-			if sleep > max {
-				sleep = max
-			}
-
-			jitterPercent := rand.Float64() * 0.4
-			jitter := time.Duration(jitterPercent * float64(sleep))
-			sleep += jitter
-
-			jitteredMax := max + time.Duration(rand.Float64()*0.4*float64(max))
-			if sleep > jitteredMax {
-				sleep = jitteredMax
-			}
-
-			message := errResp.Message
-			if message == "" {
-				message = "(unable to parse error response)"
-			}
-
-			logger.Info("waiting for secondary rate limit recovery",
-				"wait_duration", sleep,
-				"attempt", attemptNum,
-				"message", message)
-			return
 		}
 
 		if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
@@ -229,6 +194,8 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 				return false, fmt.Errorf("received 403 with response: %v", msg)
 			}
 
+			// The message only decides that the request is retried. Backoff
+			// computes the wait from the status and the headers.
 			if secondaryRateLimitPattern.MatchString(errResp.Message) {
 				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
 					"message", errResp.Message,
