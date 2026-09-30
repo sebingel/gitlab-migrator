@@ -1,28 +1,21 @@
 name: Labeler
 
-# Adds one label to a pull request, chosen by the prefix of its branch. The
+# Adds a label to a pull request, chosen by the prefix of its branch. The
 # label chooses the section of the pull request in the release notes
-# (.github/release.yaml). CONTRIBUTING.md (section "Release notes") lists
-# the prefixes and the sections.
+# (.github/release.yaml). .github/scripts/pr-label.sh has the rules, and
+# pr-label_test.sh tests them. CONTRIBUTING.md (section "Release notes")
+# explains them.
 #
-# The job only runs while the pull request has none of the labels that
-# choose a section. So a section label that someone set by hand always
-# wins, and Dependabot pull requests (label dependencies) are skipped. The
-# job runs on every push, not only when the pull request is opened, because
-# GitHub starts no pull_request workflow while a pull request has a merge
-# conflict, and a run can fail. The next push then adds the label.
-#
-# It only adds a label (POST) and never sets the whole list (PUT), so it
-# never removes a label, not even one that was set while the job ran. A
-# label that GITHUB_TOKEN adds starts no workflow, so it starts no new dry
-# run of the Release workflow.
+# It runs after every push, not only when the pull request is opened,
+# because GitHub starts no pull_request workflow while a pull request has a
+# merge conflict, and because a run can fail. The script adds nothing if
+# the pull request has a section label already, or if someone removed the
+# label before. A label that GITHUB_TOKEN adds starts no workflow, so it
+# starts no new dry run of the Release workflow.
 #
 # The trigger is pull_request and not pull_request_target, so no job ever
 # gets write access for a pull request from a fork. Such a pull request only
 # gets a read-only token, which cannot add labels, so the job skips it.
-#
-# The labels must exist in the repository, because this token cannot create
-# labels. The list in "if" must match the labels in .github/release.yaml.
 
 on:
   pull_request:
@@ -34,35 +27,28 @@ permissions:
 jobs:
   label:
     name: Label pull request
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository
-      && !contains(github.event.pull_request.labels.*.name, 'release:major')
-      && !contains(github.event.pull_request.labels.*.name, 'release:minor')
-      && !contains(github.event.pull_request.labels.*.name, 'enhancement')
-      && !contains(github.event.pull_request.labels.*.name, 'bug')
-      && !contains(github.event.pull_request.labels.*.name, 'documentation')
-      && !contains(github.event.pull_request.labels.*.name, 'dependencies')
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write # add the label
+      contents: read # check out the scripts
+      pull-requests: write # read the labels and events, add the label
 
     steps:
+      # Cone mode also checks out the files directly in .github, so the
+      # test finds .github/release.yaml.
+      - name: Checkout scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Test the label rules
+        run: bash .github/scripts/pr-label_test.sh
+
       - name: Add label
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref }}
           NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          case "$BRANCH" in
-            feat/* | feature/*) label="enhancement" ;;
-            fix/* | bugfix/* | hotfix/*) label="bug" ;;
-            docs/*) label="documentation" ;;
-            *)
-              echo "Branch $BRANCH has no prefix with a label."
-              exit 0
-              ;;
-          esac
-          echo "Branch $BRANCH gets the label $label."
-          # POST adds labels to the existing ones. PUT would replace them all.
-          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels" \
-            -f "labels[]=$label" > /dev/null
+          REPO: ${{ github.repository }}
+        run: bash .github/scripts/pr-label.sh

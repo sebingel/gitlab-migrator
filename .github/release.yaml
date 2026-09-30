@@ -6,8 +6,9 @@
 #
 # CONTRIBUTING.md (section "Release notes") explains where the labels come
 # from. The Labeler workflow (.github/workflows/labeler.yaml) adds some of
-# them automatically. If you change the labels here, change the list in the
-# "if" of that workflow too.
+# them automatically. If you change the labels here, also change
+# section_labels in .github/scripts/pr-label.sh. pr-label_test.sh checks
+# that both lists match.
 #
 # Docs: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
 

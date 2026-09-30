@@ -67,19 +67,21 @@ The release notes are the changelog of this repository. `CHANGELOG.md` is not up
 | Dependencies | `dependencies` |
 | Other changes | all other pull requests |
 
-These labels must exist in the repository. If you rename one, also change `.github/release.yaml` and `.github/workflows/labeler.yaml`.
+These labels must exist in the repository. If you rename one, also change `.github/release.yaml` and `.github/scripts/pr-label.sh`.
 
 The labels come from three places:
 
-* The Labeler workflow (`.github/workflows/labeler.yaml`) adds one label from the prefix of the branch:
+* The Labeler workflow (`.github/workflows/labeler.yaml`, rules in `.github/scripts/pr-label.sh`) adds one label from the prefix of the branch. Upper and lower case count as the same.
   * `feat/` or `feature/` gets `enhancement`,
   * `fix/`, `bugfix/` or `hotfix/` gets `bug`,
   * `docs/` gets `documentation`,
-  * other prefixes, for example `chore/`, `ci/` or `refactor/`, get no label.
+  * other prefixes, for example `chore/`, `ci/`, `refactor/` or `dependabot/`, get no label.
 
-  It runs when the pull request is opened and after every push, but only while the pull request has none of the labels in the table. So a section label that you set yourself, when you open the pull request or later, always wins. The Labeler only adds labels and never removes one. It never adds a `release:` label. If you remove its label and set no other one from the table, the next push adds it again. It skips pull requests from forks, because their token cannot add labels. Label them by hand.
-* Dependabot adds `dependencies` to its pull requests (`.github/dependabot.yaml`), so the Labeler skips them.
+  It runs when the pull request is opened and after every push, so a run that failed or did not start (GitHub starts none while a pull request has a merge conflict) is repeated with the next push. It adds nothing if the pull request already has `enhancement`, `bug`, `documentation` or `dependencies`, and it never adds a label again that someone removed. It only adds labels, it never removes one, and it never adds a `release:` label. It skips pull requests from forks, because their token cannot add labels. Label them by hand.
+* Dependabot adds `dependencies` to its pull requests (`.github/dependabot.yaml`).
 * You add labels by hand, for example `release:minor`, or `documentation` for a `chore/` branch that only changes documentation.
+
+To give a pull request another section than the Labeler chose, remove the label of the Labeler and add the other one. One of these four labels that you set before the Labeler runs, for example with `gh pr create --label`, stops it. To list a pull request under "Other changes", just remove the label of the Labeler.
 
 Only the `release:` labels change the version. The other labels only choose the section. For example, a pull request from a `feat/` branch without `release:minor` is listed under "New features", but it creates a patch release.
 
@@ -207,7 +209,8 @@ If you change files in `.github/`, also run:
 actionlint
 bash .github/scripts/release-plan_test.sh
 bash .github/scripts/go-toolchain_test.sh
+bash .github/scripts/pr-label_test.sh
 bash .github/scripts/build-release.sh v0.0.0-local dist
 ```
 
-`release-plan_test.sh` and `go-toolchain_test.sh` need bash and jq. `build-release.sh` builds all release assets into `dist/`. It needs bash, go, zip, GNU tar or bsdtar, and sha256sum or shasum. On macOS the built-in bsdtar and shasum work; install zip if it is missing.
+`release-plan_test.sh`, `go-toolchain_test.sh` and `pr-label_test.sh` need bash and jq. `build-release.sh` builds all release assets into `dist/`. It needs bash, go, zip, GNU tar or bsdtar, and sha256sum or shasum. On macOS the built-in bsdtar and shasum work; install zip if it is missing.
