@@ -39,6 +39,7 @@ fi
 #   Implies X         the flag turns X on by itself
 #   Only with X       without X, the flag has no effect
 #   No effect with X  with X, the flag has no effect
+# A flag without effect is ignored, but a bad value in it can still stop the tool.
 arguments=()
 
 # ----------------------------------------------------------------------------
@@ -107,8 +108,9 @@ arguments+=("-no-force")
 # arguments+=("-push-batch-size" "100")
 
 # -trim-branches-on-github: Delete GitHub branches that do not exist in GitLab.
-#   It deletes them also with -no-force. With a rename flag below, it also deletes the old
-#   default branch on GitHub.
+#   It deletes them also with -no-force. With a rename flag below, it also tries to delete
+#   the old default branch on GitHub. If that is still the default branch there, GitHub can
+#   refuse and the project fails.
 #   Excludes: -pull-requests-only.
 arguments+=("-trim-branches-on-github")
 
@@ -118,7 +120,8 @@ arguments+=("-trim-branches-on-github")
 # arguments+=("-rename-master-to-main")
 
 # -rename-trunk-branch: Rename the GitLab default branch to this name on GitHub.
-#   With -migrate-pull-requests, open merge requests into the old branch target the new one.
+#   With -migrate-pull-requests, new pull requests for open merge requests into the old
+#   branch target the new one. Pull requests from an earlier run keep their base branch.
 #   Excludes: -rename-master-to-main, -pull-requests-only.
 # arguments+=("-rename-trunk-branch" "main")
 
@@ -127,6 +130,7 @@ arguments+=("-trim-branches-on-github")
 # ----------------------------------------------------------------------------
 
 # -storage-type: memory (default) or filesystem. Use filesystem for repos too big for memory.
+#   filesystem fails for projects in a GitLab subgroup (group/subgroup/project).
 #   No effect with: -pull-requests-only (there is no clone).
 # arguments+=("-storage-type" "filesystem")
 
@@ -224,7 +228,9 @@ fi
 #   Tokens are not allowed in it. They come from the environment only.
 # arguments+=("-config" "migration.json")
 
-# -version: Print the version and exit without migrating. Other flags must still be valid.
+# -version: Print the version and exit without migrating. The other flags are only parsed:
+#   an unknown flag, or text for -max-concurrency, -push-batch-size or -prepare-batch-count,
+#   is still an error. No other check runs.
 # arguments+=("-version")
 
 # ----------------------------------------------------------------------------
