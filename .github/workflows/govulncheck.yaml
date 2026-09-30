@@ -79,8 +79,16 @@ jobs:
       # when a target before it has findings. In this mode govulncheck does
       # not filter the database by system, so an entry for one system can
       # show up for every target. Exit code 3 means findings.
+      #
+      # setup-go adds a problem matcher (owner "go") for compiler messages.
+      # It also matches the call traces of govulncheck ("#1: file.go:1:2:
+      # ..."). That gives error annotations with a wrong file, and GitHub
+      # shows only 10 error annotations per step, so the annotations per
+      # target would be lost. So the step removes the matcher first, for
+      # the rest of the job.
       - name: Run govulncheck
         run: |
+          echo "::remove-matcher owner=go::"
           status=0
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             echo "::group::govulncheck for $target"
