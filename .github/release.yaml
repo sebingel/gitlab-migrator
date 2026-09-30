@@ -5,7 +5,8 @@
 # takes all pull requests that no section above took.
 #
 # CONTRIBUTING.md (section "Release notes") explains where the labels come
-# from. .github/labeler.yaml sets some of them automatically.
+# from. The Labeler workflow (.github/workflows/labeler.yaml) adds some of
+# them automatically.
 #
 # Docs: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
 

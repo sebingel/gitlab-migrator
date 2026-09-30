@@ -1,19 +1,21 @@
 name: Labeler
 
-# Adds labels to a new pull request, from its branch name and its changed
-# files (rules in .github/labeler.yaml). The labels choose the section of the
-# pull request in the release notes (.github/release.yaml). CONTRIBUTING.md
-# explains the rules.
+# Adds one label to a new pull request, chosen by the prefix of its branch.
+# The label chooses the section of the pull request in the release notes
+# (.github/release.yaml). CONTRIBUTING.md (section "Release notes") lists
+# the prefixes and the sections.
 #
-# It runs once, when the pull request is opened, and never removes a label.
-# After that the labels belong to the author: a label that you remove by hand
-# does not come back. Labels that GITHUB_TOKEN adds start no workflow, so they
-# start no new dry run of the Release workflow.
+# It runs once, when the pull request is opened, because the branch of a
+# pull request never changes. It only adds a label and never sets the whole
+# list, so it never removes a label that someone set by hand, not even one
+# that was set while the job ran. A label that GITHUB_TOKEN adds starts no
+# workflow, so it starts no new dry run of the Release workflow.
 #
-# The trigger is pull_request and not pull_request_target. So a pull request
-# that changes the labeler tests its own version, and no run of a fork pull
-# request ever gets a token with write access. A pull request from a fork
+# The trigger is pull_request and not pull_request_target, so no job ever
+# gets write access for a pull request from a fork. Such a pull request only
 # gets a read-only token, which cannot add labels, so the job skips it.
+# Dependabot sets its own labels (.github/dependabot.yaml), so the job skips
+# its branches too.
 
 on:
   pull_request:
@@ -25,14 +27,30 @@ permissions:
 jobs:
   label:
     name: Label pull request
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && !startsWith(github.head_ref, 'dependabot/')
     runs-on: ubuntu-latest
     permissions:
-      contents: read # read .github/labeler.yaml through the API
-      pull-requests: write # add the labels
+      pull-requests: write # add the label
 
     steps:
-      - name: Add labels
-        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
-        with:
-          configuration-path: .github/labeler.yaml
+      - name: Add label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          case "$BRANCH" in
+            feat/* | feature/*) label="enhancement" ;;
+            fix/* | bugfix/* | hotfix/*) label="bug" ;;
+            docs/*) label="documentation" ;;
+            *)
+              echo "Branch $BRANCH has no prefix with a label."
+              exit 0
+              ;;
+          esac
+          echo "Branch $BRANCH gets the label $label."
+          # POST adds labels to the existing ones. PUT would replace them all.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels" \
+            -f "labels[]=$label" > /dev/null
