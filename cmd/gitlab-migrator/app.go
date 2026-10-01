@@ -89,8 +89,78 @@ func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) {
 
 var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
 
+// secondaryRateLimitBaseWait is the first wait for a secondary rate limit
+// without rate limit headers. It doubles with each attempt.
+const secondaryRateLimitBaseWait = 120 * time.Second
+
+// secondaryRateLimitKey is the context key under which CheckRetry hands the
+// parsed GitHubError of a secondary rate limit to Backoff.
+type secondaryRateLimitKey struct{}
+
+// markSecondaryRateLimit stores errResp in the context of resp.Request, so that
+// Backoff can find it. retryablehttp v0.7.8 calls CheckRetry and then Backoff
+// with the same resp, but drains resp.Body in between, and Backoff gets no
+// context. The field resp.Request is replaced with a shallow copy that has the
+// new context. The request itself is not changed, so the request that
+// retryablehttp sends again is not affected. CheckRetry marks only responses
+// that it retries. When retryablehttp gives up after the last attempt, it drains
+// the body and returns no response (the client sets no ErrorHandler), so the
+// marked resp.Request never reaches the caller.
+//
+// net/http always sets resp.Request. Without it there is nothing to carry the
+// mark: markSecondaryRateLimit returns false, and Backoff uses the default wait.
+func markSecondaryRateLimit(resp *http.Response, errResp GitHubError) bool {
+	if resp.Request == nil {
+		return false
+	}
+	ctx := context.WithValue(resp.Request.Context(), secondaryRateLimitKey{}, errResp)
+	resp.Request = resp.Request.WithContext(ctx)
+	return true
+}
+
+// secondaryRateLimitFrom returns the GitHubError that markSecondaryRateLimit
+// stored in resp.Request.
+func secondaryRateLimitFrom(resp *http.Response) (GitHubError, bool) {
+	if resp.Request == nil {
+		return GitHubError{}, false
+	}
+	errResp, ok := resp.Request.Context().Value(secondaryRateLimitKey{}).(GitHubError)
+	return errResp, ok
+}
+
+// secondaryRateLimitWait returns the wait for a secondary rate limit without
+// rate limit headers: secondaryRateLimitBaseWait * 2^attemptNum, capped at
+// maxWait (DefaultBackoff also handles an overflow). It then adds 0 to 40 %
+// jitter, never less, so that workers that hit the limit at the same time do
+// not retry at the same time. The result is capped at maxWait plus its own 0 to
+// 40 % jitter, so the waits at the cap are spread too. So the longest wait is
+// 1.4 * maxWait. randFloat must return a number in [0, 1).
+func secondaryRateLimitWait(maxWait time.Duration, attemptNum int, randFloat func() float64) time.Duration {
+	sleep := retryablehttp.DefaultBackoff(secondaryRateLimitBaseWait, maxWait, attemptNum, nil)
+
+	sleep += time.Duration(randFloat() * 0.4 * float64(sleep))
+
+	if jitteredMax := maxWait + time.Duration(randFloat()*0.4*float64(maxWait)); sleep > jitteredMax {
+		sleep = jitteredMax
+	}
+
+	return sleep
+}
+
 // buildRetryClient creates a retryable HTTP client with GitHub-specific backoff and retry logic.
 func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
+	return newRetryClient(logger, rand.Float64)
+}
+
+// newRetryClient is buildRetryClient with the random source for the jitter as a
+// parameter, so tests can fix the jitter. randFloat must return a number in
+// [0, 1), like rand.Float64. All workers share the client, so randFloat must be
+// safe for concurrent use. rand.Float64 is; the Float64 method of a *rand.Rand
+// is not.
+func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehttp.Client {
+	// ErrorHandler stays nil on purpose: when retryablehttp gives up, it then
+	// returns no response, so a resp.Request that markSecondaryRateLimit changed
+	// never reaches the caller.
 	retryClient := &retryablehttp.Client{
 		HTTPClient:   cleanhttp.DefaultPooledClient(),
 		Logger:       nil,
@@ -102,7 +172,7 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
 		if resp == nil {
 			wait := retryablehttp.DefaultBackoff(min, max, attemptNum, nil)
-			jitter := time.Duration(rand.Float64() * 0.2 * float64(wait))
+			jitter := time.Duration(randFloat() * 0.2 * float64(wait))
 			wait += jitter
 			logger.Trace("waiting before retrying after network error", "sleep", wait, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
 			return wait
@@ -122,10 +192,16 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
 		}()
 
-		// Backoff computes the wait from the rate limit headers and the attempt
-		// number only, and it does not read the body. retryablehttp drains up to
-		// 4096 bytes of resp.Body after CheckRetry and before Backoff, so the
-		// GitHub error message is not available here.
+		// The order follows GitHub's advice for rate limits: Retry-After first,
+		// then X-Ratelimit-Reset when X-Ratelimit-Remaining is 0, otherwise at
+		// least one minute with an exponentially increasing wait for a secondary
+		// rate limit. See
+		// https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit
+		//
+		// Backoff does not read the body: retryablehttp drains up to 4096 bytes of
+		// resp.Body after CheckRetry and before Backoff. CheckRetry hands a
+		// secondary rate limit to Backoff through resp.Request instead, see
+		// markSecondaryRateLimit.
 		if s, ok := resp.Header["Retry-After"]; ok {
 			if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
 				sleep = time.Second * time.Duration(retryAfter)
@@ -145,6 +221,17 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 				sleep = 60 * time.Second
 				return
 			}
+		}
+
+		if errResp, ok := secondaryRateLimitFrom(resp); ok {
+			sleep = secondaryRateLimitWait(max, attemptNum, randFloat)
+			logger.Info("waiting for secondary rate limit recovery",
+				"wait_duration", sleep,
+				"attempt", attemptNum,
+				"message", errResp.Message,
+				"method", requestMethod,
+				"url", requestUrl)
+			return
 		}
 
 		// resp is not passed on purpose: Retry-After in seconds was handled above,
@@ -186,23 +273,36 @@ func buildRetryClient(logger hclog.Logger) *retryablehttp.Client {
 			}
 		}
 
-		if resp.StatusCode == http.StatusForbidden {
-			if strings.Contains(errResp.Message, "SAML enforcement") {
-				msg := errResp.Message
-				if errResp.DocumentationURL != "" {
-					msg += fmt.Sprintf(" - %s", errResp.DocumentationURL)
-				}
-				return false, fmt.Errorf("received 403 with response: %v", msg)
+		if resp.StatusCode == http.StatusForbidden && strings.Contains(errResp.Message, "SAML enforcement") {
+			msg := errResp.Message
+			if errResp.DocumentationURL != "" {
+				msg += fmt.Sprintf(" - %s", errResp.DocumentationURL)
 			}
+			return false, fmt.Errorf("received 403 with response: %v", msg)
+		}
 
-			// A 403 is retried below anyway, so this branch only changes the
-			// log line. Backoff computes the wait from the rate limit headers
-			// and the attempt number, not from the message.
-			if secondaryRateLimitPattern.MatchString(errResp.Message) {
+		// GitHub answers a secondary rate limit with 403 or 429. Both statuses
+		// are retried, so the response is marked for the extended backoff in
+		// Backoff.
+		secondaryRateLimit := (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
+			secondaryRateLimitPattern.MatchString(errResp.Message)
+		if secondaryRateLimit {
+			// A 403 is retried below anyway. For a 403 the WARN line replaces the
+			// TRACE line below. A 429 keeps its TRACE line.
+			if resp.StatusCode == http.StatusForbidden {
 				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
 					"message", errResp.Message,
 					"method", requestMethod,
 					"url", requestUrl)
+			}
+
+			marked := markSecondaryRateLimit(resp, errResp)
+			if !marked {
+				logger.Warn("cannot hand the secondary rate limit to Backoff because the response has no request, using the default backoff instead",
+					"status", resp.StatusCode)
+			}
+
+			if resp.StatusCode == http.StatusForbidden {
 				return true, nil
 			}
 		}
