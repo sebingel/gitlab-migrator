@@ -194,8 +194,9 @@ $arguments += "-state-dir", ".\state"
 # $arguments += "-max-concurrency", "8"
 
 # -loop: After the last project, start again with the first one, until you press Ctrl+C.
-#   A new pass does not wait for the last one to end, so with -max-concurrency above 1
-#   (the default is 4) the same project can be migrated twice at the same time.
+#   A new pass does not wait for the last one to end, so with two or more projects and
+#   -max-concurrency above 1 (the default is 4) the same project can be migrated twice
+#   at the same time.
 #   No effect with: -report.
 # $arguments += "-loop"
 
@@ -242,7 +243,8 @@ if ($LogDirectory) {
 # ----------------------------------------------------------------------------
 # Uncomment the block below to use it. The two lines after it (large files, batch count) are
 # optional: add only what you need. The block replaces all flags above. Of those, only
-# -log-output, -log-directory and -config still work in prepare mode: add them after the block.
+# -log-output, -log-directory and -config still work in prepare mode: add them after the
+# block. -version also exits before prepare mode starts.
 # In prepare mode, the tool does not check that -log-output has "file" for -log-directory.
 # Prepare mode needs no tokens, but this script checks them anyway.
 #
