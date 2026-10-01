@@ -18,7 +18,7 @@ Download the [latest release](https://github.com/sebingel/gitlab-migrator/releas
 go install github.com/sebingel/gitlab-migrator/cmd/gitlab-migrator@latest
 ```
 
-Building from source needs Go 1.25 or newer (the `go` line of `go.mod`). The release binaries are built with the Go release in the `toolchain` line of `go.mod`, so they run on the systems that this Go release supports (see the [Go minimum requirements](https://go.dev/wiki/MinimumRequirements)). For example, the macOS binaries built with Go 1.27 need macOS 13 Ventura or later.
+Building from source needs Go 1.26 or newer (the `go` line of `go.mod`). The release binaries are built with the Go release in the `toolchain` line of `go.mod`, so they run on the systems that this Go release supports (see the [Go minimum requirements](https://go.dev/wiki/MinimumRequirements)). For example, the macOS binaries built with Go 1.27 need macOS 13 Ventura or later.
 
 ## Usage
 
