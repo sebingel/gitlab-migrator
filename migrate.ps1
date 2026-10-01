@@ -39,6 +39,9 @@ if (-not $env:GITLAB_TOKEN) {
 #   Only with X       without X, the flag has no effect
 #   No effect with X  with X, the flag has no effect
 # A flag without effect is ignored, but a bad value in it can still stop the tool.
+# Active flags in this script: the deleting options (-delete-existing-repos,
+# -trim-branches-on-github) are off, and no active flag needs a flag that is off.
+# Check this again when you turn a flag on or off.
 $arguments = @()
 
 # ----------------------------------------------------------------------------
@@ -107,9 +110,10 @@ $arguments += "-no-force"
 # $arguments += "-push-batch-size", "100"
 
 # -trim-branches-on-github: Delete GitHub branches that do not exist in GitLab.
-#   It deletes them also with -no-force. With a rename flag below, it also tries to delete
-#   the old default branch on GitHub. If that is still the default branch there, GitHub can
-#   refuse and the project fails.
+#   Keep it off unless GitLab is the only source: it deletes also with -no-force, so it can
+#   remove work that exists only on GitHub.
+#   With a rename flag below, it also tries to delete the old default branch on GitHub.
+#   If that is still the default branch there, GitHub can refuse and the project fails.
 #   Excludes: -pull-requests-only.
 # $arguments += "-trim-branches-on-github"
 
