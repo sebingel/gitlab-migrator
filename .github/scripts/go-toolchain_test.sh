@@ -418,6 +418,21 @@ gomod "go 1.25.0" "  toolchain go1.27.0"
 expect_error "an indented toolchain line" "has an indented toolchain line" plan
 gomod "	go 1.25.0" "toolchain go1.27.0"
 expect_error "an indented go line" "has an indented go line" plan
+gomod "go 1.25.0" "toolchain	go1.27.0"
+expect_error "a tab after toolchain" "has a toolchain line that setup-go does not read" plan
+gomod "go 1.25.0" "toolchain  go1.27.0"
+expect_error "two spaces after toolchain" "toolchain line that setup-go does not read" plan
+gomod "go	1.25.0" "toolchain go1.27.0"
+expect_error "a tab after go" "has a go line that setup-go does not read" plan
+gomod "go  1.25.0" "toolchain go1.27.0"
+expect_error "two spaces after go" "go line that setup-go does not read" plan
+printf 'module example.test/m\r\n\r\ngo\t1.25.0\r\n\r\ntoolchain go1.27.0\r\n' > "$work/go.mod"
+expect_error "a tab after go with CRLF line ends" "go line that setup-go does not read" plan
+printf 'module example.test/m\r\n\r\ngo 1.25.0\r\n\r\ntoolchain go1.27.0\r\n' > "$work/go.mod"
+releases go1.27.1:true go1.26.8:true > "$work/releases.json"
+expect "one space with CRLF line ends is fine" "current=go1.27.0 update=true"
+gomod "go 1.25.0 " "toolchain go1.27.0 "
+expect "trailing spaces after the values are fine" "current=go1.27.0 update=true"
 gomod "toolchain go1.27.0"
 expect_error "only a toolchain line: go get would add a go line" "has no go line" plan
 gomod "// no go line"

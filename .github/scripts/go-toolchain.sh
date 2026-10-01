@@ -116,15 +116,25 @@ minor_of() {
 
 # directive FILE NAME prints the value of the one NAME line of go.mod FILE,
 # or nothing if there is no such line. Like actions/setup-go, it only reads
-# lines that start with NAME. An indented NAME line stops the script, because
-# Go would read it and setup-go would not.
+# lines that start with NAME. A NAME line that is indented, or that has a tab
+# or more than one space after NAME, stops the script, because Go would read
+# it and setup-go would not.
 directive() {
-  local values
+  local values bad
   if grep -Eq "^[[:space:]]+$2[[:space:]]" "$1"; then
     fail "$1 has an indented $2 line. Run \"go mod edit -fmt\" to format go.mod."
   fi
+  # setup-go matches "^go " and "^toolchain go" with one literal space. Go
+  # also accepts tabs or more spaces, so such a line would select a toolchain
+  # that setup-go ignores.
+  # The output is captured, so that grep -q cannot end the pipe early (SIGPIPE
+  # would turn the status into 141 under pipefail).
+  bad="$(grep -E "^$2[[:space:]]" "$1" | grep -Ev "^$2 [^[:space:]]" || true)"
+  if [ -n "$bad" ]; then
+    fail "$1 has a $2 line that setup-go does not read: $2 must be followed by exactly one space. Run \"go mod edit -fmt\" to format go.mod."
+  fi
   # [:space:] also matches the CR of CRLF line ends.
-  values="$(sed -n "s/^$2[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p" "$1")"
+  values="$(sed -n "s/^$2 \([^[:space:]]\{1,\}\).*/\1/p" "$1")"
   if [ "$(grep -c . <<< "$values")" -gt 1 ]; then
     fail "$1 has more than one $2 line."
   fi
