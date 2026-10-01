@@ -62,7 +62,7 @@ gitlab-migrator -github-user=mytokenuser -projects-csv=projects.csv -migrate-pul
 ### Key Libraries
 - `github.com/google/go-github/v84`: GitHub API client
 - `github.com/gofri/go-github-pagination`: Transparent pagination for go-github
-- `github.com/xanzy/go-gitlab`: GitLab API client
+- `gitlab.com/gitlab-org/api/client-go/v2`: GitLab API client
 - `github.com/go-git/go-git/v5`: Git operations
 - `github.com/hashicorp/go-retryablehttp`: HTTP retries for API rate limiting
 

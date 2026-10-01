@@ -26,8 +26,8 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
-	gogitlab "github.com/xanzy/go-gitlab"
 	"github.com/sebingel/gitlab-migrator/internal/config"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 // project holds the state for a single project migration.
@@ -520,7 +520,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 }
 
 func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult {
-	var mergeRequests []*gogitlab.MergeRequest
+	var mergeRequests []*gogitlab.BasicMergeRequest
 
 	opts := &gogitlab.ListProjectMergeRequestsOptions{
 		ListOptions: gogitlab.ListOptions{PerPage: 100},
@@ -639,7 +639,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 	return results
 }
 
-func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.MergeRequest) (MergeRequestResult, error) {
+func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (MergeRequestResult, error) {
 	result := MergeRequestResult{
 		GitLabMRID:    mergeRequest.IID,
 		GitLabMRTitle: mergeRequest.Title,
@@ -1197,9 +1197,9 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 // takes the last commit of its list as the first commit of the merge request.
 // A sort by committed date would be wrong for commits with the same date,
 // which is common after a rebase, and for commits with a wrong clock.
-func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error) {
+func (p *project) listMergeRequestCommits(mrIID int64) ([]*gogitlab.Commit, error) {
 	var commits []*gogitlab.Commit
-	opts := &gogitlab.GetMergeRequestCommitsOptions{PerPage: 100}
+	opts := &gogitlab.GetMergeRequestCommitsOptions{ListOptions: gogitlab.ListOptions{PerPage: 100}}
 	for {
 		page, resp, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mrIID, opts)
 		if err != nil {
@@ -1220,9 +1220,9 @@ func (p *project) listMergeRequestCommits(mrIID int) ([]*gogitlab.Commit, error)
 }
 
 // listMergeRequestAwardEmoji returns all award emoji of the merge request.
-func (p *project) listMergeRequestAwardEmoji(mrIID int) ([]*gogitlab.AwardEmoji, error) {
+func (p *project) listMergeRequestAwardEmoji(mrIID int64) ([]*gogitlab.AwardEmoji, error) {
 	var awards []*gogitlab.AwardEmoji
-	opts := &gogitlab.ListAwardEmojiOptions{PerPage: 100}
+	opts := &gogitlab.ListAwardEmojiOptions{ListOptions: gogitlab.ListOptions{PerPage: 100}}
 	for {
 		page, resp, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mrIID, opts)
 		if err != nil {
@@ -1269,7 +1269,7 @@ func (p *project) editPullRequest(ctx context.Context, desc string, number int, 
 	return pr, err
 }
 
-func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.MergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (bool, error) {
+func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (bool, error) {
 	owner := p.githubPath[0]
 	repo := p.githubPath[1]
 	startShortID := commits[0].ShortID
@@ -1357,7 +1357,7 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Mer
 	return false, nil
 }
 
-func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.MergeRequest) {
+func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest) {
 	owner := p.githubPath[0]
 	repo := p.githubPath[1]
 	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.SourceBranch); err != nil {
@@ -1378,7 +1378,7 @@ func githubMention(u *gogitlab.User, fallback string) string {
 	return "@" + strings.TrimPrefix(strings.ToLower(u.WebsiteURL), "https://github.com/")
 }
 
-func bodyMatchesMergeRequest(body string, mrIID int) bool {
+func bodyMatchesMergeRequest(body string, mrIID int64) bool {
 	return strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | %d |", mrIID)) ||
 		strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | [%d]", mrIID))
 }
@@ -1386,7 +1386,7 @@ func bodyMatchesMergeRequest(body string, mrIID int) bool {
 // findExistingPRByList looks up an already-created PR using PullRequests.List
 // instead of the Search API. This is used as a fallback when the Search API
 // index lags behind and a subsequent Create returns 422 "already exists".
-func (p *project) findExistingPRByList(ctx context.Context, mr *gogitlab.MergeRequest) (*gogithub.PullRequest, error) {
+func (p *project) findExistingPRByList(ctx context.Context, mr *gogitlab.BasicMergeRequest) (*gogithub.PullRequest, error) {
 	for _, head := range []string{
 		fmt.Sprintf("%s:%s", p.githubPath[0], mr.SourceBranch),
 		fmt.Sprintf("%s:migration-source-%d/%s", p.githubPath[0], mr.IID, mr.SourceBranch),

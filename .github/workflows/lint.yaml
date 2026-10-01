@@ -20,10 +20,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # golangci-lint stops if it was built with an older Go than the
+      # toolchain line of go.mod. When the Go toolchain workflow proposes a
+      # new minor Go release, this version may have to go up in the same pull
+      # request. The golangci-lint changelog says which release supports
+      # which Go version (see CONTRIBUTING.md).
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.4.0
-
-
-# vim: set ts=2 sts=2 sw=2 et:
+          version: v2.13.2

@@ -1,0 +1,107 @@
+name: Vulnerabilities
+
+# govulncheck (https://go.dev/doc/tutorial/govulncheck) compares the Go
+# standard library and the modules in go.mod with the Go vulnerability
+# database. The job fails if the code can actually call a vulnerable
+# function, or if govulncheck cannot run (for example when vuln.go.dev cannot
+# be reached; then run the job again). Vulnerabilities in packages that are
+# imported but not called are only counted in the log, and they do not fail
+# the job.
+#
+# New vulnerabilities are published without any change in this repository,
+# so the job also runs on main: after every push and once a week. GitHub
+# turns the weekly run off after 60 days without activity in a public
+# repository. Then enable it again on the Actions tab.
+#
+# A new entry in the database can make this job fail on a pull request that
+# did not cause it. The fix is an update of the affected module or of the Go
+# version, in its own pull request. CONTRIBUTING.md explains this.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '23 5 * * 1' # every Monday at 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # Like the release builds (.github/scripts/build-release.sh).
+      CGO_ENABLED: '0'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # govulncheck checks the standard library of the Go version that runs
+      # the scan. This is the version from go.mod, the same one that CI and
+      # the Release workflow build the binaries with.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # CI, Lint and Test use the same cache key. They only run for pull
+          # requests, so this job would be the only one that saves a cache on
+          # main, and every pull request would get this cache without their
+          # own build results.
+          cache: false
+
+      # The version is pinned. Dependabot does not update versions in run
+      # steps, so update it by hand, also in CONTRIBUTING.md
+      # (https://pkg.go.dev/golang.org/x/vuln?tab=versions).
+      # govulncheck must be built with a Go that is at least as new as its
+      # own go.mod needs (1.26 for v1.8.0) and as the Go that it scans.
+      # setup-go sets GOTOOLCHAIN=local. "auto" lets this step download a
+      # newer Go when govulncheck needs one. The scan below still runs with
+      # the Go from go.mod. Do not use "go run" for the scan: after such a
+      # download, it would check the standard library of the downloaded Go.
+      - name: Install govulncheck
+        env:
+          GOTOOLCHAIN: auto
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+
+      # Each target loads other files: only Windows uses
+      # github.com/Microsoft/go-winio, and some packages have files for one
+      # processor type only. So the step scans every target of the release
+      # (keep the list in sync with .github/scripts/build-release.sh), also
+      # when a target before it has findings. In this mode govulncheck does
+      # not filter the database by system, so an entry for one system can
+      # show up for every target. Exit code 3 means findings.
+      #
+      # setup-go adds a problem matcher (owner "go") for compiler messages.
+      # It also matches the call traces of govulncheck ("#1: file.go:1:2:
+      # ..."). That gives error annotations with a wrong file, and GitHub
+      # shows only 10 error annotations per step, so the annotations per
+      # target would be lost. So the step removes the matcher first, for
+      # the rest of the job.
+      - name: Run govulncheck
+        run: |
+          echo "::remove-matcher owner=go::"
+          status=0
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "::group::govulncheck for $target"
+            rc=0
+            GOOS="${target%/*}" GOARCH="${target#*/}" govulncheck ./... || rc=$?
+            echo "::endgroup::"
+            case "$rc" in
+              0) ;;
+              3) echo "::error::$target: the code calls functions with known vulnerabilities." ;;
+              *) echo "::error::$target: govulncheck failed with exit code $rc." ;;
+            esac
+            if [ "$rc" -ne 0 ]; then
+              status=1
+            fi
+          done
+          exit "$status"

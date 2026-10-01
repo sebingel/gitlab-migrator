@@ -11,9 +11,9 @@ import (
 
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
-	gogitlab "github.com/xanzy/go-gitlab"
 	"github.com/sebingel/gitlab-migrator/internal/clients"
 	"github.com/sebingel/gitlab-migrator/internal/config"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 // MigrationPartialError is returned when migration completes but some projects had errors.
@@ -264,7 +264,7 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 		return nil, fmt.Errorf("no matching GitLab project found: %s", slugs[0])
 	}
 
-	var mergeRequests []*gogitlab.MergeRequest
+	var mergeRequests []*gogitlab.BasicMergeRequest
 
 	opts := &gogitlab.ListProjectMergeRequestsOptions{
 		ListOptions: gogitlab.ListOptions{PerPage: 100},

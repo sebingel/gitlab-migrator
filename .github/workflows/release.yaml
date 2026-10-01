@@ -220,6 +220,8 @@ jobs:
           export TAGS
           bash .github/scripts/release-plan.sh verify
 
+      # --generate-notes lists the pull requests that were merged since
+      # PREVIOUS, sorted into the sections of .github/release.yaml.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -231,6 +233,3 @@ jobs:
             args+=(--notes-start-tag "$PREVIOUS")
           fi
           gh release create "$VERSION" "${args[@]}" dist/*
-
-
-# vim: set ts=2 sts=2 sw=2 et:

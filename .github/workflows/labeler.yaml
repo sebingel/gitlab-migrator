@@ -1,0 +1,88 @@
+name: Labeler
+
+# Adds a label to a pull request, chosen by the prefix of its branch. The
+# label chooses the section of the pull request in the release notes
+# (.github/release.yaml). .github/scripts/pr-label.sh has the rules, and
+# pr-label_test.sh tests them. CONTRIBUTING.md (section "Release notes")
+# explains them.
+#
+# It runs after every push, not only when the pull request is opened,
+# because GitHub starts no pull_request workflow while a pull request has a
+# merge conflict, and because a run can fail. The script adds nothing if
+# the pull request has a section label already, or if someone removed the
+# label before. A label that GITHUB_TOKEN adds starts no workflow, so it
+# starts no new dry run of the Release workflow.
+#
+# The trigger is pull_request and not pull_request_target, so no job ever
+# gets write access for a pull request from a fork. Such a pull request only
+# gets a read-only token, which cannot add labels, so the label job skips
+# it. The test job runs for every pull request, also from forks.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test label rules
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # Cone mode also checks out the files directly in .github, so the
+      # steps below find .github/release.yaml.
+      - name: Checkout scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Test the label rules
+        run: bash .github/scripts/pr-label_test.sh
+
+      # GitHub reads release.yaml only when it creates a release, after the
+      # build. yq (installed on the GitHub Ubuntu runners) fails on invalid
+      # YAML, and jq checks the structure: a list of categories, each with a
+      # title and labels, and "*" as the last one.
+      - name: Check .github/release.yaml
+        run: |
+          yq -o=json '.' .github/release.yaml |
+            jq --exit-status '.changelog.categories
+              | type == "array" and length > 0
+                and all(.[];
+                  (.title | type) == "string"
+                  and (.labels | type) == "array" and (.labels | length) > 0
+                  and all(.labels[]; type == "string"))
+                and .[-1].labels == ["*"]'
+
+  label:
+    name: Label pull request
+    needs: test
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # check out the script
+      pull-requests: write # read the labels and events, add the label
+
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Add label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: bash .github/scripts/pr-label.sh

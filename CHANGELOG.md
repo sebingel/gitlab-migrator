@@ -1,6 +1,8 @@
 ## Changelog
 
-This file is not updated anymore. It lists the changes up to v0.9.0. For v0.10.0 to v0.16.0, see the [upstream releases](https://github.com/manicminer/gitlab-migrator/releases). Newer releases have generated release notes on the [releases page](https://github.com/sebingel/gitlab-migrator/releases).
+The changelog of this repository is the [releases page](https://github.com/sebingel/gitlab-migrator/releases). Every new release gets notes that GitHub generates from the pull requests that were merged since the previous release, sorted into sections such as new features, bug fixes and dependencies. [CONTRIBUTING.md](CONTRIBUTING.md#release-notes) explains how the notes are made.
+
+This file is not updated anymore. It lists the changes up to v0.9.0. For v0.10.0 to v0.16.0, see the [upstream releases](https://github.com/manicminer/gitlab-migrator/releases).
 
 ### v0.9.0
 

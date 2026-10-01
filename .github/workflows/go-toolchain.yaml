@@ -1,0 +1,177 @@
+name: Go toolchain
+
+# Keeps the toolchain line of go.mod on a supported Go release. Once a week it
+# compares go.mod with the release list of go.dev. If a newer release exists
+# (a patch release of the current Go 1.x release first, otherwise the newest
+# release), it runs "go get toolchain@<version>" and "go mod tidy" and opens a
+# pull request. The go line (the minimum Go version) stays as it is.
+# CONTRIBUTING.md explains the rules and the optional GO_TOOLCHAIN_TOKEN.
+#
+# All decisions are in .github/scripts/go-toolchain.sh, and
+# .github/scripts/go-toolchain_test.sh tests them. A pull request that changes
+# these files or go.mod runs the tests and a dry run of the check. It never
+# pushes and never opens a pull request.
+
+on:
+  schedule:
+    # Wednesdays at 06:23 UTC. Go releases usually come out on a Tuesday.
+    - cron: '23 6 * * 3'
+  workflow_dispatch:
+  pull_request:
+    # go.mod: the dry run shows that the script can still read a changed
+    # go.mod, before the change reaches main.
+    paths:
+      - '.github/workflows/go-toolchain.yaml'
+      - '.github/scripts/go-toolchain.sh'
+      - '.github/scripts/go-toolchain_test.sh'
+      - 'go.mod'
+
+permissions:
+  contents: read
+
+# Only runs that can open a pull request (schedule and manual runs on main)
+# share the group "go-toolchain". They run one after another, so two of them
+# never work on the same branch at the same time. If one more starts while
+# one waits, GitHub cancels the waiting one, which is fine: the newer run
+# does the same check. Every other run (dry runs of pull requests, manual
+# runs on other branches) gets a group of its own, so it never replaces a
+# waiting run on main.
+concurrency:
+  group: >-
+    ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'go-toolchain'
+    || format('go-toolchain-{0}-{1}', github.event_name, github.run_id) }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Check Go toolchain
+    # Only in this repository: not in forks, and not for pull requests from
+    # forks. The update job needs this job, so this also covers it. A
+    # schedule event has no repository.fork field, so the name is the check.
+    # Change it if the repository is renamed or moves.
+    if: >-
+      github.repository == 'sebingel/gitlab-migrator'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # find an existing pull request for the new version
+    outputs:
+      current: ${{ steps.plan.outputs.current }}
+      latest: ${{ steps.plan.outputs.latest }}
+      target: ${{ steps.plan.outputs.target }}
+      kind: ${{ steps.plan.outputs.kind }}
+      setup_version: ${{ steps.plan.outputs.setup_version }}
+      branch: ${{ steps.plan.outputs.branch }}
+      action: ${{ steps.plan.outputs.action }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test the version logic
+        run: bash .github/scripts/go-toolchain_test.sh
+
+      - name: Download the Go release list
+        run: >-
+          curl --fail --silent --show-error --location --retry 3
+          --output "$RUNNER_TEMP/go-releases.json" 'https://go.dev/dl/?mode=json'
+
+      # This step only collects facts. go-toolchain.sh makes every decision.
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          RELEASES_FILE="$RUNNER_TEMP/go-releases.json" RESULT_FILE="$GITHUB_OUTPUT" \
+            SUMMARY_FILE="$GITHUB_STEP_SUMMARY" bash .github/scripts/go-toolchain.sh plan
+
+  update:
+    name: Open pull request
+    needs: check
+    if: >-
+      (needs.check.outputs.action == 'push-and-open' || needs.check.outputs.action == 'open')
+      && github.event_name != 'pull_request'
+      && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Used when the secret GO_TOOLCHAIN_TOKEN does not exist.
+    permissions:
+      contents: write # push the branch of the update
+      pull-requests: write # open the pull request
+
+    steps:
+      # Also for "open": gh pr create runs in a checkout.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup-go sets GOTOOLCHAIN=local, so the go commands below run exactly
+      # the new release.
+      - name: Set up Go
+        if: needs.check.outputs.action == 'push-and-open'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ needs.check.outputs.setup_version }}
+          cache: false
+
+      - name: Update go.mod
+        if: needs.check.outputs.action == 'push-and-open'
+        env:
+          VERSION: ${{ needs.check.outputs.target }}
+        run: bash .github/scripts/go-toolchain.sh apply
+
+      - name: Write the texts
+        env:
+          HAS_TOKEN: ${{ secrets.GO_TOOLCHAIN_TOKEN != '' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CURRENT: ${{ needs.check.outputs.current }}
+          LATEST: ${{ needs.check.outputs.latest }}
+          TARGET: ${{ needs.check.outputs.target }}
+          KIND: ${{ needs.check.outputs.kind }}
+        run: TEXT_DIR="$RUNNER_TEMP" bash .github/scripts/go-toolchain.sh texts
+
+      - name: Push the branch
+        if: needs.check.outputs.action == 'push-and-open'
+        env:
+          TOKEN: ${{ secrets.GO_TOOLCHAIN_TOKEN || github.token }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+        run: |
+          git switch --create "$BRANCH"
+          git add go.mod go.sum
+          # The commit gets the date of the commit it is based on, so it is
+          # the same commit in every attempt. After "Re-run failed jobs" the
+          # push then has nothing to do, and the next step opens the pull
+          # request.
+          date="$(git log -1 --format=%cI HEAD)"
+          # The noreply address links the commit to the github-actions[bot]
+          # account.
+          GIT_AUTHOR_DATE="$date" GIT_COMMITTER_DATE="$date" \
+            git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --file "$RUNNER_TEMP/commit-message.txt"
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 --wrap=0)"
+          echo "::add-mask::$auth"
+          # No --force: if the branch exists with another commit, the push
+          # fails and changes nothing.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GO_TOOLCHAIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+        run: |
+          gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+            --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"

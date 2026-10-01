@@ -56,7 +56,7 @@ type ProjectResult struct {
 
 // MergeRequestResult contains results for a single MR migration.
 type MergeRequestResult struct {
-	GitLabMRID     int          `json:"gitlab_mr_id"`
+	GitLabMRID     int64        `json:"gitlab_mr_id"`
 	GitLabMRTitle  string       `json:"gitlab_mr_title"`
 	GitLabState    string       `json:"gitlab_state"`
 	SourceBranch   string       `json:"source_branch"`
@@ -74,7 +74,7 @@ type MergeRequestResult struct {
 
 // CommentResult contains results for a single comment migration.
 type CommentResult struct {
-	GitLabNoteID    int          `json:"gitlab_note_id"`
+	GitLabNoteID    int64        `json:"gitlab_note_id"`
 	GitHubCommentID *int64       `json:"github_comment_id,omitempty"`
 	Status          ResultStatus `json:"status"`
 	Error           string       `json:"error,omitempty"`
