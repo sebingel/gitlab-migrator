@@ -299,9 +299,13 @@ Write-Host ""
 & .\gitlab-migrator.exe @arguments
 
 # Check exit code
+# -version prints the version and exits with 0 before any migration: no success message then
+$showVersion = ($arguments -ccontains "-version") -or ($arguments -ccontains "--version")
 if ($LASTEXITCODE -eq 0) {
-    Write-Host ""
-    Write-Host "Migration completed successfully!" -ForegroundColor Green
+    if (-not $showVersion) {
+        Write-Host ""
+        Write-Host "Migration completed successfully!" -ForegroundColor Green
+    }
 } else {
     Write-Host ""
     Write-Host "Migration completed with errors (exit code: $LASTEXITCODE)" -ForegroundColor Yellow

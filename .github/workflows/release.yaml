@@ -2,8 +2,11 @@ name: Release
 
 # A push to main that changes the binaries or the release assets (see paths
 # below) creates a GitHub release with binaries for all platforms, unless the
-# merged pull request has the label release:skip. Pull requests run the same
-# build as a dry run and publish nothing. CONTRIBUTING.md explains the rules.
+# merged pull request has the label release:skip (for a stack merge: every
+# pull request of the stack has it), or the commit is already released
+# (GitHub can send a second push event for the same merge; that run skips
+# the release and ends green). Pull requests run the same build as a dry run
+# and publish nothing. CONTRIBUTING.md explains the rules.
 #
 # Build and publish happen in this one run on purpose. A tag or release that
 # is created with GITHUB_TOKEN does not start other workflows, so a separate
@@ -78,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read # read the labels of the merged pull request
+      pull-requests: read # read the labels of the merged pull requests
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
       version: ${{ steps.plan.outputs.version }}

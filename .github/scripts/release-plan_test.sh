@@ -14,8 +14,19 @@ work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 failures=0
 
-# The gh stub answers "gh api repos/<repo>/pulls/<n>" and logs every call.
-#   STUB_PULL      JSON that it prints on success
+# The gh stub answers "gh api repos/<repo>/pulls/<n>" and the list
+# "gh api repos/<repo>/pulls?state=closed&head=<owner>:<branch>", and logs
+# every call.
+#   STUB_PULL      JSON that it prints for pulls/<n>
+#   STUB_PULLS     JSON array of all pull requests. Without STUB_PULL,
+#                  pulls/<n> prints the one with this number (HTTP 404 if
+#                  there is none). The list prints the ones whose head
+#                  label matches, without "merged" (the list API has only
+#                  merged_at), and only open ones without state=closed.
+#   STUB_LIST      JSON that it prints for the list instead
+#   STUB_LIST_STATUS
+#                  502 makes every list call fail with HTTP 502, 404 makes
+#                  it fail like gh does for HTTP 404
 #   STUB_STATUS    404 makes it fail like gh does for HTTP 404
 #   STUB_FAILURES  number of calls that fail with HTTP 502 first
 mkdir -p "$work/bin"
@@ -24,16 +35,53 @@ cat > "$work/bin/gh" << 'EOF'
 echo "gh $*" >> "$STUB_DIR/gh.log"
 count=$(($(cat "$STUB_DIR/gh.count" 2> /dev/null || echo 0) + 1))
 echo "$count" > "$STUB_DIR/gh.count"
+not_found() {
+  echo '{"message":"Not Found","status":"404"}'
+  echo "gh: Not Found (HTTP 404)" >&2
+  exit 1
+}
 if [ "$count" -le "${STUB_FAILURES:-0}" ]; then
   echo "gh: Server Error (HTTP 502)" >&2
   exit 1
 fi
 if [ "${STUB_STATUS:-200}" = "404" ]; then
-  echo '{"message":"Not Found","status":"404"}'
-  echo "gh: Not Found (HTTP 404)" >&2
-  exit 1
+  not_found
 fi
-printf '%s\n' "$STUB_PULL"
+case "$2" in
+  */pulls\?*)
+    if [ "${STUB_LIST_STATUS:-200}" = "404" ]; then
+      not_found
+    fi
+    if [ "${STUB_LIST_STATUS:-200}" = "502" ]; then
+      echo "gh: Server Error (HTTP 502)" >&2
+      exit 1
+    fi
+    if [ -n "${STUB_LIST+x}" ]; then
+      printf '%s\n' "$STUB_LIST"
+      exit 0
+    fi
+    head="${2#*head=}"
+    head="${head%%&*}"
+    state=open
+    if [[ "$2" == *state=closed* ]]; then
+      state=closed
+    fi
+    jq -c --arg head "$head" --arg state "$state" \
+      'map(select((.head.label | @uri) == $head and .state == $state) | del(.merged))' \
+      <<< "${STUB_PULLS:-[]}"
+    ;;
+  */pulls/*)
+    if [ -n "${STUB_PULL+x}" ]; then
+      printf '%s\n' "$STUB_PULL"
+      exit 0
+    fi
+    jq -ce --argjson n "${2##*/}" '.[] | select(.number == $n)' <<< "${STUB_PULLS:-[]}" || not_found
+    ;;
+  *)
+    echo "gh stub: unexpected call: gh $*" >&2
+    exit 1
+    ;;
+esac
 EOF
 chmod +x "$work/bin/gh"
 
@@ -42,7 +90,7 @@ chmod +x "$work/bin/gh"
 run() {
   local mode="$1"
   shift
-  rm -f -- "$work/gh.log" "$work/gh.count" "$work/result"
+  rm -f -- "$work/gh.log" "$work/gh.count" "$work/result" "$work/summary"
   status=0
   out="$(env -i PATH="$work/bin:$PATH" STUB_DIR="$work" API_RETRY_DELAY=0 \
     RESULT_FILE="$work/result" "$@" bash "$script" "$mode" 2>&1)" || status=$?
@@ -127,14 +175,33 @@ expect_api_calls() {
   fi
 }
 
-# pull NUMBER MERGE_COMMIT_SHA LABELS [BASE_REF] [MERGED] [BASE_REPO] prints a
-# pull request as the API returns it. LABELS is a JSON array of label names.
+# pull NUMBER MERGE_COMMIT_SHA LABELS [BASE_REF] [MERGED] [BASE_REPO] [HEAD_REF]
+# prints a closed pull request as the API returns it. LABELS is a JSON array
+# of label names. An empty argument takes the default.
 pull() {
   jq -cn --argjson n "$1" --arg sha "$2" --argjson labels "$3" --arg base "${4:-main}" \
     --argjson merged "${5:-true}" --arg repo "${6:-sebingel/gitlab-migrator}" \
-    '{number: $n, merged: $merged, merge_commit_sha: $sha,
+    --arg head "${7:-feat/pr-$1}" \
+    '{number: $n, state: "closed", merged: $merged,
+      merged_at: (if $merged then "2026-10-01T16:38:50Z" else null end),
+      merge_commit_sha: $sha,
       base: {ref: $base, repo: {full_name: $repo}},
+      head: {ref: $head, label: "\($repo | split("/")[0]):\($head)"},
       labels: ($labels | map({name: .}))}'
+}
+
+# stack_pulls BOTTOM MIDDLE TOP prints the pull requests of a stack that
+# was merged in one step with the merge commit $sha, like #52, #59 and #56
+# of issue 99: #52 (head chore/a) into main, #59 (head ci/b) into chore/a,
+# and #56 (head feat/c) into ci/b. Each argument is a JSON array of labels.
+# #30 is an older pull request from chore/a with another merge commit.
+stack_pulls() {
+  jq -sc . << PULLS
+$(pull 30 "$other_sha" '["release:major"]' main true "" chore/a)
+$(pull 52 "$sha" "$1" main true "" chore/a)
+$(pull 59 "$sha" "$2" chore/a true "" ci/b)
+$(pull 56 "$sha" "$3" ci/b true "" feat/c)
+PULLS
 }
 
 repo="sebingel/gitlab-migrator"
@@ -253,13 +320,19 @@ fi
 echo "--- push to main"
 
 expect "merge of a pull request without labels" \
-  "previous=v0.16.0 bump=patch version=v0.16.1 release=true publish=true build_version=v0.16.1 pull_request=41" \
+  "previous=v0.16.0 bump=patch version=v0.16.1 release=true publish=true build_version=v0.16.1 pull_request=41 pull_requests=41" \
   "${push_env[@]}" STUB_PULL="$(pull 41 "$sha" '[]')"
 expect_api_calls "reads only pull request #41 (finding 5)" 1
 if grep -qxF "gh api repos/sebingel/gitlab-migrator/pulls/41" "$work/gh.log"; then
   report "API path is repos/<repo>/pulls/41" ""
 else
   report "API path is repos/<repo>/pulls/41" "gh.log: $(cat "$work/gh.log")"
+fi
+run plan "${push_env[@]}" SUMMARY_FILE="$work/summary" STUB_PULL="$(pull 41 "$sha" '[]')"
+if grep -qxF "| Pull request | #41 |" "$work/summary"; then
+  report "the job summary names the pull request" ""
+else
+  report "the job summary names the pull request" "summary: $(cat "$work/summary")"
 fi
 
 expect "merge of a pull request with release:minor" \
@@ -322,9 +395,27 @@ expect "a title that ends with an issue number is a direct push (finding 6)" \
   "${push_env[@]}" COMMIT_MESSAGE='fixes the retry (#12)'
 expect_api_calls "issue number makes no API call" 0
 
-expect_error "commit that already has a release tag (finding 3)" \
-  "already released as v0.16.0" plan \
+# GitHub can send a second push event for the same commit (issue 98), and
+# "Re-run all jobs" on a finished release run is a push run too.
+expect "push of a commit that already has a release tag skips the release (finding 3, issue 98)" \
+  "previous=v0.16.0 release=false publish=false pull_request=" \
   "${push_env[@]}" SHA_TAGS=v0.16.0 STUB_PULL="$(pull 41 "$sha" '[]')"
+if [ "$(get reason)" = "already released as v0.16.0" ]; then
+  report "and gives the tag as the reason" ""
+else
+  report "and gives the tag as the reason" "reason=$(get reason)"
+fi
+expect_message "and writes a notice" "::notice::$sha is already released as v0.16.0"
+if grep -qF "::error::" <<< "$out"; then
+  report "and writes no error" "output: $out"
+else
+  report "and writes no error" ""
+fi
+expect_api_calls "and makes no API call" 0
+
+expect "push of an older released commit after a newer release skips the release too" \
+  "release=false publish=false" \
+  "${push_env[@]}" SHA_TAGS=v0.15.1 MERGED_TAGS=$'v0.9.0\nv0.15.1' STUB_PULL="$(pull 41 "$sha" '[]')"
 
 expect "other tags on the commit do not count as a release" \
   "version=v0.16.1 publish=true" \
@@ -342,6 +433,105 @@ expect "first release without any tag" \
 expect_error "push outside main" "only made from main" plan \
   "${push_env[@]}" REF=refs/heads/feature STUB_PULL="$(pull 41 "$sha" '[]')"
 
+echo "--- stack merge on main (issue 99)"
+
+# A stack merge has one merge commit for all its pull requests. Its first
+# line names the top pull request, whose base is the branch below it.
+stack_env=("${push_env[@]}" COMMIT_MESSAGE=$'Merge pull request #56 from sebingel/feat/c\n\nadds c')
+
+expect "only a pull request with another base than main has release:minor" \
+  "bump=minor version=v0.17.0 release=true publish=true pull_request=56 pull_requests=52,59,56" \
+  "${stack_env[@]}" STUB_PULLS="$(stack_pulls '[]' '["release:minor"]' '[]')"
+if [ "$(get reason)" = "labels of the stack merge of pull requests #52, #59, #56" ]; then
+  report "and names all pull requests of the stack as the reason" ""
+else
+  report "and names all pull requests of the stack as the reason" "reason=$(get reason)"
+fi
+expect_api_calls "reads the top pull request and one list per branch below it" 3
+if grep -qxF "gh api repos/sebingel/gitlab-migrator/pulls?state=closed&head=sebingel%3Aci%2Fb&per_page=100" "$work/gh.log"; then
+  report "lists the closed pull requests from the base branch of #56" ""
+else
+  report "lists the closed pull requests from the base branch of #56" "gh.log: $(cat "$work/gh.log")"
+fi
+
+expect "release:major of one pull request wins over release:minor of another" \
+  "bump=major version=v1.0.0 release=true publish=true" \
+  "${stack_env[@]}" STUB_PULLS="$(stack_pulls '["release:major"]' '[]' '["release:minor"]')"
+
+expect "stack without release labels is a patch release" \
+  "bump=patch version=v0.16.1 release=true publish=true pull_requests=52,59,56" \
+  "${stack_env[@]}" STUB_PULLS="$(stack_pulls '[]' '[]' '[]')"
+
+# Merged one by one, the pull requests without release:skip make releases
+# and the one with it makes none. So its labels do not count.
+expect "release:skip on one pull request neither skips the release nor counts its labels" \
+  "bump=minor version=v0.17.0 release=true publish=true" \
+  "${stack_env[@]}" STUB_PULLS="$(stack_pulls '[]' '["release:skip","release:major"]' '["release:minor"]')"
+
+expect "release:skip on every pull request skips the release" \
+  "bump=major release=false publish=false pull_requests=52,59,56" \
+  "${stack_env[@]}" STUB_PULLS="$(stack_pulls '["release:skip"]' '["release:skip","release:major"]' '["release:skip"]')"
+if [ "$(get reason)" = "label release:skip" ]; then
+  report "and gives the label as the reason" ""
+else
+  report "and gives the label as the reason" "reason=$(get reason)"
+fi
+
+run plan "${stack_env[@]}" SUMMARY_FILE="$work/summary" \
+  STUB_PULLS="$(stack_pulls '[]' '["release:minor"]' '[]')"
+if grep -qxF "| Pull request | #52, #59, #56 |" "$work/summary"; then
+  report "the job summary lists all pull requests of the stack" ""
+else
+  report "the job summary lists all pull requests of the stack" "summary: $(cat "$work/summary")"
+fi
+
+expect "a pull request below that is not merged breaks the chain" \
+  "bump=patch version=v0.16.1 release=true publish=true pull_request= pull_requests=" \
+  "${stack_env[@]}" STUB_PULLS="$(jq -sc . << PULLS
+$(pull 52 "$sha" '[]' main true "" chore/a)
+$(pull 59 "$sha" '["release:minor"]' chore/a false "" ci/b)
+$(pull 56 "$sha" '[]' ci/b true "" feat/c)
+PULLS
+)"
+expect_message "and names the branch without a merged pull request" \
+  "Pull request #56 is based on ci/b, but no merged pull request"
+expect_message "and warns that no labels apply" "not the merge commit of a pull request"
+
+expect "a stack into another branch than main" \
+  "bump=patch release=true publish=true pull_request= pull_requests=" \
+  "${stack_env[@]}" STUB_PULLS="$(jq -sc . << PULLS
+$(pull 52 "$sha" '["release:minor"]' develop true "" chore/a)
+$(pull 59 "$sha" '["release:minor"]' chore/a true "" ci/b)
+$(pull 56 "$sha" '[]' ci/b true "" feat/c)
+PULLS
+)"
+expect_message "warns that no labels apply" "not the merge commit of a pull request"
+
+expect_error "list API errors that do not stop fail the run" \
+  "Could not read the pull requests from ci/b" plan \
+  "${stack_env[@]}" STUB_LIST_STATUS=502 STUB_PULLS="$(stack_pulls '[]' '[]' '[]')"
+expect_api_calls "the list call is retried too" 4
+
+# api_get turns HTTP 404 into an empty answer. For the list this means that
+# no pull request from the branch is found, so the chain breaks.
+expect "list answer HTTP 404 breaks the chain" \
+  "bump=patch version=v0.16.1 release=true publish=true pull_request= pull_requests=" \
+  "${stack_env[@]}" STUB_LIST_STATUS=404 STUB_PULLS="$(stack_pulls '[]' '["release:minor"]' '[]')"
+expect_message "and names the branch without a merged pull request" \
+  "Pull request #56 is based on ci/b, but no merged pull request"
+expect_message "and warns that no labels apply" "not the merge commit of a pull request"
+
+expect_error "list answer that is not a JSON array" "is not a JSON array" plan \
+  "${stack_env[@]}" STUB_LIST='{}' STUB_PULLS="$(stack_pulls '[]' '[]' '[]')"
+
+expect_error "a chain that comes back to a pull request stops" \
+  "Pull request #56 is twice" plan \
+  "${stack_env[@]}" STUB_PULLS="$(jq -sc . << PULLS
+$(pull 59 "$sha" '[]' feat/c true "" ci/b)
+$(pull 56 "$sha" '[]' ci/b true "" feat/c)
+PULLS
+)"
+
 echo "--- manual run"
 
 expect "manual minor release on main" \
@@ -356,7 +546,7 @@ expect "manual major release" \
 expect_error "manual run outside main" "only made from main" plan \
   "${dispatch_env[@]}" REF=refs/heads/feature BUMP=patch
 
-expect_error "manual run without new commits (finding 3)" \
+expect_error "manual run without new commits still fails (finding 3, issue 98)" \
   "already released as v0.16.0" plan \
   "${dispatch_env[@]}" SHA_TAGS=v0.16.0 BUMP=patch
 

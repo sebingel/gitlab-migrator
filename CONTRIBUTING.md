@@ -15,6 +15,8 @@ This project uses [GitHub Flow](https://docs.github.com/en/get-started/using-git
 
 The repository only allows merge commits. The first line of every merge on `main` is `Merge pull request #<number> from <owner>/<branch>`, and the second paragraph is the pull request title. The Release workflow reads the pull request number from this first line.
 
+A stack of pull requests (each one based on the branch of the one below it) can be merged in one step. Then one merge commit merges all of them, and every pull request of the stack has it as its merge commit. Its first line names the top pull request, whose base is not `main`. The Release workflow starts there and follows the bases down to the pull request into `main`, so it reads the labels of every pull request of the stack (see [Version labels](#version-labels)).
+
 ## Releases
 
 A push to `main` runs the Release workflow (`.github/workflows/release.yaml`) if it changes one of these files:
@@ -29,7 +31,7 @@ Other changes, for example documentation, tests, workflows or Dependabot updates
 The workflow:
 
 1. finds the highest `vMAJOR.MINOR.PATCH` tag of the repository,
-2. reads the pull request number from the first line of the merge commit and reads its labels through the API,
+2. reads the pull request number from the first line of the merge commit and reads its labels through the API (for a stack merge, the labels of all pull requests of the stack),
 3. computes the next version,
 4. builds `gitlab-migrator` for Linux, macOS and Windows, each for amd64 and arm64,
 5. creates the tag and the GitHub release with the archives, a checksums file and generated release notes (see [Release notes](#release-notes)).
@@ -48,7 +50,8 @@ Each pull request runs the same workflow as a dry run. The dry run builds all re
 | `release:skip` | no release | |
 
 * `release:major` wins over `release:minor`.
-* `release:skip` wins over all other labels. It is the only skip rule of the Release workflow.
+* `release:skip` wins over all other labels of the same pull request. It is the only label that skips a release. The only other skip rule is for a commit that is already released (see [When a release run fails or is cancelled](#when-a-release-run-fails-or-is-cancelled)).
+* A stack merge creates one release. Its bump is the highest bump of all pull requests of the stack that do not have `release:skip`, so a `release:minor` on any of them gives a minor release. The labels of a pull request with `release:skip` do not count. The release is skipped only if every pull request of the stack has `release:skip`. This is what merging the pull requests one by one would do: each one without `release:skip` would create a release, and each one with it none. The dry run of a pull request in a stack only knows its own labels, so its version can be lower than the one of the stack merge.
 * Set the label before you merge. The workflow reads the labels when the merge arrives on `main`.
 * Do not put `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]` or `[actions skip]` in the pull request title or in any commit message of the pull request, not even as a quote. Do not add a `skip-checks: true` (or `skip-checks:true`) trailer to any commit message of the pull request either. The push of a merge contains the merge commit (its message contains the title) and all commits of the pull request. GitHub itself starts no push workflow if any of these messages has such a marker or trailer, so the merge creates no release and shows no warning. The dry run warns about such a title or commit, and it runs again when the title changes. There is one exception: if the marker or trailer is in the last commit of the pull request, GitHub starts no checks for the pull request at all, so there is no dry run and no warning. Checks that do not start are the sign. To fix a commit message, rewrite it (for example with `git rebase`) and force push the branch.
 
@@ -107,7 +110,9 @@ The notes of a manual release list the merged pull requests like any other relea
 
 * For a temporary problem, for example a GitHub API error, use "Re-run failed jobs". GitHub allows this for 30 days (the release assets are kept that long), and it only works if no other release was made in between. Otherwise the run stops, and you start a manual release instead.
 * If the cause is in the code, merge a fix. That merge creates the release.
-* "Re-run all jobs" never publishes the same commit twice: it fails if the commit already has a release tag, or if a newer release exists.
+* No run releases the same commit twice. If the commit already has a release tag, a run of a push skips the release: it writes a notice and ends green. A manual run of such a commit fails, because there is nothing new to release.
+* GitHub can send two push events for one merge. Then the Release workflow runs twice for the same commit. The first run creates the release, and the second one waits in the queue and then skips the release as described above.
+* "Re-run all jobs" never publishes the same commit twice either. It runs with the event of the first run, so on a released commit a push run skips the release and a manual run fails (see above). On a commit without a release tag, it fails if a newer release exists.
 * Release runs wait for each other in a queue (up to 100 waiting runs), and no waiting run is cancelled, so normally every merge is planned on its own, with its own labels. GitHub does not guarantee the order of waiting runs. If the run of a newer merge is released first, the run of the older merge fails with "does not contain the previous release". Its changes are already in the newer release, but its labels did not count. Start a manual release if you need its bump.
 * Every push, label change and edit of a pull request (title, description or base branch) starts its own dry run. Dry runs run in parallel and are not cancelled, so they can finish in any order, and several of them can belong to the same commit. The newest run in the Actions list shows the current labels, title and base branch. There is one exception: the label that the Labeler workflow adds starts no dry run, so only the next run, for example after a push, shows it. This label is never a `release:` label, so it does not change the version.
 
