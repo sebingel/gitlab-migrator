@@ -300,9 +300,18 @@ echo ""
 
 # Check exit code
 exit_code=$?
+# -version prints the version and exits with 0 before any migration: no success message then
+show_version=false
+for arg in "${arguments[@]}"; do
+    if [[ "$arg" == "-version" || "$arg" == "--version" ]]; then
+        show_version=true
+    fi
+done
 if [ $exit_code -eq 0 ]; then
-    echo ""
-    echo -e "\033[32mMigration completed successfully!\033[0m"
+    if [ "$show_version" = false ]; then
+        echo ""
+        echo -e "\033[32mMigration completed successfully!\033[0m"
+    fi
 else
     echo ""
     echo -e "\033[33mMigration completed with errors (exit code: $exit_code)\033[0m"
