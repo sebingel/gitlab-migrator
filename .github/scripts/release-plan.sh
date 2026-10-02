@@ -196,18 +196,19 @@ plan() {
       # commits would release the same code again as a new version. A push
       # run skips the release and ends green, because nothing is wrong. A
       # manual run fails, because the user expects a new release.
+      #
+      # "Re-run all jobs" on an old run keeps the old commit, but sees the
+      # new tags. Queued release runs (queue: max) can also start in another
+      # order than the merges. So the elif below never releases a commit
+      # that is older than the last release.
       released="$(highest "${SHA_TAGS:-}")"
-      if [ -n "$released" ] && [ "$event" = "workflow_dispatch" ]; then
-        fail "$SHA is already released as $released. There is nothing new to release."
-      fi
       if [ -n "$released" ]; then
+        if [ "$event" = "workflow_dispatch" ]; then
+          fail "$SHA is already released as $released. There is nothing new to release."
+        fi
         notice "$SHA is already released as $released. This run skips the release."
         release="false"
         reason="already released as $released"
-      # "Re-run all jobs" on an old run keeps the old commit, but sees the
-      # new tags. Queued release runs (queue: max) can also start in another
-      # order than the merges. Never release a commit that is older than the
-      # last release.
       elif [ -n "$previous" ] && ! has_line "${MERGED_TAGS:-}" "$previous"; then
         fail "$SHA does not contain the previous release $previous. This happens when an old run is started again, or when GitHub started the release run of a newer merge first. Use a manual release on main if you need another bump."
       elif [ "$event" = "push" ]; then
