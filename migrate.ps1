@@ -206,6 +206,7 @@ $arguments += "-state-dir", ".\state"
 
 # -detailed-report: After the run, write a JSON and a Markdown report to the reports folder
 #   next to the executable.
+#   With -loop, also after each complete pass, with all results so far.
 #   No effect with: -report.
 $arguments += "-detailed-report"
 
