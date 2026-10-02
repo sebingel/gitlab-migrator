@@ -50,9 +50,10 @@
 #   reason         a short text that explains the decision
 #
 # Rules: the default bump is patch. The label release:minor or release:major
-# picks a bigger bump (major wins). Only the label release:skip skips a
-# release. Tags that are not plain vMAJOR.MINOR.PATCH (for example
-# v1.0.0-rc.1) are ignored.
+# picks a bigger bump (major wins). The label release:skip skips a release.
+# A push of a commit that already has a release tag skips it too, and a
+# manual run of such a commit fails. Tags that are not plain
+# vMAJOR.MINOR.PATCH (for example v1.0.0-rc.1) are ignored.
 #
 # Needs: bash, jq, gh (only for push).
 
@@ -69,6 +70,10 @@ fail() {
 
 warn() {
   echo "::warning::$*"
+}
+
+notice() {
+  echo "::notice::$*"
 }
 
 # highest LIST prints the highest vMAJOR.MINOR.PATCH tag of LIST.
@@ -186,20 +191,26 @@ plan() {
         fail "Releases are only made from main, not from $ref."
       fi
       : "${SHA:?SHA is required}"
-      # "Re-run all jobs" on a finished run, or a manual run without new
-      # commits, would release the same code again as a new version.
+      # "Re-run all jobs" on a finished run, a second push event for the
+      # same commit (GitHub can send one), or a manual run without new
+      # commits would release the same code again as a new version. A push
+      # run skips the release and ends green, because nothing is wrong. A
+      # manual run fails, because the user expects a new release.
       released="$(highest "${SHA_TAGS:-}")"
-      if [ -n "$released" ]; then
+      if [ -n "$released" ] && [ "$event" = "workflow_dispatch" ]; then
         fail "$SHA is already released as $released. There is nothing new to release."
       fi
+      if [ -n "$released" ]; then
+        notice "$SHA is already released as $released. This run skips the release."
+        release="false"
+        reason="already released as $released"
       # "Re-run all jobs" on an old run keeps the old commit, but sees the
       # new tags. Queued release runs (queue: max) can also start in another
       # order than the merges. Never release a commit that is older than the
       # last release.
-      if [ -n "$previous" ] && ! has_line "${MERGED_TAGS:-}" "$previous"; then
+      elif [ -n "$previous" ] && ! has_line "${MERGED_TAGS:-}" "$previous"; then
         fail "$SHA does not contain the previous release $previous. This happens when an old run is started again, or when GitHub started the release run of a newer merge first. Use a manual release on main if you need another bump."
-      fi
-      if [ "$event" = "push" ]; then
+      elif [ "$event" = "push" ]; then
         : "${REPO:?REPO is required}"
         find_pull_labels
         if [ -n "$pull_request" ]; then

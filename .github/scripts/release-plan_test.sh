@@ -322,9 +322,27 @@ expect "a title that ends with an issue number is a direct push (finding 6)" \
   "${push_env[@]}" COMMIT_MESSAGE='fixes the retry (#12)'
 expect_api_calls "issue number makes no API call" 0
 
-expect_error "commit that already has a release tag (finding 3)" \
-  "already released as v0.16.0" plan \
+# GitHub can send a second push event for the same commit (issue 98), and
+# "Re-run all jobs" on a finished release run is a push run too.
+expect "push of a commit that already has a release tag skips the release (finding 3, issue 98)" \
+  "previous=v0.16.0 release=false publish=false pull_request=" \
   "${push_env[@]}" SHA_TAGS=v0.16.0 STUB_PULL="$(pull 41 "$sha" '[]')"
+if [ "$(get reason)" = "already released as v0.16.0" ]; then
+  report "and gives the tag as the reason" ""
+else
+  report "and gives the tag as the reason" "reason=$(get reason)"
+fi
+expect_message "and writes a notice" "::notice::$sha is already released as v0.16.0"
+if grep -qF "::error::" <<< "$out"; then
+  report "and writes no error" "output: $out"
+else
+  report "and writes no error" ""
+fi
+expect_api_calls "and makes no API call" 0
+
+expect "push of an older released commit after a newer release skips the release too" \
+  "release=false publish=false" \
+  "${push_env[@]}" SHA_TAGS=v0.15.1 MERGED_TAGS=$'v0.9.0\nv0.15.1' STUB_PULL="$(pull 41 "$sha" '[]')"
 
 expect "other tags on the commit do not count as a release" \
   "version=v0.16.1 publish=true" \
@@ -356,7 +374,7 @@ expect "manual major release" \
 expect_error "manual run outside main" "only made from main" plan \
   "${dispatch_env[@]}" REF=refs/heads/feature BUMP=patch
 
-expect_error "manual run without new commits (finding 3)" \
+expect_error "manual run without new commits still fails (finding 3, issue 98)" \
   "already released as v0.16.0" plan \
   "${dispatch_env[@]}" SHA_TAGS=v0.16.0 BUMP=patch
 
