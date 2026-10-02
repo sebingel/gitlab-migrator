@@ -128,6 +128,21 @@ func (rc *ResultCollector) Finalize() *MigrationReport {
 	return rc.report
 }
 
+// Snapshot returns a copy of the results collected so far, with the end time
+// and duration set to now. Unlike Finalize, it does not change the collector,
+// so results added later do not show up in the snapshot.
+func (rc *ResultCollector) Snapshot() *MigrationReport {
+	rc.mutex.RLock()
+	defer rc.mutex.RUnlock()
+
+	snapshot := *rc.report
+	snapshot.Projects = append([]ProjectResult(nil), rc.report.Projects...)
+	snapshot.EndTime = time.Now()
+	snapshot.Duration = snapshot.EndTime.Sub(snapshot.StartTime)
+
+	return &snapshot
+}
+
 // WriteJSONReport writes the migration report as JSON to the specified path.
 func WriteJSONReport(report *MigrationReport, outputPath string) error {
 	data, err := json.MarshalIndent(report, "", "  ")

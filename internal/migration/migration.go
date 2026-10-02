@@ -68,14 +68,22 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 	m.logger.Info("processing project(s)", "count", len(projects), "workers", concurrency)
 
 	var wg sync.WaitGroup
-	queue := make(chan CSVRow, concurrency*2)
-	resultChan := make(chan ProjectResult, concurrency*2)
+	queue := make(chan queuedProject, concurrency*2)
+	resultChan := make(chan passResult, concurrency*2)
+
+	// With -loop the final report is only written after the loop ends, so the
+	// detailed report is also written each time a pass is complete.
+	var onPassDone func(pass int)
+	if m.cfg.Loop && m.cfg.DetailedReport {
+		onPassDone = func(pass int) {
+			m.logger.Info("loop pass finished", "pass", pass)
+			m.writeDetailedReport(collector.Snapshot(), sessionID)
+		}
+	}
 
 	collectorDone := make(chan bool)
 	go func() {
-		for result := range resultChan {
-			collector.AddProjectResult(result)
-		}
+		collectResults(resultChan, collector, len(projects), onPassDone)
 		close(collectorDone)
 	}()
 
@@ -83,10 +91,11 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for slugs := range queue {
+			for item := range queue {
 				if err := ctx.Err(); err != nil {
 					break
 				}
+				slugs := item.slugs
 				proj, err := m.newProject(slugs)
 				if err != nil {
 					m.logger.Error("initializing project", "project", slugs[0], "error", err)
@@ -95,7 +104,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 						gitlabPath = []string{"unknown", "unknown"}
 						githubPath = []string{"unknown", "unknown"}
 					}
-					resultChan <- ProjectResult{
+					resultChan <- passResult{pass: item.pass, result: ProjectResult{
 						GitLabGroup:   gitlabPath[0],
 						GitLabProject: gitlabPath[1],
 						GitHubOwner:   githubPath[0],
@@ -104,7 +113,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 						Error:         err.Error(),
 						StartTime:     time.Now(),
 						EndTime:       time.Now(),
-					}
+					}}
 					continue
 				}
 
@@ -115,30 +124,30 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 					result.Error = err.Error()
 				}
 
-				resultChan <- result
+				resultChan <- passResult{pass: item.pass, result: result}
 			}
 		}()
 	}
 
-	queueProjects := func() {
+	queueProjects := func(pass int) {
 		for _, proj := range projects {
 			if err := ctx.Err(); err != nil {
 				break
 			}
-			queue <- proj
+			queue <- queuedProject{slugs: proj, pass: pass}
 		}
 	}
 
 	if m.cfg.Loop {
 		m.logger.Info("looping migration until canceled")
-		for {
+		for pass := 1; ; pass++ {
 			if err := ctx.Err(); err != nil {
 				break
 			}
-			queueProjects()
+			queueProjects(pass)
 		}
 	} else {
-		queueProjects()
+		queueProjects(1)
 		close(queue)
 	}
 
@@ -162,6 +171,38 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 	}
 
 	return nil
+}
+
+// queuedProject is one project of one pass over the project list. Without
+// -loop there is only pass 1.
+type queuedProject struct {
+	slugs CSVRow
+	pass  int
+}
+
+// passResult is the result of a queuedProject.
+type passResult struct {
+	result ProjectResult
+	pass   int
+}
+
+// collectResults adds every result to the collector until results is closed.
+// When onPassDone is not nil, it is called after the last of the passSize
+// results of a pass was added. A pass that was canceled before all of its
+// projects ran never completes.
+func collectResults(results <-chan passResult, collector *ResultCollector, passSize int, onPassDone func(pass int)) {
+	pending := make(map[int]int)
+	for r := range results {
+		collector.AddProjectResult(r.result)
+		if onPassDone == nil {
+			continue
+		}
+		pending[r.pass]++
+		if pending[r.pass] == passSize {
+			delete(pending, r.pass)
+			onPassDone(r.pass)
+		}
+	}
 }
 
 func (m *Migrator) writeDetailedReport(finalReport *MigrationReport, sessionID string) {
