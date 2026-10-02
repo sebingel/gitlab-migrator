@@ -58,8 +58,8 @@
 # highest bump of all its pull requests without release:skip. It skips the
 # release only if all of them have release:skip. A push of a commit that
 # already has a release tag skips it too, and a manual run of such a commit
-# fails. Tags that are not plain
-# vMAJOR.MINOR.PATCH (for example v1.0.0-rc.1) are ignored.
+# fails. Tags that are not plain vMAJOR.MINOR.PATCH (for example
+# v1.0.0-rc.1) are ignored.
 #
 # Needs: bash, jq, gh (only for push).
 
