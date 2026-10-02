@@ -164,6 +164,8 @@ By default, 4 workers will be spawned to migrate up to 4 projects in parallel. Y
 
 Specify `-loop` to continue migrating projects until canceled. This is useful for daemonizing the migration tool, or automatically restarting when migrating a large number of projects (or a small number of very large projects).
 
+With `-loop` and `-detailed-report`, the detailed report is written each time a pass over all projects is complete, and once more when the loop ends. Each write replaces the report files of the session in `reports/` with all results collected so far, so the results of complete passes are on disk while the tool runs.
+
 ## Logging
 
 This tool is entirely noninteractive and outputs different levels of logs depending on your interest. You can set the `LOG_LEVEL` environment to one of `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE` to get more or less verbosity. The default is `INFO`.
@@ -247,7 +249,7 @@ By default, attempting to migrate into an archived GitHub repository fails. Pass
 
 ## Reporting
 
-Use `-report` to get a summary of what would be migrated without actually performing the migration. For a detailed per-project breakdown written to disk, add `-detailed-report`, which generates both a JSON and a Markdown report in a `reports/` subdirectory next to the executable.
+Use `-report` to get a summary of what would be migrated without actually performing the migration. For a detailed per-project breakdown written to disk, add `-detailed-report`, which generates both a JSON and a Markdown report in a `reports/` subdirectory next to the executable. With `-loop`, the report is also written after each complete pass (see [Concurrency](#concurrency)).
 
 ## Contributing, reporting bugs etc...
 
