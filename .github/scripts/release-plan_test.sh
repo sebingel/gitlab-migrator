@@ -25,7 +25,8 @@ failures=0
 #                  merged_at), and only open ones without state=closed.
 #   STUB_LIST      JSON that it prints for the list instead
 #   STUB_LIST_STATUS
-#                  502 makes every list call fail with HTTP 502
+#                  502 makes every list call fail with HTTP 502, 404 makes
+#                  it fail like gh does for HTTP 404
 #   STUB_STATUS    404 makes it fail like gh does for HTTP 404
 #   STUB_FAILURES  number of calls that fail with HTTP 502 first
 mkdir -p "$work/bin"
@@ -48,6 +49,9 @@ if [ "${STUB_STATUS:-200}" = "404" ]; then
 fi
 case "$2" in
   */pulls\?*)
+    if [ "${STUB_LIST_STATUS:-200}" = "404" ]; then
+      not_found
+    fi
     if [ "${STUB_LIST_STATUS:-200}" = "502" ]; then
       echo "gh: Server Error (HTTP 502)" >&2
       exit 1
@@ -507,6 +511,15 @@ expect_error "list API errors that do not stop fail the run" \
   "Could not read the pull requests from ci/b" plan \
   "${stack_env[@]}" STUB_LIST_STATUS=502 STUB_PULLS="$(stack_pulls '[]' '[]' '[]')"
 expect_api_calls "the list call is retried too" 4
+
+# api_get turns HTTP 404 into an empty answer. For the list this means that
+# no pull request from the branch is found, so the chain breaks.
+expect "list answer HTTP 404 breaks the chain" \
+  "bump=patch version=v0.16.1 release=true publish=true pull_request= pull_requests=" \
+  "${stack_env[@]}" STUB_LIST_STATUS=404 STUB_PULLS="$(stack_pulls '[]' '["release:minor"]' '[]')"
+expect_message "and names the branch without a merged pull request" \
+  "Pull request #56 is based on ci/b, but no merged pull request"
+expect_message "and warns that no labels apply" "not the merge commit of a pull request"
 
 expect_error "list answer that is not a JSON array" "is not a JSON array" plan \
   "${stack_env[@]}" STUB_LIST='{}' STUB_PULLS="$(stack_pulls '[]' '[]' '[]')"
