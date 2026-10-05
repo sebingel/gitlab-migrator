@@ -44,7 +44,7 @@ func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
 	retryClient := buildRetryClient(logger)
 
 	transport := &clients.SearchModder{
-		Base: &retryablehttp.RoundTripper{Client: retryClient},
+		Base: newRetryTransport(retryClient),
 	}
 	paginatedClient := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
 
@@ -94,7 +94,8 @@ var errNoResponseNoError = errors.New("retry check got neither a response nor an
 var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
 
 // secondaryRateLimitBaseWait is the first wait for a secondary rate limit
-// without rate limit headers. It doubles with each attempt.
+// without rate limit headers. It doubles with each further secondary rate limit
+// of the request in a row, see secondaryRateLimitWait.
 const secondaryRateLimitBaseWait = 120 * time.Second
 
 // secondaryRateLimitKey is the context key under which CheckRetry hands the
@@ -132,15 +133,77 @@ func secondaryRateLimitFrom(resp *http.Response) (GitHubError, bool) {
 	return errResp, ok
 }
 
+// secondaryRateLimitCountKey is the context key of the counter that
+// secondaryRateLimitCounting gives each request.
+type secondaryRateLimitCountKey struct{}
+
+// secondaryRateLimitCounting is the transport between the callers and the
+// retry client. It gives each request its own counter of the secondary rate
+// limit responses in a row, in a context derived from the context of the
+// request, so the caller's request is not changed. retryablehttp sends all
+// attempts of the request with this context: CheckRetry gets it as ctx and
+// counts there (countSecondaryRateLimit), and Backoff reads the count from
+// resp.Request (secondaryRateLimitsInARow). So the extended backoff grows only
+// while the secondary rate limit goes on, not with the other retries of the
+// request before it. The counter is a plain int: retryablehttp calls CheckRetry
+// and Backoff for the attempts of one request one after the other, in the
+// goroutine of RoundTrip. The response that reaches the caller keeps this
+// context in resp.Request; it holds only the counter.
+type secondaryRateLimitCounting struct {
+	Base http.RoundTripper
+}
+
+func (t *secondaryRateLimitCounting) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx := context.WithValue(req.Context(), secondaryRateLimitCountKey{}, new(int))
+	return t.Base.RoundTrip(req.WithContext(ctx))
+}
+
+// newRetryTransport returns the transport over the retry client that NewApp
+// uses: secondaryRateLimitCounting over a retryablehttp.RoundTripper.
+func newRetryTransport(retryClient *retryablehttp.Client) http.RoundTripper {
+	return &secondaryRateLimitCounting{Base: &retryablehttp.RoundTripper{Client: retryClient}}
+}
+
+// countSecondaryRateLimit updates the counter of secondaryRateLimitCounting in
+// ctx for one attempt: a secondary rate limit adds one, any other response or
+// error sets it back to 0. Without a counter in ctx it does nothing.
+func countSecondaryRateLimit(ctx context.Context, secondaryRateLimit bool) {
+	count, ok := ctx.Value(secondaryRateLimitCountKey{}).(*int)
+	if !ok {
+		return
+	}
+	if secondaryRateLimit {
+		*count++
+	} else {
+		*count = 0
+	}
+}
+
+// secondaryRateLimitsInARow returns the number of secondary rate limit
+// responses of the request in a row up to resp, resp included. ok is false
+// when the request was not sent through secondaryRateLimitCounting.
+func secondaryRateLimitsInARow(resp *http.Response) (count int, ok bool) {
+	if resp.Request == nil {
+		return 0, false
+	}
+	counter, ok := resp.Request.Context().Value(secondaryRateLimitCountKey{}).(*int)
+	if !ok {
+		return 0, false
+	}
+	return *counter, true
+}
+
 // secondaryRateLimitWait returns the wait for a secondary rate limit without
-// rate limit headers: secondaryRateLimitBaseWait * 2^attemptNum, capped at
-// maxWait (DefaultBackoff also handles an overflow). It then adds 0 to 40 %
-// jitter, never less, so that workers that hit the limit at the same time do
-// not retry at the same time. The result is capped at maxWait plus its own 0 to
-// 40 % jitter, so the waits at the cap are spread too. So the longest wait is
-// 1.4 * maxWait. randFloat must return a number in [0, 1).
-func secondaryRateLimitWait(maxWait time.Duration, attemptNum int, randFloat func() float64) time.Duration {
-	sleep := retryablehttp.DefaultBackoff(secondaryRateLimitBaseWait, maxWait, attemptNum, nil)
+// rate limit headers: secondaryRateLimitBaseWait * 2^before, capped at maxWait
+// (DefaultBackoff also handles an overflow). before is the number of secondary
+// rate limit responses of the request right before this one, so the first one
+// waits secondaryRateLimitBaseWait. It then adds 0 to 40 % jitter, never less,
+// so that workers that hit the limit at the same time do not retry at the same
+// time. The result is capped at maxWait plus its own 0 to 40 % jitter, so the
+// waits at the cap are spread too. So the longest wait is 1.4 * maxWait.
+// randFloat must return a number in [0, 1).
+func secondaryRateLimitWait(maxWait time.Duration, before int, randFloat func() float64) time.Duration {
+	sleep := retryablehttp.DefaultBackoff(secondaryRateLimitBaseWait, maxWait, before, nil)
 
 	sleep += time.Duration(randFloat() * 0.4 * float64(sleep))
 
@@ -230,7 +293,17 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		}
 
 		if errResp, ok := secondaryRateLimitFrom(resp); ok {
-			sleep = secondaryRateLimitWait(max, attemptNum, randFloat)
+			// CheckRetry counted resp before it marked it, so count is at least 1.
+			before := attemptNum
+			if count, ok := secondaryRateLimitsInARow(resp); ok {
+				before = count - 1
+			} else {
+				logger.Warn("cannot count the secondary rate limits of the request because it was not sent through secondaryRateLimitCounting, using the attempt number instead",
+					"attempt", attemptNum,
+					"method", requestMethod,
+					"url", requestUrl)
+			}
+			sleep = secondaryRateLimitWait(max, before, randFloat)
 			logger.Info("waiting for secondary rate limit recovery",
 				"wait_duration", sleep,
 				"attempt", attemptNum,
@@ -250,6 +323,7 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
 		if err != nil {
+			countSecondaryRateLimit(ctx, false)
 			if ctx.Err() != nil {
 				return false, err
 			}
@@ -305,6 +379,10 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		// Backoff.
 		secondaryRateLimit := (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
 			secondaryRateLimitPattern.MatchString(errResp.Message)
+		// Every response that is retried comes past this line, so the count of
+		// secondary rate limits in a row is right for the next attempt. A secondary
+		// rate limit with Retry-After counts too: the limit goes on.
+		countSecondaryRateLimit(ctx, secondaryRateLimit)
 		if secondaryRateLimit {
 			// A 403 is retried here. For a 403 the WARN line replaces the TRACE
 			// line below. A 429 keeps its TRACE line.
