@@ -75,10 +75,21 @@ func (m *Migrator) newProject(ctx context.Context, slugs []string) (*project, er
 	return p, nil
 }
 
+var pathSeparatorReplacer = strings.NewReplacer("/", "_", "\\", "_")
+
+// sanitizePathSegment replaces the path separators in s, so that s can be part
+// of a single directory name.
+func sanitizePathSegment(s string) string {
+	return pathSeparatorReplacer.Replace(s)
+}
+
 func (p *project) createGitStorage() (storage.Storer, error) {
 	if p.m.cfg.StorageType == "filesystem" {
 		// An empty StorageDir makes MkdirTemp use os.TempDir().
-		tempDir, err := os.MkdirTemp(p.m.cfg.StorageDir, fmt.Sprintf("gitlab-migrator-%s-%s-*", p.gitlabPath[0], p.gitlabPath[1]))
+		// The group path of a subgroup project contains "/", which MkdirTemp
+		// rejects in a pattern.
+		pattern := fmt.Sprintf("gitlab-migrator-%s-%s-*", sanitizePathSegment(p.gitlabPath[0]), sanitizePathSegment(p.gitlabPath[1]))
+		tempDir, err := os.MkdirTemp(p.m.cfg.StorageDir, pattern)
 		if err != nil {
 			return nil, fmt.Errorf("creating storage directory: %w", err)
 		}
