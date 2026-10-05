@@ -218,8 +218,7 @@ fi
 # ----------------------------------------------------------------------------
 
 # -config: JSON file with settings. Its values override the flags of this script,
-#   except -merge-requests-max-age (the flag wins) and the flags that -pull-requests-only
-#   implies (they stay on).
+#   except the flags that -pull-requests-only implies (they stay on).
 #   Tokens are not allowed in it. They come from the environment only.
 # arguments+=("-config" "migration.json")
 
