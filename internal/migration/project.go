@@ -479,47 +479,8 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 		}
 	}
 
-	if p.m.cfg.TrimGithubBranches {
-		p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		refSpecsToDelete := make([]gitconfig.RefSpec, 0)
-		branchesToDelete := make([]string, 0)
-		githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
-		if err != nil {
-			return fmt.Errorf("listing branches from GitHub: %w", err)
-		}
-		for _, githubBranch := range githubBranches {
-			// Dereference Name on purpose: a branch without a name must fail loudly,
-			// not become the refspec ":refs/heads/" in the delete batch.
-			if !slices.Contains(p.result.BranchesMigrated, *githubBranch.Name) {
-				branchesToDelete = append(branchesToDelete, *githubBranch.Name)
-				refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", *githubBranch.Name)))
-			}
-		}
-
-		if err := p.retargetPullRequestsBeforeTrim(ctx, branchesToDelete); err != nil {
-			return err
-		}
-
-		batches := ChunkRefSpecs(refSpecsToDelete, p.m.cfg.PushBatchSize)
-		p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
-
-		for batchNum, batch := range batches {
-			p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
-
-			trimOpts := &git.PushOptions{
-				RemoteName: "github",
-				Force:      true,
-				RefSpecs:   batch,
-			}
-			sideband, err := p.pushWithSideband(ctx, trimOpts)
-			if err != nil {
-				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					p.log.Debug("batch already up-to-date", "batch", batchNum+1)
-				} else {
-					return formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
-				}
-			}
-		}
+	if err := p.updateGithubBranches(ctx, githubUrl); err != nil {
+		return err
 	}
 
 	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
@@ -536,13 +497,67 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 			return formatPushError("pushing tags to github repo", p.pushErrHint(err), err, tagSideband)
 		}
 	}
+	return nil
+}
 
+// updateGithubBranches is called after the branches are pushed to GitHub. It
+// makes the GitHub trunk the default branch of the GitHub repository and, with
+// -trim-branches-on-github, deletes the branches on GitHub that are not in the
+// GitLab repository. The default branch comes first: after a trunk rename the
+// trim deletes the old trunk, which an earlier run without the rename made the
+// default branch, and GitHub refuses to delete the default branch.
+func (p *project) updateGithubBranches(ctx context.Context, githubUrl string) error {
 	p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
 	updateRepoDefault := gogithub.Repository{
 		DefaultBranch: &p.defaultBranch,
 	}
-	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
+	if _, _, err := p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
 		return fmt.Errorf("setting default branch: %w", err)
+	}
+
+	if !p.m.cfg.TrimGithubBranches {
+		return nil
+	}
+
+	p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	refSpecsToDelete := make([]gitconfig.RefSpec, 0)
+	branchesToDelete := make([]string, 0)
+	githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+	if err != nil {
+		return fmt.Errorf("listing branches from GitHub: %w", err)
+	}
+	for _, githubBranch := range githubBranches {
+		// Dereference Name on purpose: a branch without a name must fail loudly,
+		// not become the refspec ":refs/heads/" in the delete batch.
+		if !slices.Contains(p.result.BranchesMigrated, *githubBranch.Name) {
+			branchesToDelete = append(branchesToDelete, *githubBranch.Name)
+			refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", *githubBranch.Name)))
+		}
+	}
+
+	if err := p.retargetPullRequestsBeforeTrim(ctx, branchesToDelete); err != nil {
+		return err
+	}
+
+	batches := ChunkRefSpecs(refSpecsToDelete, p.m.cfg.PushBatchSize)
+	p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
+
+	for batchNum, batch := range batches {
+		p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
+
+		trimOpts := &git.PushOptions{
+			RemoteName: "github",
+			Force:      true,
+			RefSpecs:   batch,
+		}
+		sideband, err := p.pushWithSideband(ctx, trimOpts)
+		if err != nil {
+			if errors.Is(err, git.NoErrAlreadyUpToDate) {
+				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
+			} else {
+				return formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
+			}
+		}
 	}
 	return nil
 }

@@ -721,17 +721,21 @@ func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 	})
 }
 
-// searchGitHub is a GitHubClient whose search returns issues and whose
-// GetPullRequest returns the pull requests in prs. It records the numbers that
-// GetPullRequest was called with.
+// searchGitHub is a GitHubClient whose search returns issues, whose
+// GetPullRequest returns the pull requests in prs and whose GetBranches
+// returns branches. It records the numbers that GetPullRequest was called with.
 type searchGitHub struct {
 	issues    []*gogithub.Issue
 	prs       map[int]*gogithub.PullRequest
+	branches  []*gogithub.Branch
 	requested []int
 }
 
 func (f *searchGitHub) GetBranches(context.Context, string, string) ([]*gogithub.Branch, error) {
-	return nil, errors.New("GetBranches is not expected in this test")
+	if f.branches == nil {
+		return nil, errors.New("GetBranches is not expected in this test")
+	}
+	return f.branches, nil
 }
 
 func (f *searchGitHub) GetPullRequest(_ context.Context, _, _ string, number int) (*gogithub.PullRequest, error) {
@@ -1237,20 +1241,12 @@ func TestMigrateMergeRequest_BaseChangesAfterTheStateChange(t *testing.T) {
 	})
 }
 
-// retargetBeforeTrim calls retargetPullRequestsBeforeTrim for the GitLab trunk
-// master and the GitHub trunk githubTrunk, with branchesToDelete as the
-// branches the trim deletes. The test server lists the open pull requests 5
-// and 6 on master, on two pages. It returns the edits in the order they were
-// sent, each with the number of the pull request and the JSON object of the
-// request.
-func retargetBeforeTrim(t *testing.T, githubTrunk string, branchesToDelete []string) ([]map[string]any, error) {
+// serveOpenPullRequestsOnMaster adds to ghMux the open pull requests 5 and 6
+// on master, listed on two pages. Each edit of a pull request calls onEdit with
+// the JSON object of the request and the number of the pull request under
+// "number". GitHub answers the edit with editStatus.
+func serveOpenPullRequestsOnMaster(t *testing.T, ghMux *http.ServeMux, editStatus int, onEdit func(edit map[string]any)) {
 	t.Helper()
-	p := newGitLabTestProject(t, http.NewServeMux())
-	p.project.DefaultBranch = "master"
-	p.defaultBranch = githubTrunk
-
-	var edits []map[string]any
-	ghMux := http.NewServeMux()
 	ghMux.HandleFunc("GET /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if query.Get("state") != "open" || query.Get("base") != "master" {
@@ -1274,11 +1270,37 @@ func retargetBeforeTrim(t *testing.T, githubTrunk string, branchesToDelete []str
 			t.Errorf("decoding the edit of the pull request: %v", err)
 		}
 		edit["number"] = r.PathValue("number")
-		edits = append(edits, edit)
+		onEdit(edit)
 		w.Header().Set("Content-Type", "application/json")
+		if editStatus != http.StatusOK {
+			w.WriteHeader(editStatus)
+			if _, err := fmt.Fprint(w, `{"message":"Validation Failed"}`); err != nil {
+				t.Errorf("writing the edit error: %v", err)
+			}
+			return
+		}
 		if _, err := fmt.Fprintf(w, `{"number":%s}`, r.PathValue("number")); err != nil {
 			t.Errorf("writing the edited pull request: %v", err)
 		}
+	})
+}
+
+// retargetBeforeTrim calls retargetPullRequestsBeforeTrim for the GitLab trunk
+// master and the GitHub trunk githubTrunk, with branchesToDelete as the
+// branches the trim deletes. The test server lists the open pull requests 5
+// and 6 on master, on two pages. It returns the edits in the order they were
+// sent, each with the number of the pull request and the JSON object of the
+// request.
+func retargetBeforeTrim(t *testing.T, githubTrunk string, branchesToDelete []string) ([]map[string]any, error) {
+	t.Helper()
+	p := newGitLabTestProject(t, http.NewServeMux())
+	p.project.DefaultBranch = "master"
+	p.defaultBranch = githubTrunk
+
+	var edits []map[string]any
+	ghMux := http.NewServeMux()
+	serveOpenPullRequestsOnMaster(t, ghMux, http.StatusOK, func(edit map[string]any) {
+		edits = append(edits, edit)
 	})
 	useGitHubMux(t, p, ghMux)
 
@@ -1313,4 +1335,123 @@ func TestRetargetPullRequestsBeforeTrim_NothingToDo(t *testing.T) {
 			t.Fatalf("edits = %v, err = %v, want no edits and no error", edits, err)
 		}
 	})
+}
+
+// updateBranchesAfterRename calls updateGithubBranches as a migration with
+// -rename-master-to-main and -trim-branches-on-github does after the push of
+// the branches. The GitHub repository is a local repository with the branches
+// main, master and stale, as after an earlier run without the rename that made
+// master the default branch. Only main was migrated now. GitHub answers the
+// edits of the open pull requests 5 and 6 on master with editStatus. A new
+// default branch becomes the HEAD of the local repository. It returns the
+// GitHub API calls in the order they were sent, each with the remote
+// branches at that time, the remote branches afterwards and the error.
+func updateBranchesAfterRename(t *testing.T, editStatus int) ([]string, []string, error) {
+	t.Helper()
+	remoteDir := t.TempDir()
+	if _, err := git.PlainInit(remoteDir, true); err != nil {
+		t.Fatalf("creating the remote repository: %v", err)
+	}
+	repo, err := git.PlainInit(t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("creating the local repository: %v", err)
+	}
+	if _, err := repo.CreateRemote(&gitconfig.RemoteConfig{Name: "github", URLs: []string{remoteDir}}); err != nil {
+		t.Fatalf("adding the remote: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("opening the worktree: %v", err)
+	}
+	if _, err := worktree.Commit("base", &git.CommitOptions{
+		AllowEmptyCommits: true,
+		Author:            &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+	if err := repo.Push(&git.PushOptions{RemoteName: "github", RefSpecs: []gitconfig.RefSpec{
+		"refs/heads/master:refs/heads/main",
+		"refs/heads/master:refs/heads/master",
+		"refs/heads/master:refs/heads/stale",
+	}}); err != nil {
+		t.Fatalf("pushing the branches of the earlier run: %v", err)
+	}
+
+	p := newGitLabTestProject(t, http.NewServeMux())
+	p.repo = repo
+	p.project.DefaultBranch = "master"
+	p.defaultBranch = "main"
+	p.m.cfg.TrimGithubBranches = true
+	p.result.BranchesMigrated = []string{"main"}
+	p.m.ghClient = &searchGitHub{branches: []*gogithub.Branch{
+		{Name: Pointer("main")}, {Name: Pointer("master")}, {Name: Pointer("stale")},
+	}}
+
+	var calls []string
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("PATCH /repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		var edit map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&edit); err != nil {
+			t.Errorf("decoding the edit of the repository: %v", err)
+		}
+		calls = append(calls, fmt.Sprintf("default branch %v, remote branches %v", edit["default_branch"], remoteBranches(t, remoteDir)))
+		// Like GitHub, git refuses to delete the current branch of the
+		// remote, so the default branch becomes its HEAD.
+		if name, ok := edit["default_branch"].(string); ok {
+			remote, err := git.PlainOpen(remoteDir)
+			if err != nil {
+				t.Errorf("opening the remote repository: %v", err)
+			} else if err := remote.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(name))); err != nil {
+				t.Errorf("setting the default branch of the remote repository: %v", err)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `{}`); err != nil {
+			t.Errorf("writing the edited repository: %v", err)
+		}
+	})
+	serveOpenPullRequestsOnMaster(t, ghMux, editStatus, func(edit map[string]any) {
+		calls = append(calls, fmt.Sprintf("base of pull request %v %v, remote branches %v", edit["number"], edit["base"], remoteBranches(t, remoteDir)))
+	})
+	useGitHubMux(t, p, ghMux)
+
+	err = p.updateGithubBranches(context.Background(), "https://github.com/owner/repo")
+	return calls, remoteBranches(t, remoteDir), err
+}
+
+func TestUpdateGithubBranches_OldTrunkIsTrimmedLast(t *testing.T) {
+	// GitHub refuses to delete its default branch master, and closes the open
+	// pull requests on master when it is deleted. So main becomes the default
+	// branch and the base of the pull requests first, and only then the trim
+	// deletes master and stale.
+	calls, branches, err := updateBranchesAfterRename(t, http.StatusOK)
+	if err != nil {
+		t.Fatalf("updateGithubBranches: %v", err)
+	}
+	want := []string{
+		"default branch main, remote branches [main master stale]",
+		"base of pull request 5 main, remote branches [main master stale]",
+		"base of pull request 6 main, remote branches [main master stale]",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("GitHub API calls =\n%v\nwant\n%v", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+	if want := []string{"main"}; !slices.Equal(branches, want) {
+		t.Errorf("remote branches after the trim = %v, want %v", branches, want)
+	}
+}
+
+func TestUpdateGithubBranches_RefusedBaseChangeSkipsTheTrim(t *testing.T) {
+	// GitHub refuses the new base of pull request 5. The trim would close it,
+	// so no branch is deleted and the error names the pull request.
+	calls, branches, err := updateBranchesAfterRename(t, http.StatusUnprocessableEntity)
+	if err == nil || !strings.Contains(err.Error(), "changing base branch of pull request 5") {
+		t.Fatalf("updateGithubBranches = %v, want the refused base change of pull request 5", err)
+	}
+	if len(calls) != 2 {
+		t.Errorf("GitHub API calls = %v, want the default branch and pull request 5", calls)
+	}
+	if want := []string{"main", "master", "stale"}; !slices.Equal(branches, want) {
+		t.Errorf("remote branches = %v, want %v", branches, want)
+	}
 }
