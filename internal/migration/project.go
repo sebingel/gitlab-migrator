@@ -283,8 +283,10 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		}
 	}
 
+	var mrErr error
 	if p.m.cfg.EnablePullRequests {
-		mrResults, err := p.migrateMergeRequests(ctx)
+		var mrResults []MergeRequestResult
+		mrResults, mrErr = p.migrateMergeRequests(ctx)
 		p.result.MergeRequests = mrResults
 
 		for _, mr := range mrResults {
@@ -300,16 +302,17 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 				p.result.SuccessfulMRs++
 			}
 		}
-
-		// The report keeps the merge requests processed before an interrupt.
-		if err != nil {
-			return p.result, err
-		}
 	}
 
 	p.result.EndTime = time.Now()
 	p.result.Duration = p.result.EndTime.Sub(p.result.StartTime)
 	p.result.BranchCount = len(p.result.BranchesMigrated)
+
+	// The report keeps the merge requests processed before an interrupt and
+	// the branches mirrored before the failure.
+	if mrErr != nil {
+		return p.result, mrErr
+	}
 
 	if p.result.FailedMRs > 0 {
 		if p.result.SuccessfulMRs > 0 {

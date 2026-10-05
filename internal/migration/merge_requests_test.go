@@ -260,10 +260,11 @@ func TestMigrate_FailsWhenMergeRequestListFails(t *testing.T) {
 	p.m.cfg.PullRequestsOnly = true
 	serveGitHubRepo(t, p)
 
-	_, err := p.migrate(context.Background())
+	result, err := p.migrate(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "retrieving gitlab merge requests") {
 		t.Fatalf("migrate error = %v, want the failed merge request list", err)
 	}
+	wantFinishedResult(t, result)
 }
 
 // serveGitHubRepo points the GitHub client of p to a test server that knows
@@ -325,9 +326,25 @@ func TestMigrate_FailsWhenInterruptedBeforeAllMergeRequests(t *testing.T) {
 		Output: cancelOnLog{msg: "migrating merge requests from GitLab to GitHub", cancel: cancel},
 	})
 
-	_, err := p.migrate(ctx)
+	result, err := p.migrate(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("migrate error = %v, want context.Canceled", err)
+	}
+	wantFinishedResult(t, result)
+}
+
+// wantFinishedResult checks that the report fields that migrate() sets at its
+// end are set, also for a project that failed.
+func wantFinishedResult(t *testing.T, result ProjectResult) {
+	t.Helper()
+	if result.EndTime.IsZero() {
+		t.Error("EndTime is not set")
+	}
+	if result.Duration != result.EndTime.Sub(result.StartTime) {
+		t.Errorf("Duration = %v, want EndTime - StartTime = %v", result.Duration, result.EndTime.Sub(result.StartTime))
+	}
+	if result.BranchCount != len(result.BranchesMigrated) {
+		t.Errorf("BranchCount = %d, want %d", result.BranchCount, len(result.BranchesMigrated))
 	}
 }
 
