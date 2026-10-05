@@ -300,9 +300,12 @@ no_value_flags=" -delete-existing-repos -unarchive-archived-repos -no-force -tri
 -skip-invalid-merge-requests -loop -report -detailed-report -version -prepare "
 # An argument that is empty or has a space or a quote in it is printed in single quotes
 needs_quotes="[[:space:]'\"]"
+# A single quote in such a value is printed as '\''. The text is in a variable because bash before 4.3
+# (also /bin/bash 3.2 on macOS) does not remove the quotes and backslashes of a replacement text.
+quote_in_quotes="'\\''"
 show_arg() {
     if [[ -z "$1" || "$1" =~ $needs_quotes ]]; then
-        printf "'%s'" "${1//\'/\'\\\'\'}"
+        printf "'%s'" "${1//\'/$quote_in_quotes}"
     else
         printf '%s' "$1"
     fi
