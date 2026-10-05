@@ -245,6 +245,8 @@ Values in the file override any matching command-line flags. Field names are `sn
 
 Pass `-state-dir` with a directory path to have the tool persist per-merge-request migration state to a JSON file as it works. If a migration is interrupted, re-running with the same `-state-dir` will skip merge requests that already completed successfully, so you can safely resume large or long-running migrations without redoing completed work.
 
+With `-rename-master-to-main` or `-rename-trunk-branch`, a skipped merge request that is open and targets the GitLab trunk still gets the new trunk as the base branch of its pull request, if the pull request is open. Nothing else of the pull request is updated. If GitHub refuses the new base branch, the merge request counts as failed in this run, and the state file keeps it as successful, so the next run tries the base branch again.
+
 ## Archived repositories
 
 By default, attempting to migrate into an archived GitHub repository fails. Pass `-unarchive-archived-repos` to have the tool temporarily unarchive the target repository before migrating, then re-archive it afterwards. The tool also re-archives the repository when you stop the migration with Ctrl+C; after Ctrl+C it tries this for up to two minutes. If the re-archive fails, the log says that you must archive the repository by hand.

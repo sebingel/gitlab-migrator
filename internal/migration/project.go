@@ -633,14 +633,22 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 				if prev.Status == MRStateSkipped {
 					status = StatusSkipped
 				}
-				results = append(results, MergeRequestResult{
+				mrResult := MergeRequestResult{
 					GitLabMRID:     mergeRequest.IID,
 					GitLabMRTitle:  mergeRequest.Title,
 					GitLabState:    mergeRequest.State,
 					GitHubPRNumber: prev.GitHubPRNum,
 					Status:         status,
 					SkipReason:     prev.SkipReason,
-				})
+				}
+				// The state file is not changed for a failure here: it keeps
+				// the saved result, so the next run tries the base again.
+				if err := p.retargetSavedPullRequest(ctx, mergeRequest, prev.GitHubPRNum); err != nil {
+					p.log.Error("changing base branch of migrated pull request", "merge_request_id", mergeRequest.IID, "error", err)
+					mrResult.Status = StatusFailed
+					mrResult.Error = err.Error()
+				}
+				results = append(results, mrResult)
 				continue
 			}
 		}
@@ -1441,6 +1449,36 @@ func (p *project) retargetOpenPullRequests(ctx context.Context, oldTrunk string)
 		if _, err := p.editPullRequest(ctx, "changing base branch of pull request", pr.GetNumber(), edit); err != nil {
 			return fmt.Errorf("changing base branch of pull request %d to %s: %w", pr.GetNumber(), p.defaultBranch, err)
 		}
+	}
+	return nil
+}
+
+// retargetSavedPullRequest gives pull request prNumber the GitHub trunk as
+// base branch. It is for a merge request that -state-dir records as migrated,
+// so migrateMergeRequest does not run for it. It does something only when the
+// GitLab trunk is renamed and the merge request is open and targets the GitLab
+// trunk; the pull request of a closed or merged merge request targets its
+// temporary branch. GitHub refuses a new base for a closed pull request, so a
+// closed one keeps its base. Only the base changes: title, body and state stay
+// as the saved result left them.
+func (p *project) retargetSavedPullRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest, prNumber *int) error {
+	if prNumber == nil || p.defaultBranch == p.project.DefaultBranch ||
+		!strings.EqualFold(mergeRequest.State, "opened") || mergeRequest.TargetBranch != p.project.DefaultBranch {
+		return nil
+	}
+
+	pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], *prNumber)
+	if err != nil {
+		return fmt.Errorf("retrieving pull request %d: %w", *prNumber, err)
+	}
+	if pr.GetState() != "open" || pr.GetBase().GetRef() == p.defaultBranch {
+		return nil
+	}
+
+	p.log.Info("changing base branch of migrated pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", *prNumber, "old_base", pr.GetBase().GetRef(), "new_base", p.defaultBranch)
+	edit := &gogithub.PullRequest{Base: &gogithub.PullRequestBranch{Ref: Pointer(p.defaultBranch)}}
+	if _, err := p.editPullRequest(ctx, "changing base branch of pull request", *prNumber, edit); err != nil {
+		return fmt.Errorf("changing base branch of pull request %d to %s: %w", *prNumber, p.defaultBranch, err)
 	}
 	return nil
 }

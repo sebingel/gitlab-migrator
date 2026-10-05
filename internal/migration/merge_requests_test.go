@@ -1241,6 +1241,145 @@ func TestMigrateMergeRequest_BaseChangesAfterTheStateChange(t *testing.T) {
 	})
 }
 
+// resumeWithSavedSuccess runs migrateMergeRequests like a rerun with
+// -state-dir: the state file records MR !3 as migrated to pull request 5. MR !3
+// is in the GitLab state mrState and targets master, the GitLab trunk. The
+// GitHub trunk is githubTrunk. Pull request 5 is pr. The test server answers
+// an edit of pull request 5 with editStatus. It returns the results, the
+// numbers of the pull requests that were read, the edits of pull request 5 and
+// the saved state of MR !3 after the run.
+func resumeWithSavedSuccess(t *testing.T, mrState, githubTrunk string, pr gogithub.PullRequest, editStatus int) ([]MergeRequestResult, []int, []map[string]any, *MRState) {
+	t.Helper()
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{
+		{IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "master"},
+	}, &calls)
+	p := newGitLabTestProject(t, mux)
+	p.project.DefaultBranch = "master"
+	p.defaultBranch = githubTrunk
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state, err := LoadOrCreate(statePath, "group/project", "owner/repo", testLogger())
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	state.RecordSuccess(3, Pointer(5))
+	if err := state.Flush(); err != nil {
+		t.Fatalf("writing the state file: %v", err)
+	}
+	p.state = state
+
+	pr.Number = Pointer(5)
+	gh := &searchGitHub{prs: map[int]*gogithub.PullRequest{5: &pr}}
+	p.m.ghClient = gh
+
+	var edits []map[string]any
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("PATCH /repos/owner/repo/pulls/5", func(w http.ResponseWriter, r *http.Request) {
+		var edit map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&edit); err != nil {
+			t.Errorf("decoding the edit of the pull request: %v", err)
+		}
+		edits = append(edits, edit)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(editStatus)
+		if _, err := fmt.Fprint(w, `{"number":5}`); err != nil {
+			t.Errorf("writing the edited pull request: %v", err)
+		}
+	})
+	useGitHubMux(t, p, ghMux)
+
+	results, err := p.migrateMergeRequests(context.Background())
+	if err != nil {
+		t.Fatalf("migrateMergeRequests: %v", err)
+	}
+
+	saved, err := LoadOrCreate(statePath, "group/project", "owner/repo", testLogger())
+	if err != nil {
+		t.Fatalf("reloading state: %v", err)
+	}
+	return results, gh.requested, edits, saved.GetState(3)
+}
+
+// wantSavedSuccess checks that MR !3 kept its saved state: migrated to pull
+// request 5.
+func wantSavedSuccess(t *testing.T, saved *MRState) {
+	t.Helper()
+	if saved == nil || saved.Status != MRStateSuccess || saved.GitHubPRNum == nil || *saved.GitHubPRNum != 5 {
+		t.Errorf("saved state of MR !3 = %+v, want success with pull request 5", saved)
+	}
+}
+
+func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
+	t.Run("open pull request on the old trunk", func(t *testing.T) {
+		// Only the base branch changes: title, body and state stay as the
+		// saved result left them.
+		results, read, edits, saved := resumeWithSavedSuccess(t, "opened", "main", openPullRequest("master"), http.StatusOK)
+		if len(read) != 1 || read[0] != 5 {
+			t.Errorf("read pull requests = %v, want [5]", read)
+		}
+		if len(edits) != 1 || len(edits[0]) != 1 || edits[0]["base"] != "main" {
+			t.Fatalf("edits = %v, want one edit with only base main", edits)
+		}
+		if len(results) != 1 || results[0].Status != StatusSuccess || results[0].GitHubPRNumber == nil || *results[0].GitHubPRNumber != 5 {
+			t.Errorf("results = %+v, want MR !3 migrated to pull request 5", results)
+		}
+		wantSavedSuccess(t, saved)
+	})
+
+	t.Run("open pull request on the new trunk", func(t *testing.T) {
+		results, _, edits, saved := resumeWithSavedSuccess(t, "opened", "main", openPullRequest("main"), http.StatusOK)
+		if len(edits) != 0 {
+			t.Fatalf("edits = %v, want none", edits)
+		}
+		if len(results) != 1 || results[0].Status != StatusSuccess {
+			t.Errorf("results = %+v, want MR !3 migrated", results)
+		}
+		wantSavedSuccess(t, saved)
+	})
+
+	t.Run("closed pull request", func(t *testing.T) {
+		// GitHub refuses a new base for a closed pull request.
+		closed := openPullRequest("master")
+		closed.State = Pointer("closed")
+		_, _, edits, _ := resumeWithSavedSuccess(t, "opened", "main", closed, http.StatusOK)
+		if len(edits) != 0 {
+			t.Fatalf("edits = %v, want none", edits)
+		}
+	})
+
+	t.Run("no rename", func(t *testing.T) {
+		// Without a rename the saved result is enough: no GitHub call.
+		_, read, edits, _ := resumeWithSavedSuccess(t, "opened", "master", openPullRequest("master"), http.StatusOK)
+		if len(read) != 0 || len(edits) != 0 {
+			t.Fatalf("read pull requests = %v, edits = %v, want none", read, edits)
+		}
+	})
+
+	t.Run("merged merge request", func(t *testing.T) {
+		// The pull request of a closed or merged merge request targets its
+		// temporary branch: no GitHub call.
+		_, read, edits, _ := resumeWithSavedSuccess(t, "merged", "main", openPullRequest("master"), http.StatusOK)
+		if len(read) != 0 || len(edits) != 0 {
+			t.Fatalf("read pull requests = %v, edits = %v, want none", read, edits)
+		}
+	})
+
+	t.Run("refused base change", func(t *testing.T) {
+		// The run reports the failure. The saved state stays, so the next
+		// run tries the base again.
+		results, _, edits, saved := resumeWithSavedSuccess(t, "opened", "main", openPullRequest("master"), http.StatusUnprocessableEntity)
+		if len(edits) != 1 {
+			t.Fatalf("edits = %v, want one", edits)
+		}
+		if len(results) != 1 || results[0].Status != StatusFailed || !strings.Contains(results[0].Error, "changing base branch") {
+			t.Errorf("results = %+v, want MR !3 failed at the base change", results)
+		}
+		wantSavedSuccess(t, saved)
+	})
+}
+
 // serveOpenPullRequests adds to ghMux the open pull requests 5 and 6 on base,
 // listed on two pages. Each edit of a pull request calls onEdit with the JSON
 // object of the request and the number of the pull request under "number".
