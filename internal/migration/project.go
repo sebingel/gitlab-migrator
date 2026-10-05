@@ -728,24 +728,35 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 
 			if issue.IsPullRequest() {
-				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
-				if err != nil {
-					return result, fmt.Errorf("parsing pull request url: %w", err)
+				// The number of a pull request is the number of its issue. It
+				// is used when GitHub sends no pull request URL.
+				prNumber := issue.GetNumber()
+				if rawURL := issue.GetPullRequestLinks().GetURL(); rawURL != "" {
+					prUrl, err := url.Parse(rawURL)
+					if err != nil {
+						return result, fmt.Errorf("parsing pull request url: %w", err)
+					}
+					m := prNumberRegex.FindStringSubmatch(prUrl.Path)
+					if len(m) != 2 {
+						continue
+					}
+					prNumber, _ = strconv.Atoi(m[1])
+				}
+				if prNumber == 0 {
+					p.log.Debug("ignoring search result without pull request number", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
+					continue
 				}
 
-				if m := prNumberRegex.FindStringSubmatch(prUrl.Path); len(m) == 2 {
-					prNumber, _ := strconv.Atoi(m[1])
-					pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
-					if err != nil {
-						return result, fmt.Errorf("retrieving pull request: %w", err)
-					}
+				pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
+				if err != nil {
+					return result, fmt.Errorf("retrieving pull request: %w", err)
+				}
 
-					if bodyMatchesMergeRequest(pr.GetBody(), mergeRequest.IID) {
-						p.log.Debug("found existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber())
-						pullRequest = pr
-						result.GitHubPRNumber = pullRequest.Number
-						break
-					}
+				if bodyMatchesMergeRequest(pr.GetBody(), mergeRequest.IID) {
+					p.log.Debug("found existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber())
+					pullRequest = pr
+					result.GitHubPRNumber = pullRequest.Number
+					break
 				}
 			}
 		}
@@ -991,7 +1002,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], mergeRequest.CreatedAt.Format(config.DateFormat), closeDate, approval, originalState, p.m.cfg.GitlabDomain, mergeRequestTitle)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], formatDate(mergeRequest.CreatedAt), closeDate, approval, originalState, p.m.cfg.GitlabDomain, mergeRequestTitle)
 
 	created := false
 	if pullRequest == nil {
@@ -1141,7 +1152,9 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 		commentResult := CommentResult{
 			GitLabNoteID:   comment.ID,
 			AuthorUsername: comment.Author.Username,
-			CreatedAt:      *comment.CreatedAt,
+		}
+		if comment.CreatedAt != nil {
+			commentResult.CreatedAt = *comment.CreatedAt
 		}
 
 		commentAuthor, err := p.m.glClient.GetUser(ctx, comment.Author.Username)
@@ -1168,7 +1181,7 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 
 %[5]s
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format(config.DateFormat), comment.Body, commentTextHeading)
+%[4]s`, githubCommentAuthorName, comment.ID, formatDate(comment.CreatedAt), comment.Body, commentTextHeading)
 
 		existingComment := findMigratedComment(prComments, comment.ID)
 		if existingComment != nil {

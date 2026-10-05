@@ -4,9 +4,24 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/sebingel/gitlab-migrator/internal/config"
 )
+
+// unknownDate is shown in a migrated pull request or comment when GitLab sends
+// no date.
+const unknownDate = "_Unknown_"
+
+// formatDate formats t with config.DateFormat, or returns unknownDate when t
+// is nil.
+func formatDate(t *time.Time) string {
+	if t == nil {
+		return unknownDate
+	}
+	return t.Format(config.DateFormat)
+}
 
 // Pointer returns a pointer to the given value.
 func Pointer[T any](v T) *T {

@@ -714,3 +714,122 @@ func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 		wantProcessed(t, results, searches)
 	})
 }
+
+// searchGitHub is a GitHubClient whose search returns issues and whose
+// GetPullRequest returns the pull requests in prs. It records the numbers that
+// GetPullRequest was called with.
+type searchGitHub struct {
+	issues    []*gogithub.Issue
+	prs       map[int]*gogithub.PullRequest
+	requested []int
+}
+
+func (f *searchGitHub) GetBranches(context.Context, string, string) ([]*gogithub.Branch, error) {
+	return nil, errors.New("GetBranches is not expected in this test")
+}
+
+func (f *searchGitHub) GetPullRequest(_ context.Context, _, _ string, number int) (*gogithub.PullRequest, error) {
+	f.requested = append(f.requested, number)
+	pr, ok := f.prs[number]
+	if !ok {
+		return nil, fmt.Errorf("pull request %d is not expected in this test", number)
+	}
+	return pr, nil
+}
+
+func (f *searchGitHub) GetSearchResults(context.Context, string) (*gogithub.IssuesSearchResult, error) {
+	return &gogithub.IssuesSearchResult{Issues: f.issues}, nil
+}
+
+func TestMigrateMergeRequest_SearchResultWithoutPullRequestURL(t *testing.T) {
+	// The search finds pull request 5, but GitHub sent no URL for it. Its
+	// number is the number of the issue. Its body belongs to another merge
+	// request, so MR !3 goes on and is skipped because it has no commits.
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/commits", []*gogitlab.Commit{}, &calls)
+	p := newGitLabTestProject(t, mux)
+	gh := &searchGitHub{
+		issues: []*gogithub.Issue{{Number: Pointer(5), PullRequestLinks: &gogithub.PullRequestLinks{}}},
+		prs:    map[int]*gogithub.PullRequest{5: {Number: Pointer(5), Body: Pointer("> | **GitLab MR Number** | 4 |")}},
+	}
+	p.m.ghClient = gh
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if len(gh.requested) != 1 || gh.requested[0] != 5 {
+		t.Errorf("requested pull requests = %v, want [5]", gh.requested)
+	}
+	if result.Status != StatusSkipped || result.SkipReason != "merge request has no commits" {
+		t.Errorf("result = %+v, want skipped because the merge request has no commits", result)
+	}
+}
+
+func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
+	// MR !3 has no creation date and its pull request 5 exists with an older
+	// body, so the body is written again.
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
+	p := newGitLabTestProject(t, mux)
+	p.m.ghClient = &searchGitHub{
+		issues: []*gogithub.Issue{{
+			Number:           Pointer(5),
+			PullRequestLinks: &gogithub.PullRequestLinks{URL: Pointer("https://api.github.com/repos/owner/repo/pulls/5")},
+		}},
+		prs: map[int]*gogithub.PullRequest{5: {
+			Number: Pointer(5),
+			State:  Pointer("closed"),
+			Title:  Pointer("some work"),
+			Body:   Pointer("> | **GitLab MR Number** | 3 |"),
+			Draft:  Pointer(false),
+		}},
+	}
+
+	var editedBody string
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("PATCH /repos/owner/repo/pulls/5", func(w http.ResponseWriter, r *http.Request) {
+		var pr gogithub.PullRequest
+		if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+			t.Errorf("decoding the edited pull request: %v", err)
+		}
+		editedBody = pr.GetBody()
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `{"number":5,"state":"closed"}`); err != nil {
+			t.Errorf("writing the edited pull request: %v", err)
+		}
+	})
+	ghMux.HandleFunc("GET /repos/owner/repo/issues/5/comments", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `[]`); err != nil {
+			t.Errorf("writing the pull request comments: %v", err)
+		}
+	})
+	ghSrv := httptest.NewServer(ghMux)
+	t.Cleanup(ghSrv.Close)
+	gh := gogithub.NewClient(nil)
+	baseURL, err := url.Parse(ghSrv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing GitHub test server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+	p.m.gh = gh
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSuccess {
+		t.Errorf("status = %q, want %q", result.Status, StatusSuccess)
+	}
+	if want := "> | **Date Originally Opened** | " + unknownDate + " |"; !strings.Contains(editedBody, want) {
+		t.Errorf("pull request body = %q, want it to contain %q", editedBody, want)
+	}
+}

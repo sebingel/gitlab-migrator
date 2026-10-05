@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -158,6 +159,27 @@ func TestMigrateComments_FailedUpdateIsReportedOnce(t *testing.T) {
 	}
 	if len(cs.created) != 0 {
 		t.Errorf("created comments = %d, want none: the comment exists", len(cs.created))
+	}
+}
+
+func TestMigrateComments_NoteWithoutCreationDate(t *testing.T) {
+	cs := &commentServer{}
+	p := newCommentProject(t, cs)
+	var result MergeRequestResult
+
+	note := gitLabNote(12, "text of note 12")
+	note.CreatedAt = nil
+	p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+		[]*gogitlab.Note{note}, nil, &result)
+
+	if len(cs.created) != 1 {
+		t.Fatalf("created comments = %d, want 1 for note 12", len(cs.created))
+	}
+	if want := "> | **Date Originally Created** | " + unknownDate + " |"; !strings.Contains(cs.created[0], want) {
+		t.Errorf("comment body = %q, want it to contain %q", cs.created[0], want)
+	}
+	if len(result.Comments) != 1 || result.Comments[0].Status != StatusSuccess || !result.Comments[0].CreatedAt.IsZero() {
+		t.Errorf("comment results = %+v, want one success with a zero creation time", result.Comments)
 	}
 }
 
