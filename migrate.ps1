@@ -304,13 +304,19 @@ Write-Host ""
 # Clear the exit code first: when the exe cannot be started (wrong working directory, not built),
 # $LASTEXITCODE stays empty or keeps the value of an earlier command
 $global:LASTEXITCODE = $null
-& .\gitlab-migrator.exe @arguments
+$startError = $null
+try {
+    & .\gitlab-migrator.exe @arguments
+} catch {
+    # PowerShell throws when it cannot start the exe. Catch it, so that only one message is printed.
+    $startError = $_.Exception.Message
+}
 
 # Check exit code
 $exitCode = $LASTEXITCODE
-if ($null -eq $exitCode) {
+if ($startError -or $null -eq $exitCode) {
     # No migration ran and the tool wrote no log files: skip the generic error messages below
-    Write-Host "gitlab-migrator.exe could not be started" -ForegroundColor Red
+    Write-Host "gitlab-migrator.exe could not be started$(if ($startError) { ": $startError" })" -ForegroundColor Red
     exit 1
 }
 # -version prints the version and exits with 0 before any migration: no success message then
