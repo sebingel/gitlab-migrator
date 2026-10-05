@@ -54,7 +54,7 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
   -loop
         continue migrating until canceled
   -max-concurrency int
-        how many projects to migrate in parallel (default 4)
+        how many projects to migrate in parallel (must be at least 1) (default 4)
   -merge-requests-max-age string
         optional maximum age in days of merge requests to migrate
   -migrate-pull-requests
