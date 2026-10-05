@@ -256,13 +256,6 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			return true, nil
 		}
 
-		var errResp GitHubError
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			if errResp, err = parseGitHubError(resp); err != nil {
-				return false, err
-			}
-		}
-
 		requestMethod := "unknown"
 		requestUrl := "unknown"
 
@@ -270,6 +263,22 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			requestMethod = req.Method
 			if req.URL != nil {
 				requestUrl = req.URL.String()
+			}
+		}
+
+		// A 4xx body that is no JSON (for example an HTML page of a proxy) or
+		// that cannot be read gives no message. The status still decides about
+		// the retry, and a response that is not retried reaches go-github, which
+		// builds its error from the status and the body.
+		var errResp GitHubError
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			var parseErr error
+			if errResp, parseErr = parseGitHubError(resp); parseErr != nil {
+				logger.Warn("cannot parse the error body of the response, going on without its message",
+					"method", requestMethod,
+					"url", requestUrl,
+					"status", resp.StatusCode,
+					"error", parseErr)
 			}
 		}
 
@@ -287,8 +296,8 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		secondaryRateLimit := (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
 			secondaryRateLimitPattern.MatchString(errResp.Message)
 		if secondaryRateLimit {
-			// A 403 is retried below anyway. For a 403 the WARN line replaces the
-			// TRACE line below. A 429 keeps its TRACE line.
+			// A 403 is retried here. For a 403 the WARN line replaces the TRACE
+			// line below. A 429 keeps its TRACE line.
 			if resp.StatusCode == http.StatusForbidden {
 				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
 					"message", errResp.Message,
@@ -305,6 +314,13 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			if resp.StatusCode == http.StatusForbidden {
 				return true, nil
 			}
+		}
+
+		// Any other 403 is retried only for a primary rate limit. A 403 for a
+		// missing permission does not go away by waiting, and with RetryMax and
+		// RetryWaitMax a retried request would block its worker for hours.
+		if resp.StatusCode == http.StatusForbidden && !isPrimaryRateLimit(resp.Header) {
+			return false, nil
 		}
 
 		retryableStatuses := []int{
@@ -327,6 +343,17 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 	}
 
 	return retryClient
+}
+
+// isPrimaryRateLimit reports whether the headers of a response mark a primary
+// rate limit: GitHub sends Retry-After, or X-RateLimit-Remaining 0. See
+// https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit
+func isPrimaryRateLimit(header http.Header) bool {
+	if header.Get("Retry-After") != "" {
+		return true
+	}
+	remaining, err := strconv.ParseInt(header.Get("X-RateLimit-Remaining"), 10, 64)
+	return err == nil && remaining == 0
 }
 
 func isTransientNetworkError(err error) bool {
@@ -370,21 +397,23 @@ func isTransientNetworkError(err error) bool {
 
 // parseGitHubError reads the body of resp once and decodes it as a GitHubError.
 // A leading UTF-8 byte order mark is removed, and an empty body gives an empty
-// GitHubError. After a successful read, resp.Body is always replaced with a
-// reader over the read bytes without the byte order mark, also when the body is
-// empty or no JSON, so resp never keeps a closed body. When CheckRetry returns
-// neither a retry nor an error (for example for a 404), the transports above the
-// retry client and go-github get the body. In all other cases retryablehttp
-// drains it.
+// GitHubError. resp.Body is always replaced with a reader over the read bytes
+// without the byte order mark, also when the body is empty, no JSON, or cannot
+// be read to the end (then the reader has the bytes read before the error), so
+// resp never keeps a closed body. When CheckRetry does not retry (for example
+// for a 404), the transports above the retry client and go-github get the body.
+// Otherwise retryablehttp drains it. The returned error wraps the read or
+// decode error.
 func parseGitHubError(resp *http.Response) (GitHubError, error) {
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return GitHubError{}, fmt.Errorf("parsing response body: %+v", err)
-	}
+	respBody, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
 	respBody = bytes.TrimPrefix(respBody, []byte("\xef\xbb\xbf"))
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+	if readErr != nil {
+		return GitHubError{}, fmt.Errorf("reading response body: %w", readErr)
+	}
 
 	var errResp GitHubError
 	if len(respBody) == 0 {
@@ -392,7 +421,7 @@ func parseGitHubError(resp *http.Response) (GitHubError, error) {
 	}
 
 	if err := json.Unmarshal(respBody, &errResp); err != nil {
-		return GitHubError{}, fmt.Errorf("unmarshaling response body: %+v", err)
+		return GitHubError{}, fmt.Errorf("unmarshaling response body: %w", err)
 	}
 
 	return errResp, nil

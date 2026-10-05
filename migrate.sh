@@ -17,17 +17,6 @@ export LOG_LEVEL="TRACE"
 # export GITHUB_TOKEN="github_pat_..."
 # export GITLAB_TOKEN="glpat-..."
 
-# Verify tokens are set
-if [ -z "$GITHUB_TOKEN" ]; then
-    echo "Error: GITHUB_TOKEN environment variable is not set" >&2
-    exit 1
-fi
-
-if [ -z "$GITLAB_TOKEN" ]; then
-    echo "Error: GITLAB_TOKEN environment variable is not set" >&2
-    exit 1
-fi
-
 # ============================================================================
 # Command arguments
 # ============================================================================
@@ -229,8 +218,7 @@ fi
 # ----------------------------------------------------------------------------
 
 # -config: JSON file with settings. Its values override the flags of this script,
-#   except -merge-requests-max-age (the flag wins) and the flags that -pull-requests-only
-#   implies (they stay on).
+#   except the flags that -pull-requests-only implies (they stay on).
 #   Tokens are not allowed in it. They come from the environment only.
 # arguments+=("-config" "migration.json")
 
@@ -246,8 +234,11 @@ fi
 # optional: add only what you need. The block replaces all flags above. Of those, only
 # -log-output, -log-directory and -config still work in prepare mode: add them after the
 # block. -version also exits before prepare mode starts.
-# In prepare mode, the tool does not check that -log-output has "file" for -log-directory.
-# Prepare mode needs no tokens, but this script checks them anyway.
+# As in normal mode, the tool stops with an error when -log-directory is set but -log-output
+# has no "file".
+# Prepare mode needs no tokens: the script skips the token check when the arguments
+# contain -prepare. (A -prepare set only in the -config file is not seen: the script
+# then still checks the tokens.)
 #
 # -prepare: Start prepare mode.
 #   Requires: -prepare-clone-url, -prepare-target-url.
@@ -258,7 +249,7 @@ fi
 #   Without it, prepare mode stops when it finds a file over 100 MB.
 # -prepare-batch-count: Number of push batches. Default (and 0): batches only for repos over
 #   2 GiB, 10 per GiB (at least 10). A value above 0 forces batches, also for small repos.
-#   The tool does not reject negative values (they push one commit at a time): do not use them.
+#   A negative value is an error.
 # The -prepare-* flags have no effect without -prepare.
 # arguments=(
 #     "-prepare"
@@ -267,6 +258,25 @@ fi
 # )
 # arguments+=("-prepare-large-files" "remove")  # or "lfs"
 # arguments+=("-prepare-batch-count" "10")
+
+# Verify tokens are set (prepare mode needs no tokens)
+prepare_mode=false
+for arg in "${arguments[@]}"; do
+    if [[ "$arg" == "-prepare" || "$arg" == "--prepare" ]]; then
+        prepare_mode=true
+    fi
+done
+if [ "$prepare_mode" = false ]; then
+    if [ -z "$GITHUB_TOKEN" ]; then
+        echo "Error: GITHUB_TOKEN environment variable is not set" >&2
+        exit 1
+    fi
+
+    if [ -z "$GITLAB_TOKEN" ]; then
+        echo "Error: GITLAB_TOKEN environment variable is not set" >&2
+        exit 1
+    fi
+fi
 
 # Display configuration
 echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
@@ -296,6 +306,13 @@ echo -e "\033[33mPress Ctrl+C to cancel...\033[0m"
 echo ""
 
 # Run the migration
+# When the binary cannot be started (wrong working directory, not built), no migration runs and the tool
+# writes no log files: print one message and skip the generic error messages below. 127 is the code bash
+# itself uses for a command that is not found.
+if [ ! -f ./gitlab-migrator ] || [ ! -x ./gitlab-migrator ]; then
+    echo -e "\033[31m./gitlab-migrator could not be started\033[0m" >&2
+    exit 127
+fi
 ./gitlab-migrator "${arguments[@]}"
 
 # Check exit code
@@ -317,3 +334,6 @@ else
     echo -e "\033[33mMigration completed with errors (exit code: $exit_code)\033[0m"
     echo -e "\033[33mCheck log files for details\033[0m"
 fi
+
+# Pass on the exit code of the tool, so a caller or scheduler sees a failed migration
+exit $exit_code

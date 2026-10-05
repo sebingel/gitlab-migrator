@@ -75,10 +75,21 @@ func (m *Migrator) newProject(ctx context.Context, slugs []string) (*project, er
 	return p, nil
 }
 
+var pathSeparatorReplacer = strings.NewReplacer("/", "_", "\\", "_")
+
+// sanitizePathSegment replaces the path separators in s, so that s can be part
+// of a single directory name.
+func sanitizePathSegment(s string) string {
+	return pathSeparatorReplacer.Replace(s)
+}
+
 func (p *project) createGitStorage() (storage.Storer, error) {
 	if p.m.cfg.StorageType == "filesystem" {
 		// An empty StorageDir makes MkdirTemp use os.TempDir().
-		tempDir, err := os.MkdirTemp(p.m.cfg.StorageDir, fmt.Sprintf("gitlab-migrator-%s-%s-*", p.gitlabPath[0], p.gitlabPath[1]))
+		// The group path of a subgroup project contains "/", which MkdirTemp
+		// rejects in a pattern.
+		pattern := fmt.Sprintf("gitlab-migrator-%s-%s-*", sanitizePathSegment(p.gitlabPath[0]), sanitizePathSegment(p.gitlabPath[1]))
+		tempDir, err := os.MkdirTemp(p.m.cfg.StorageDir, pattern)
 		if err != nil {
 			return nil, fmt.Errorf("creating storage directory: %w", err)
 		}
@@ -438,6 +449,16 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubD
 		return fmt.Errorf("adding github remote: %w", err)
 	}
 
+	return p.pushToGitHub(ctx, githubUrl, githubDefaultBranch)
+}
+
+// pushToGitHub pushes the branches and tags of p.repo to its remote "github",
+// then sets the default branch of the GitHub repository and, with
+// -trim-branches-on-github, deletes the GitHub branches that GitLab does not
+// have (see updateGithubBranches). githubUrl is the repository URL without
+// credentials, for the log. githubDefaultBranch is the default branch of the
+// GitHub repository before the run, empty when it did not exist yet.
+func (p *project) pushToGitHub(ctx context.Context, githubUrl, githubDefaultBranch string) error {
 	p.log.Debug("determining branches to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 	branches, err := p.repo.Branches()
 	if err != nil {
@@ -480,10 +501,6 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubD
 		}
 	}
 
-	if err := p.updateGithubBranches(ctx, githubUrl, githubDefaultBranch); err != nil {
-		return err
-	}
-
 	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 	tagOpts := &git.PushOptions{
 		RemoteName: "github",
@@ -498,10 +515,11 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubD
 			return formatPushError("pushing tags to github repo", p.pushErrHint(err), err, tagSideband)
 		}
 	}
-	return nil
+
+	return p.updateGithubBranches(ctx, githubUrl, githubDefaultBranch)
 }
 
-// updateGithubBranches is called after the branches are pushed to GitHub. It
+// updateGithubBranches is called after the branches and tags are pushed to GitHub. It
 // makes the GitHub trunk the default branch of the GitHub repository and, with
 // -trim-branches-on-github, deletes the branches on GitHub that are not in the
 // GitLab repository. The default branch comes first: after a trunk rename the
