@@ -186,8 +186,9 @@ type queuedProject struct {
 
 // queueProjects sends every project of the list to the queue as part of the
 // given pass. It stops when ctx is canceled, also while it waits for a free
-// slot: after a cancel the workers stop receiving, so a plain send could
-// block forever.
+// slot. In PerformMigration a plain send would not hang, because each worker
+// takes one more item before it sees the cancel. The send watches ctx anyway,
+// so the sender does not depend on that.
 func queueProjects(ctx context.Context, queue chan<- queuedProject, projects []CSVRow, pass int) {
 	for _, proj := range projects {
 		if err := ctx.Err(); err != nil {

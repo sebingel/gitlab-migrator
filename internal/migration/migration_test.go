@@ -88,9 +88,8 @@ func TestPerformMigration_LoopStartsNextPassAfterPreviousPass(t *testing.T) {
 }
 
 // TestQueueProjects_StopsWhenCanceledWhileTheQueueIsFull cancels the context
-// while the queue is full and no worker is left to receive from it. A send
-// that does not watch the context blocks forever, and Ctrl+C never reaches
-// the cleanup of PerformMigration.
+// while the queue is full and nothing receives from it. queueProjects must
+// return without help from a receiver.
 func TestQueueProjects_StopsWhenCanceledWhileTheQueueIsFull(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
