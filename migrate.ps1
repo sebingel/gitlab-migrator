@@ -279,6 +279,17 @@ if (-not $prepareMode) {
     }
 }
 
+# PowerShell does not pass a $null argument to the exe at all (for example a value read from an
+# environment variable that is not set), so the display leaves it out too. Windows PowerShell 5.1
+# (and pwsh before 7.3, or with $PSNativeCommandArgumentPassing set to "Legacy") does the same with
+# an empty argument. The next argument then becomes the value of the flag, as the tool gets it.
+# The banner and the "Arguments:" list both read the arguments from $shownArguments.
+$shownArguments = @($arguments | Where-Object { $null -ne $_ })
+$argumentPassing = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
+if ($argumentPassing -ne "Standard" -and $argumentPassing -ne "Windows") {
+    $shownArguments = @($shownArguments | Where-Object { [string]$_ -ne "" })
+}
+
 # Display configuration
 Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
@@ -289,9 +300,9 @@ if (-not $prepareMode) {
     Write-Host "GitHub Domain:  $GitHubDomain"
     # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
     # when -projects-csv is passed, with the value that is passed
-    for ($j = 0; $j -lt $arguments.Count - 1; $j++) {
-        if ($arguments[$j] -ceq "-projects-csv" -or $arguments[$j] -ceq "--projects-csv") {
-            Write-Host "Projects CSV:   $($arguments[$j + 1])"
+    for ($j = 0; $j -lt $shownArguments.Count - 1; $j++) {
+        if ($shownArguments[$j] -ceq "-projects-csv" -or $shownArguments[$j] -ceq "--projects-csv") {
+            Write-Host "Projects CSV:   $($shownArguments[$j + 1])"
         }
     }
 }
@@ -312,15 +323,6 @@ function Format-Argument([string]$value) {
         return "'" + ($value -replace "'", "''") + "'"
     }
     return $value
-}
-# PowerShell does not pass a $null argument to the exe at all (for example a value read from an
-# environment variable that is not set), so the display leaves it out too. Windows PowerShell 5.1
-# (and pwsh before 7.3, or with $PSNativeCommandArgumentPassing set to "Legacy") does the same with
-# an empty argument. The next argument then becomes the value of the flag, as the tool gets it.
-$shownArguments = @($arguments | Where-Object { $null -ne $_ })
-$argumentPassing = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
-if ($argumentPassing -ne "Standard" -and $argumentPassing -ne "Windows") {
-    $shownArguments = @($shownArguments | Where-Object { [string]$_ -ne "" })
 }
 Write-Host "Arguments:"
 $i = 0
