@@ -301,13 +301,14 @@ function Format-Argument([string]$value) {
     }
     return $value
 }
-# Windows PowerShell 5.1 (and pwsh before 7.3, or with $PSNativeCommandArgumentPassing set to
-# "Legacy") does not pass an empty argument to the exe at all, so the display leaves it out too.
-# The next argument then becomes the value of the flag, as the tool gets it.
-$shownArguments = $arguments
+# PowerShell does not pass a $null argument to the exe at all (for example a value read from an
+# environment variable that is not set), so the display leaves it out too. Windows PowerShell 5.1
+# (and pwsh before 7.3, or with $PSNativeCommandArgumentPassing set to "Legacy") does the same with
+# an empty argument. The next argument then becomes the value of the flag, as the tool gets it.
+$shownArguments = @($arguments | Where-Object { $null -ne $_ })
 $argumentPassing = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
 if ($argumentPassing -ne "Standard" -and $argumentPassing -ne "Windows") {
-    $shownArguments = @($arguments | Where-Object { [string]$_ -ne "" })
+    $shownArguments = @($shownArguments | Where-Object { [string]$_ -ne "" })
 }
 Write-Host "Arguments:"
 $i = 0
