@@ -195,8 +195,8 @@ arguments+=("-state-dir" "./state")
 # arguments+=("-max-concurrency" "8")
 
 # -loop: After the last project, start again with the first one, until you press Ctrl+C.
-#   A new pass starts only when every project of the last pass is done, so a project
-#   is never migrated twice at the same time.
+#   A new pass starts only when every project of the last pass is done, so passes do
+#   not overlap.
 #   No effect with: -report.
 # arguments+=("-loop")
 

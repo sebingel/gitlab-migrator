@@ -162,7 +162,7 @@ As a bonus, this tool can transparently rename the trunk branch on your GitHub r
 
 By default, 4 workers will be spawned to migrate up to 4 projects in parallel. You can increase or decrease this with the `-max-concurrency` argument. Note that due to GitHub API rate-limiting, you may not experience any significant speed-up. See [GitHub API docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) for details.
 
-Specify `-loop` to continue migrating projects until canceled. This is useful for daemonizing the migration tool, or automatically restarting when migrating a large number of projects (or a small number of very large projects). A new pass starts only when every project of the previous pass is done, so a project is never migrated twice at the same time.
+Specify `-loop` to continue migrating projects until canceled. This is useful for daemonizing the migration tool, or automatically restarting when migrating a large number of projects (or a small number of very large projects). A new pass starts only when every project of the previous pass is done, so passes do not overlap.
 
 With `-loop` and `-detailed-report`, the detailed report is written each time a pass over all projects is complete, and once more when the loop ends. Each write replaces the report files of the session in `reports/` with all results collected so far, so the results of complete passes are on disk while the tool runs.
 
