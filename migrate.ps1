@@ -255,6 +255,12 @@ $arguments += "-log-output", "console,file"
 # -log-directory: Directory for log files (default: the logs folder next to the executable).
 #   Set it with the log directory variable at the top. It is added only if it is not empty.
 #   Requires: -log-output with "file".
+# Windows PowerShell 5.1 passes a value with a space and a trailing backslash wrongly
+# ("C:\My Logs\" arrives as C:\My Logs" with a quote), so the trailing backslash is removed.
+# A path without a space (also a drive root such as "C:\") is passed as it is.
+if ($LogDirectory -match '\s') {
+    $LogDirectory = $LogDirectory.TrimEnd('\')
+}
 if ($LogDirectory) {
     $arguments += "-log-directory", $LogDirectory
 }
