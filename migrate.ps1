@@ -283,17 +283,34 @@ Write-Host "Projects CSV:   $ProjectsCsv"
 Write-Host "Log Directory:  $(if ($LogDirectory) { $LogDirectory } else { '(default: ./logs)' })"
 Write-Host "Log Level:      $($env:LOG_LEVEL)"
 Write-Host ""
-# Print each flag with its value on one line, taken from the real arguments
-Write-Host "Arguments:"
-$line = ""
-foreach ($arg in $arguments) {
-    if ($arg -cmatch "^-[a-z]" -and $line) {
-        Write-Host "  $line"
-        $line = ""
+# Print each flag with its value on one line, taken from the real arguments.
+# A flag of this list takes no value. Any other flag takes the next argument as its value,
+# also when that value starts with a dash. Keep the list in step with the flags above.
+$noValueFlags = @(
+    "-delete-existing-repos", "-unarchive-archived-repos", "-no-force", "-trim-branches-on-github",
+    "-rename-master-to-main", "-migrate-pull-requests", "-pull-requests-only", "-skip-open-merge-requests",
+    "-skip-invalid-merge-requests", "-loop", "-report", "-detailed-report", "-version", "-prepare"
+)
+# An argument that is empty or has a space or a quote in it is printed in single quotes
+function Format-Argument([string]$value) {
+    if ($value -eq "" -or $value -match '[\s''"]') {
+        return "'" + ($value -replace "'", "''") + "'"
     }
-    $line = "$line $arg".Trim()
+    return $value
 }
-if ($line) {
+Write-Host "Arguments:"
+$i = 0
+while ($i -lt $arguments.Count) {
+    $arg = [string]$arguments[$i]
+    $line = Format-Argument $arg
+    $i++
+    # -flag and --flag are the same flag, and -flag=value already holds its value
+    $name = "-" + ($arg -replace "^--?", "")
+    if ($arg -match "^-." -and $arg -ne "--" -and $arg -notmatch "=" -and
+        $noValueFlags -cnotcontains $name -and $i -lt $arguments.Count) {
+        $line += " " + (Format-Argument ([string]$arguments[$i]))
+        $i++
+    }
     Write-Host "  $line"
 }
 Write-Host ""

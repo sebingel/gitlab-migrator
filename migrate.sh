@@ -289,19 +289,37 @@ echo "Projects CSV:   $PROJECTS_CSV"
 echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
 echo "Log Level:      $LOG_LEVEL"
 echo ""
-# Print each flag with its value on one line, taken from the real arguments
-echo "Arguments:"
-line=""
-for arg in "${arguments[@]}"; do
-    if [[ "$arg" == -[[:lower:]]* && -n "$line" ]]; then
-        echo "  $line"
-        line=""
+# Print each flag with its value on one line, taken from the real arguments.
+# A flag of this list takes no value. Any other flag takes the next argument as its value,
+# also when that value starts with a dash. Keep the list in step with the flags above.
+no_value_flags=" -delete-existing-repos -unarchive-archived-repos -no-force -trim-branches-on-github \
+-rename-master-to-main -migrate-pull-requests -pull-requests-only -skip-open-merge-requests \
+-skip-invalid-merge-requests -loop -report -detailed-report -version -prepare "
+# An argument that is empty or has a space or a quote in it is printed in single quotes
+needs_quotes="[[:space:]'\"]"
+show_arg() {
+    if [[ -z "$1" || "$1" =~ $needs_quotes ]]; then
+        printf "'%s'" "${1//\'/\'\\\'\'}"
+    else
+        printf '%s' "$1"
     fi
-    line="${line:+$line }$arg"
-done
-if [ -n "$line" ]; then
+}
+echo "Arguments:"
+i=0
+while [ "$i" -lt "${#arguments[@]}" ]; do
+    arg="${arguments[$i]}"
+    line=$(show_arg "$arg")
+    i=$((i + 1))
+    # -flag and --flag are the same flag, and -flag=value already holds its value
+    name="${arg#-}"
+    name="-${name#-}"
+    if [[ "$arg" == -?* && "$arg" != "--" && "$arg" != *=* && "$no_value_flags" != *" $name "* \
+          && "$i" -lt "${#arguments[@]}" ]]; then
+        line="$line $(show_arg "${arguments[$i]}")"
+        i=$((i + 1))
+    fi
     echo "  $line"
-fi
+done
 echo ""
 echo -e "\033[33mPress Ctrl+C to cancel...\033[0m"
 echo ""
