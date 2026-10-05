@@ -275,22 +275,28 @@ func TestRetryClient_SecondaryRateLimitWithRetryAfter(t *testing.T) {
 // after X-Ratelimit-Reset. With the default log level INFO one WARN line says
 // why the worker waits and for how long (issue #88).
 func TestRetryClient_SecondaryRateLimit429WithRateLimitResetAtInfo(t *testing.T) {
-	reset := strconv.FormatInt(time.Now().Add(2*time.Minute).Unix(), 10)
+	resetEpoch := time.Now().Unix() + 120
+	reset := strconv.FormatInt(resetEpoch, 10)
 	srv, calls := sequenceServer(t,
 		respond(http.StatusTooManyRequests, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {reset}}, secondaryRateLimitBody),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarnessAtLevel(t, fixedRand(0.5), hclog.Info)
 
+	before := time.Now()
 	h.expectOK(t, srv.URL+"/repos/o/r/issues")
+	after := time.Now()
 
 	assertCalls(t, calls, 2)
 	if len(h.waits) != 1 {
 		t.Fatalf("got waits %v, want one", h.waits)
 	}
-	// The reset time has whole seconds, so the wait is 149 s or 150 s.
-	if wait := h.waits[0]; wait < 149*time.Second || wait > 150*time.Second {
-		t.Errorf("got wait %v, want 2m29s or 2m30s", wait)
+	// Backoff waits until 30 s after the reset time, rounded to seconds. It runs
+	// between before and after, so its wait lies between these two bounds.
+	recovery := time.Unix(resetEpoch+30, 0)
+	lo, hi := recovery.Sub(after).Round(time.Second), recovery.Sub(before).Round(time.Second)
+	if wait := h.waits[0]; wait < lo || wait > hi {
+		t.Errorf("got wait %v, want between %v and %v", wait, lo, hi)
 	}
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=` + h.waits[0].String() + ` wait_reason="X-Ratelimit-Reset header" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
