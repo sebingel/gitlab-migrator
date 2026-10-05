@@ -104,7 +104,17 @@ func TestQueueProjects_StopsWhenCanceledWhileTheQueueIsFull(t *testing.T) {
 	}()
 
 	// The first project fills the queue; the send of the second one blocks.
-	<-time.After(50 * time.Millisecond)
+	// Wait until the queue is full, so that cancel cannot come before the
+	// first send and end queueProjects at its ctx.Err check instead.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(queue) < cap(queue) {
+		if time.Now().After(deadline) {
+			t.Fatal("queueProjects did not fill the queue")
+		}
+		<-time.After(time.Millisecond)
+	}
+	// Give the goroutine time to reach the blocked send of the second project.
+	<-time.After(20 * time.Millisecond)
 	cancel()
 
 	select {
