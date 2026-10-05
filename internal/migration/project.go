@@ -284,7 +284,10 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 	}
 
 	if p.m.cfg.EnablePullRequests {
-		mrResults := p.migrateMergeRequests(ctx)
+		mrResults, err := p.migrateMergeRequests(ctx)
+		if err != nil {
+			return p.result, err
+		}
 		p.result.MergeRequests = mrResults
 
 		for _, mr := range mrResults {
@@ -519,7 +522,10 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 	return nil
 }
 
-func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult {
+// migrateMergeRequests migrates the merge requests of the project. It returns
+// an error only when the merge requests cannot be listed: then none of them
+// were migrated. The failures of single merge requests are in the results.
+func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResult, error) {
 	var mergeRequests []*gogitlab.BasicMergeRequest
 
 	opts := &gogitlab.ListProjectMergeRequestsOptions{
@@ -536,8 +542,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 	for {
 		result, resp, err := p.m.gl.MergeRequests.ListProjectMergeRequests(p.project.ID, opts, gogitlab.WithContext(ctx))
 		if err != nil {
-			p.log.Error("retrieving gitlab merge requests", "error", err)
-			return []MergeRequestResult{}
+			return nil, fmt.Errorf("retrieving gitlab merge requests: %w", err)
 		}
 
 		mergeRequests = append(mergeRequests, result...)
@@ -636,7 +641,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 
 	p.log.Info("migrated merge requests from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "successful", successCount, "failed", failureCount, "skipped", skippedCount)
 
-	return results
+	return results, nil
 }
 
 func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (MergeRequestResult, error) {

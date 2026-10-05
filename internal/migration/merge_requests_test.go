@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,13 +240,46 @@ func TestMigrateMergeRequests_StopsWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	wantCanceledAfterStart(t, started, cancel, func() error {
-		// migrateMergeRequests only logs a failed list, so what counts here
-		// is that it returns at all.
-		if results := p.migrateMergeRequests(ctx); len(results) != 0 {
+		results, err := p.migrateMergeRequests(ctx)
+		if len(results) != 0 {
 			return fmt.Errorf("results = %+v, want none", results)
 		}
-		return ctx.Err()
+		return err
 	})
+}
+
+func TestMigrate_FailsWhenMergeRequestListFails(t *testing.T) {
+	// The project must not be reported as migrated when its merge requests
+	// could not be listed, because then none of them were migrated.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/1/merge_requests", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"403 Forbidden"}`, http.StatusForbidden)
+	})
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.EnablePullRequests = true
+	p.m.cfg.PullRequestsOnly = true
+
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("GET /repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `{"name":"repo"}`); err != nil {
+			t.Errorf("writing the GitHub repository: %v", err)
+		}
+	})
+	ghSrv := httptest.NewServer(ghMux)
+	t.Cleanup(ghSrv.Close)
+	gh := gogithub.NewClient(nil)
+	baseURL, err := url.Parse(ghSrv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing GitHub test server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+	p.m.gh = gh
+
+	_, err = p.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "retrieving gitlab merge requests") {
+		t.Fatalf("migrate error = %v, want the failed merge request list", err)
+	}
 }
 
 func TestReportProject_StopsWhenContextIsCanceled(t *testing.T) {
@@ -368,7 +403,11 @@ func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 		}
 		p.state = state
 
-		return p.migrateMergeRequests(context.Background()), gh.searches
+		results, err := p.migrateMergeRequests(context.Background())
+		if err != nil {
+			t.Fatalf("migrateMergeRequests: %v", err)
+		}
+		return results, gh.searches
 	}
 
 	// wantProcessed checks that MR !3 went through migrateMergeRequest. The
