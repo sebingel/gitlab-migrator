@@ -280,25 +280,7 @@ if [ "$prepare_mode" = false ]; then
 fi
 
 # Display configuration
-echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
-echo -e "\033[36m=====================================\033[0m"
-# The prepare mode block does not pass these values, so they are not shown then
-if [ "$prepare_mode" = false ]; then
-    echo "GitHub User:    $GITHUB_USER"
-    echo "GitLab Domain:  $GITLAB_DOMAIN"
-    echo "GitHub Domain:  $GITHUB_DOMAIN"
-    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
-    # when -projects-csv is passed, with the value that is passed
-    for ((j = 0; j < ${#arguments[@]} - 1; j++)); do
-        if [[ "${arguments[$j]}" == "-projects-csv" || "${arguments[$j]}" == "--projects-csv" ]]; then
-            echo "Projects CSV:   ${arguments[$((j + 1))]}"
-        fi
-    done
-fi
-echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
-echo "Log Level:      $LOG_LEVEL"
-echo ""
-# Print each flag with its value on one line, taken from the real arguments.
+# Pair each flag with its value, taken from the real arguments, for the "Arguments:" list.
 # A flag of this list takes no value. Any other flag takes the next argument as its value,
 # also when that value starts with a dash. Keep the list in step with the flags above.
 no_value_flags=" -delete-existing-repos -unarchive-archived-repos -no-force -trim-branches-on-github \
@@ -316,7 +298,10 @@ show_arg() {
         printf '%s' "$1"
     fi
 }
-echo "Arguments:"
+# The same pairing finds the value of -projects-csv for the banner (the last one counts, as in the tool)
+argument_lines=()
+projects_csv_passed=false
+projects_csv_value=""
 i=0
 while [ "$i" -lt "${#arguments[@]}" ]; do
     arg="${arguments[$i]}"
@@ -325,11 +310,40 @@ while [ "$i" -lt "${#arguments[@]}" ]; do
     # -flag and --flag are the same flag, and -flag=value already holds its value
     name="${arg#-}"
     name="-${name#-}"
+    if [[ "$arg" == -?* && "$arg" != "--" && "$name" == "-projects-csv="* ]]; then
+        projects_csv_passed=true
+        projects_csv_value="${name#-projects-csv=}"
+    fi
     if [[ "$arg" == -?* && "$arg" != "--" && "$arg" != *=* && "$no_value_flags" != *" $name "* \
           && "$i" -lt "${#arguments[@]}" ]]; then
+        if [ "$name" = "-projects-csv" ]; then
+            projects_csv_passed=true
+            projects_csv_value="${arguments[$i]}"
+        fi
         line="$line $(show_arg "${arguments[$i]}")"
         i=$((i + 1))
     fi
+    argument_lines+=("$line")
+done
+
+echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
+echo -e "\033[36m=====================================\033[0m"
+# The prepare mode block does not pass these values, so they are not shown then
+if [ "$prepare_mode" = false ]; then
+    echo "GitHub User:    $GITHUB_USER"
+    echo "GitLab Domain:  $GITLAB_DOMAIN"
+    echo "GitHub Domain:  $GITHUB_DOMAIN"
+    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
+    # when -projects-csv is passed, with the value that is passed
+    if [ "$projects_csv_passed" = true ]; then
+        echo "Projects CSV:   $projects_csv_value"
+    fi
+fi
+echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
+echo "Log Level:      $LOG_LEVEL"
+echo ""
+echo "Arguments:"
+for line in "${argument_lines[@]}"; do
     echo "  $line"
 done
 echo ""

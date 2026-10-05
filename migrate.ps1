@@ -291,25 +291,7 @@ if ($argumentPassing -ne "Standard" -and $argumentPassing -ne "Windows") {
 }
 
 # Display configuration
-Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
-Write-Host "=====================================" -ForegroundColor Cyan
-# The prepare mode block does not pass these values, so they are not shown then
-if (-not $prepareMode) {
-    Write-Host "GitHub User:    $GitHubUser"
-    Write-Host "GitLab Domain:  $GitLabDomain"
-    Write-Host "GitHub Domain:  $GitHubDomain"
-    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
-    # when -projects-csv is passed, with the value that is passed
-    for ($j = 0; $j -lt $shownArguments.Count - 1; $j++) {
-        if ($shownArguments[$j] -ceq "-projects-csv" -or $shownArguments[$j] -ceq "--projects-csv") {
-            Write-Host "Projects CSV:   $($shownArguments[$j + 1])"
-        }
-    }
-}
-Write-Host "Log Directory:  $(if ($LogDirectory) { $LogDirectory } else { '(default: ./logs)' })"
-Write-Host "Log Level:      $($env:LOG_LEVEL)"
-Write-Host ""
-# Print each flag with its value on one line, taken from the real arguments.
+# Pair each flag with its value, taken from the real arguments, for the "Arguments:" list.
 # A flag of this list takes no value. Any other flag takes the next argument as its value,
 # also when that value starts with a dash. Keep the list in step with the flags above.
 $noValueFlags = @(
@@ -324,7 +306,10 @@ function Format-Argument([string]$value) {
     }
     return $value
 }
-Write-Host "Arguments:"
+# The same pairing finds the value of -projects-csv for the banner (the last one counts, as in the tool)
+$argumentLines = @()
+$projectsCsvPassed = $false
+$projectsCsvValue = ""
 $i = 0
 while ($i -lt $shownArguments.Count) {
     $arg = [string]$shownArguments[$i]
@@ -332,11 +317,40 @@ while ($i -lt $shownArguments.Count) {
     $i++
     # -flag and --flag are the same flag, and -flag=value already holds its value
     $name = "-" + ($arg -replace "^--?", "")
+    if ($arg -match "^-." -and $arg -ne "--" -and $name.StartsWith("-projects-csv=", [StringComparison]::Ordinal)) {
+        $projectsCsvPassed = $true
+        $projectsCsvValue = $name.Substring("-projects-csv=".Length)
+    }
     if ($arg -match "^-." -and $arg -ne "--" -and $arg -notmatch "=" -and
         $noValueFlags -cnotcontains $name -and $i -lt $shownArguments.Count) {
+        if ($name -ceq "-projects-csv") {
+            $projectsCsvPassed = $true
+            $projectsCsvValue = [string]$shownArguments[$i]
+        }
         $line += " " + (Format-Argument ([string]$shownArguments[$i]))
         $i++
     }
+    $argumentLines += $line
+}
+
+Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
+Write-Host "=====================================" -ForegroundColor Cyan
+# The prepare mode block does not pass these values, so they are not shown then
+if (-not $prepareMode) {
+    Write-Host "GitHub User:    $GitHubUser"
+    Write-Host "GitLab Domain:  $GitLabDomain"
+    Write-Host "GitHub Domain:  $GitHubDomain"
+    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
+    # when -projects-csv is passed, with the value that is passed
+    if ($projectsCsvPassed) {
+        Write-Host "Projects CSV:   $projectsCsvValue"
+    }
+}
+Write-Host "Log Directory:  $(if ($LogDirectory) { $LogDirectory } else { '(default: ./logs)' })"
+Write-Host "Log Level:      $($env:LOG_LEVEL)"
+Write-Host ""
+Write-Host "Arguments:"
+foreach ($line in $argumentLines) {
     Write-Host "  $line"
 }
 Write-Host ""
