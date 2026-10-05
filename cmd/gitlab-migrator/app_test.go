@@ -722,10 +722,11 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	if len(h.waits) != 2 {
 		t.Fatalf("got waits %v, want 2 waits", h.waits)
 	}
-	// Backoff waits until 30 s after the reset time, rounded to seconds. It runs
-	// between before and after, so its wait lies between these two bounds.
+	// Backoff waits until 30 s after the reset time, rounded up to seconds. It
+	// runs between before and after, and it rounds up by less than one second, so
+	// its wait lies between these two bounds.
 	recovery := time.Unix(resetEpoch+30, 0)
-	lo, hi := recovery.Sub(after).Round(time.Second), recovery.Sub(before).Round(time.Second)
+	lo, hi := recovery.Sub(after), recovery.Sub(before)+time.Second
 	if h.waits[0] < lo || h.waits[0] > hi {
 		t.Errorf("wait 0: got %v, want between %v and %v", h.waits[0], lo, hi)
 	}
