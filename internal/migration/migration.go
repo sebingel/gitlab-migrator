@@ -137,29 +137,20 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 		}()
 	}
 
-	queueProjects := func(pass int) {
-		for _, proj := range projects {
-			if err := ctx.Err(); err != nil {
-				break
-			}
-			queue <- queuedProject{slugs: proj, pass: pass}
-		}
-	}
-
 	if m.cfg.Loop {
 		m.logger.Info("looping migration until canceled")
 		for pass := 1; ; pass++ {
 			if err := ctx.Err(); err != nil {
 				break
 			}
-			queueProjects(pass)
+			queueProjects(ctx, queue, projects, pass)
 			select {
 			case <-passDone:
 			case <-ctx.Done():
 			}
 		}
 	} else {
-		queueProjects(1)
+		queueProjects(ctx, queue, projects, 1)
 	}
 	// Workers that wait for the next project stop when the queue is closed.
 	close(queue)
@@ -191,6 +182,23 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 type queuedProject struct {
 	slugs CSVRow
 	pass  int
+}
+
+// queueProjects sends every project of the list to the queue as part of the
+// given pass. It stops when ctx is canceled, also while it waits for a free
+// slot: after a cancel the workers stop receiving, so a plain send could
+// block forever.
+func queueProjects(ctx context.Context, queue chan<- queuedProject, projects []CSVRow, pass int) {
+	for _, proj := range projects {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		select {
+		case queue <- queuedProject{slugs: proj, pass: pass}:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // passResult is the result of a queuedProject.

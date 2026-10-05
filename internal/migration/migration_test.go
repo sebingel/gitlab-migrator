@@ -87,6 +87,34 @@ func TestPerformMigration_LoopStartsNextPassAfterPreviousPass(t *testing.T) {
 	}
 }
 
+// TestQueueProjects_StopsWhenCanceledWhileTheQueueIsFull cancels the context
+// while the queue is full and no worker is left to receive from it. A send
+// that does not watch the context blocks forever, and Ctrl+C never reaches
+// the cleanup of PerformMigration.
+func TestQueueProjects_StopsWhenCanceledWhileTheQueueIsFull(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	queue := make(chan queuedProject, 1)
+	projects := []CSVRow{{"group/a", "owner/a"}, {"group/b", "owner/b"}}
+
+	done := make(chan struct{})
+	go func() {
+		queueProjects(ctx, queue, projects, 1)
+		close(done)
+	}()
+
+	// The first project fills the queue; the send of the second one blocks.
+	<-time.After(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queueProjects did not return after the context was canceled")
+	}
+}
+
 func TestCollectResults_CallsOnPassDoneWhenAPassIsComplete(t *testing.T) {
 	collector := NewResultCollector()
 	results := make(chan passResult)
