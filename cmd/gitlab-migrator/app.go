@@ -329,6 +329,20 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			return false, nil
 		}
 
+		// GitHub can process a request and still answer with a 5xx, for example
+		// create a pull request or a comment and then time out. A retry of a POST
+		// or PATCH would then create a duplicate or apply the change twice, so these
+		// methods are not retried after a 5xx. The caller gets the response.
+		// Rate limits (403 and 429) are no 5xx, so they are still retried for all
+		// methods: GitHub did not process those requests.
+		if resp.StatusCode >= 500 && isNonIdempotentMethod(requestMethod) {
+			logger.Warn("server error for a non-idempotent request - will not retry, because GitHub may have processed it already and a retry could create a duplicate",
+				"method", requestMethod,
+				"url", requestUrl,
+				"status", resp.StatusCode)
+			return false, nil
+		}
+
 		retryableStatuses := []int{
 			http.StatusTooManyRequests,
 			http.StatusForbidden,
@@ -349,6 +363,16 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 	}
 
 	return retryClient
+}
+
+// isNonIdempotentMethod reports whether a request with this method can change
+// the state on the server again when it is sent twice. POST creates a new item
+// each time, and HTTP does not define PATCH as idempotent (RFC 5789). GET,
+// HEAD, PUT and DELETE are idempotent (RFC 9110, section 9.2.2). A method that
+// is not known ("unknown" when the response has no request) counts as
+// idempotent, so it is retried as before.
+func isNonIdempotentMethod(method string) bool {
+	return method == http.MethodPost || method == http.MethodPatch
 }
 
 // isPrimaryRateLimit reports whether the headers of a response mark a primary

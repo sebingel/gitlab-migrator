@@ -525,6 +525,103 @@ func TestRetryClient_ServerErrors(t *testing.T) {
 	})
 }
 
+// sendWithBody sends a request with the given method and a JSON body through the
+// retry client and returns the response.
+func (h *retryHarness) sendWithBody(t *testing.T, method, target string) *http.Response {
+	t.Helper()
+	req, err := retryablehttp.NewRequest(method, target, strings.NewReader(`{"title":"t"}`))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return resp
+}
+
+// GitHub can create a pull request or a comment and still answer with a 5xx. A
+// retry of the POST or PATCH would then create a duplicate, so CheckRetry does
+// not retry these methods after a 5xx. The caller gets the response with its
+// status and body, and a WARN line says why it was not retried.
+func TestRetryClient_ServerErrorsNonIdempotentNotRetried(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		for _, status := range []int{
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		} {
+			t.Run(fmt.Sprintf("%s %d", method, status), func(t *testing.T) {
+				const body = "<html>error</html>"
+				srv, calls := sequenceServer(t,
+					respond(status, nil, body),
+				)
+				h := newRetryHarness(t, rand.Float64)
+
+				resp := h.sendWithBody(t, method, srv.URL+"/repos/o/r/pulls")
+				if got := readBody(t, resp); got != body {
+					t.Errorf("got body %q, want %q", got, body)
+				}
+				if resp.StatusCode != status {
+					t.Errorf("got status %d, want %d", resp.StatusCode, status)
+				}
+
+				assertCalls(t, calls, 1)
+				assertWaits(t, h.waits, nil)
+				assertLines(t, h.logLines(srv.URL), []string{
+					fmt.Sprintf(`[WARN]  server error for a non-idempotent request - will not retry, because GitHub may have processed it already and a retry could create a duplicate: method=%s url=SERVER/repos/o/r/pulls status=%d`, method, status),
+				})
+			})
+		}
+	}
+}
+
+// GitHub did not process a request that hit a rate limit, so POST and PATCH are
+// still retried after a 403 or 429 with rate limit signals.
+func TestRetryClient_RateLimitsNonIdempotentRetried(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusForbidden, nil, secondaryRateLimitBody),
+				respond(http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+				respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, fixedRand(0))
+
+			resp := h.sendWithBody(t, method, srv.URL+"/repos/o/r/pulls")
+			if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "ok" {
+				t.Fatalf("got status %d with body %q, want 200 with ok", resp.StatusCode, got)
+			}
+
+			assertCalls(t, calls, 4)
+			assertWaits(t, h.waits, []time.Duration{120 * time.Second, 7 * time.Second, 60 * time.Second})
+		})
+	}
+}
+
+// GET, PUT and DELETE are idempotent, so they are still retried after a 5xx.
+func TestRetryClient_ServerErrorsIdempotentRetried(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, rand.Float64)
+
+			resp := h.sendWithBody(t, method, srv.URL+"/repos/o/r/topics")
+			if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "ok" {
+				t.Fatalf("got status %d with body %q, want 200 with ok", resp.StatusCode, got)
+			}
+
+			assertCalls(t, calls, 2)
+			assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+		})
+	}
+}
+
 // 408 and 424 are the other 4xx statuses in retryableStatuses. CheckRetry parses
 // their bodies, and they get the default backoff.
 func TestRetryClient_RequestTimeoutAndFailedDependency(t *testing.T) {
