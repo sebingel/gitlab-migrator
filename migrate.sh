@@ -310,7 +310,7 @@ echo ""
 # When the binary cannot be started (wrong working directory, not built), no migration runs and the tool
 # writes no log files: print one message and skip the generic error messages below. 127 is the code bash
 # itself uses for a command that is not found.
-if [ ! -x ./gitlab-migrator ]; then
+if [ ! -f ./gitlab-migrator ] || [ ! -x ./gitlab-migrator ]; then
     echo -e "\033[31m./gitlab-migrator could not be started\033[0m" >&2
     exit 127
 fi
