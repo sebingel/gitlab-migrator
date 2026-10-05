@@ -167,7 +167,7 @@ func main() {
 	flag.StringVar(&cfg.StorageDir, "storage-dir", "", "directory for filesystem storage (only used when -storage-type=filesystem, defaults to temp directory)")
 	flag.StringVar(&cfg.StateDir, "state-dir", "", "directory for migration state files enabling resumption after interruption (opt-in)")
 
-	flag.IntVar(&cfg.MaxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
+	flag.IntVar(&cfg.MaxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel (must be at least 1)")
 	flag.IntVar(&cfg.PushBatchSize, "push-batch-size", math.MaxInt, "number of branches to push per batch (default: unlimited, use smaller values like 50-100 for large repos)")
 
 	flag.BoolVar(&cfg.PrepareMode, "prepare", false, "prepare mode: clone, clean large files, push to new remote (unattended)")

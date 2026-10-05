@@ -190,7 +190,7 @@ arguments+=("-state-dir" "./state")
 # ----------------------------------------------------------------------------
 
 # -max-concurrency: Number of projects migrated at the same time (default: 4).
-#   Use 1 or more. The tool does not check it, and 0 or less makes it hang or crash.
+#   Use 1 or more. The tool rejects 0 or less with an error before it starts, also with -report.
 #   No effect with: -report.
 # arguments+=("-max-concurrency" "8")
 

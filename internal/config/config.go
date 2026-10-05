@@ -149,6 +149,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("repo-visibility must be one of 'private', 'internal', or 'public'")
 	}
 
+	// With 0 no worker starts and the migration never ends; a negative value
+	// panics when the worker channel is made.
+	if c.MaxConcurrency < 1 {
+		return fmt.Errorf("-max-concurrency must be at least 1, got %d", c.MaxConcurrency)
+	}
+
 	if c.PushBatchSize <= 0 {
 		return fmt.Errorf("push-batch-size must be greater than 0")
 	}
