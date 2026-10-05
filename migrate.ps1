@@ -309,8 +309,9 @@ $global:LASTEXITCODE = $null
 # Check exit code
 $exitCode = $LASTEXITCODE
 if ($null -eq $exitCode) {
+    # No migration ran and the tool wrote no log files: skip the generic error messages below
     Write-Host "gitlab-migrator.exe could not be started" -ForegroundColor Red
-    $exitCode = 1
+    exit 1
 }
 # -version prints the version and exits with 0 before any migration: no success message then
 $showVersion = ($arguments -ccontains "-version") -or ($arguments -ccontains "--version")
