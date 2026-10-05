@@ -245,7 +245,8 @@ if ($LogDirectory) {
 # optional: add only what you need. The block replaces all flags above. Of those, only
 # -log-output, -log-directory and -config still work in prepare mode: add them after the
 # block. -version also exits before prepare mode starts.
-# In prepare mode, the tool does not check that -log-output has "file" for -log-directory.
+# As in normal mode, the tool stops with an error when -log-directory is set but -log-output
+# has no "file".
 # Prepare mode needs no tokens, but this script checks them anyway.
 #
 # -prepare: Start prepare mode.
@@ -257,7 +258,7 @@ if ($LogDirectory) {
 #   Without it, prepare mode stops when it finds a file over 100 MB.
 # -prepare-batch-count: Number of push batches. Default (and 0): batches only for repos over
 #   2 GiB, 10 per GiB (at least 10). A value above 0 forces batches, also for small repos.
-#   The tool does not reject negative values (they push one commit at a time): do not use them.
+#   A negative value is an error.
 # The -prepare-* flags have no effect without -prepare.
 # $arguments = @(
 #     "-prepare",
