@@ -1109,34 +1109,51 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	} else {
 		p.log.Info("migrating merge request comments from GitLab to GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "count", len(comments))
 
-		for _, comment := range comments {
-			if comment == nil || comment.System {
-				continue
-			}
+		p.migrateComments(ctx, pullRequest, comments, prComments, &result)
+	}
 
-			if comment.Author.Username == "" {
-				p.log.Warn("skipping comment with unknown author", "comment_id", comment.ID)
-				continue
-			}
+	if result.FailedComments > 0 {
+		result.Status = StatusPartial
+	} else {
+		result.Status = StatusSuccess
+	}
 
-			commentResult := CommentResult{
-				GitLabNoteID:   comment.ID,
-				AuthorUsername: comment.Author.Username,
-				CreatedAt:      *comment.CreatedAt,
-			}
+	return result, nil
+}
 
-			commentAuthor, err := p.m.glClient.GetUser(ctx, comment.Author.Username)
-			if err != nil {
-				commentResult.Status = StatusFailed
-				commentResult.Error = fmt.Sprintf("retrieving gitlab user: %v", err)
-				result.Comments = append(result.Comments, commentResult)
-				result.FailedComments++
-				p.log.Error("retrieving gitlab user for comment", "comment_id", comment.ID, "error", err)
-				continue
-			}
-			githubCommentAuthorName := githubMention(commentAuthor, comment.Author.Name)
+// migrateComments writes the GitLab notes of a merge request as comments of its
+// pull request. prComments are the comments the pull request has already. A
+// note whose comment exists is updated when its text changed, any other note
+// gets a new comment. Every note adds exactly one entry to result.Comments.
+func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.PullRequest, comments []*gogitlab.Note, prComments []*gogithub.IssueComment, result *MergeRequestResult) {
+	for _, comment := range comments {
+		if comment == nil || comment.System {
+			continue
+		}
 
-			commentBody := fmt.Sprintf(`> [!NOTE]
+		if comment.Author.Username == "" {
+			p.log.Warn("skipping comment with unknown author", "comment_id", comment.ID)
+			continue
+		}
+
+		commentResult := CommentResult{
+			GitLabNoteID:   comment.ID,
+			AuthorUsername: comment.Author.Username,
+			CreatedAt:      *comment.CreatedAt,
+		}
+
+		commentAuthor, err := p.m.glClient.GetUser(ctx, comment.Author.Username)
+		if err != nil {
+			commentResult.Status = StatusFailed
+			commentResult.Error = fmt.Sprintf("retrieving gitlab user: %v", err)
+			result.Comments = append(result.Comments, commentResult)
+			result.FailedComments++
+			p.log.Error("retrieving gitlab user for comment", "comment_id", comment.ID, "error", err)
+			continue
+		}
+		githubCommentAuthorName := githubMention(commentAuthor, comment.Author.Name)
+
+		commentBody := fmt.Sprintf(`> [!NOTE]
 > This comment was migrated from GitLab
 >
 > |      |      |
@@ -1151,65 +1168,46 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 %[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format(config.DateFormat), comment.Body)
 
-			foundExistingComment := false
-			for _, prComment := range prComments {
-				if prComment == nil {
-					continue
-				}
-
-				if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Note ID** | %d", comment.ID)) {
-					foundExistingComment = true
-
-					if prComment.Body == nil || *prComment.Body != commentBody {
-						p.log.Debug("updating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
-						prComment.Body = &commentBody
-						if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], prComment.GetID(), prComment); err != nil {
-							commentResult.Status = StatusFailed
-							commentResult.Error = fmt.Sprintf("updating comment: %v", err)
-							result.Comments = append(result.Comments, commentResult)
-							result.FailedComments++
-							p.log.Error("updating pull request comment", "comment_id", comment.ID, "error", err)
-							continue
-						}
-					}
-					commentResult.Status = StatusSuccess
-					commentResult.GitHubCommentID = Pointer(prComment.GetID())
-					result.MigratedComments++
-				} else {
-					p.log.Trace("existing pull request comment is up-to-date", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
-				}
-			}
-
-			if !foundExistingComment {
-				p.log.Debug("creating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
-				newComment := gogithub.IssueComment{
-					Body: &commentBody,
-				}
-				createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
-				if err != nil {
+		existingComment := findMigratedComment(prComments, comment.ID)
+		if existingComment != nil {
+			if existingComment.Body == nil || *existingComment.Body != commentBody {
+				p.log.Debug("updating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", existingComment.GetID())
+				existingComment.Body = &commentBody
+				if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], existingComment.GetID(), existingComment); err != nil {
 					commentResult.Status = StatusFailed
-					commentResult.Error = fmt.Sprintf("creating comment: %v", err)
+					commentResult.Error = fmt.Sprintf("updating comment: %v", err)
 					result.Comments = append(result.Comments, commentResult)
 					result.FailedComments++
-					p.log.Error("creating pull request comment", "comment_id", comment.ID, "error", err)
+					p.log.Error("updating pull request comment", "comment_id", comment.ID, "error", err)
 					continue
 				}
-				commentResult.Status = StatusSuccess
-				commentResult.GitHubCommentID = createdComment.ID
-				result.MigratedComments++
+			} else {
+				p.log.Trace("existing pull request comment is up-to-date", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", existingComment.GetID())
 			}
-
-			result.Comments = append(result.Comments, commentResult)
+			commentResult.Status = StatusSuccess
+			commentResult.GitHubCommentID = Pointer(existingComment.GetID())
+			result.MigratedComments++
+		} else {
+			p.log.Debug("creating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
+			newComment := gogithub.IssueComment{
+				Body: &commentBody,
+			}
+			createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
+			if err != nil {
+				commentResult.Status = StatusFailed
+				commentResult.Error = fmt.Sprintf("creating comment: %v", err)
+				result.Comments = append(result.Comments, commentResult)
+				result.FailedComments++
+				p.log.Error("creating pull request comment", "comment_id", comment.ID, "error", err)
+				continue
+			}
+			commentResult.Status = StatusSuccess
+			commentResult.GitHubCommentID = createdComment.ID
+			result.MigratedComments++
 		}
-	}
 
-	if result.FailedComments > 0 {
-		result.Status = StatusPartial
-	} else {
-		result.Status = StatusSuccess
+		result.Comments = append(result.Comments, commentResult)
 	}
-
-	return result, nil
 }
 
 // listMergeRequestCommits returns all commits of the merge request, oldest
@@ -1423,6 +1421,24 @@ func githubMention(u *gogitlab.User, fallback string) string {
 		return fallback
 	}
 	return "@" + strings.TrimPrefix(strings.ToLower(u.WebsiteURL), "https://github.com/")
+}
+
+// bodyMatchesNote reports whether body is the text of a comment that the tool
+// migrated for the GitLab note noteID. It matches the whole table cell
+// including the closing pipe, so note 12 does not match the comment of note 123.
+func bodyMatchesNote(body string, noteID int64) bool {
+	return strings.Contains(body, fmt.Sprintf("**Note ID** | %d |", noteID))
+}
+
+// findMigratedComment returns the first of prComments that was migrated for the
+// GitLab note noteID, or nil when there is none.
+func findMigratedComment(prComments []*gogithub.IssueComment, noteID int64) *gogithub.IssueComment {
+	for _, prComment := range prComments {
+		if prComment != nil && bodyMatchesNote(prComment.GetBody(), noteID) {
+			return prComment
+		}
+	}
+	return nil
 }
 
 func bodyMatchesMergeRequest(body string, mrIID int64) bool {
