@@ -137,19 +137,16 @@ func main() {
 
 	ctx, cancel := context.WithCancel(valueCtx)
 
+	// The first Ctrl+C cancels ctx, the second one ends the process at once.
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
+	stopWatching := make(chan struct{})
 	defer func() {
 		signal.Stop(c)
+		close(stopWatching)
 		cancel()
 	}()
-	go func() {
-		select {
-		case <-c:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	go watchInterrupts(c, stopWatching, cancel, os.Stderr, os.Exit)
 
 	cfg := &config.Config{Version: version}
 
