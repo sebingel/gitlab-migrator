@@ -245,7 +245,7 @@ Pass `-state-dir` with a directory path to have the tool persist per-merge-reque
 
 ## Archived repositories
 
-By default, attempting to migrate into an archived GitHub repository fails. Pass `-unarchive-archived-repos` to have the tool temporarily unarchive the target repository before migrating, then re-archive it afterwards.
+By default, attempting to migrate into an archived GitHub repository fails. Pass `-unarchive-archived-repos` to have the tool temporarily unarchive the target repository before migrating, then re-archive it afterwards. The tool also re-archives the repository when you stop the migration with Ctrl+C; after Ctrl+C it tries this for up to two minutes. If the re-archive fails, the log says that you must archive the repository by hand.
 
 ## Reporting
 

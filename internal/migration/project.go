@@ -249,7 +249,9 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)
 		}
 		defer func() {
-			if archErr := p.setArchivedWithRetry(ctx, true); archErr != nil {
+			archCtx, stop := detachedContext(ctx, rearchiveGracePeriod)
+			defer stop()
+			if archErr := p.setArchivedWithRetry(archCtx, true); archErr != nil {
 				p.log.Warn("failed to re-archive GitHub repo after migration, manual re-archive required", "owner", p.githubPath[0], "repo", p.githubPath[1], "error", archErr)
 			} else {
 				p.log.Info("re-archived GitHub repo to restore original state", "owner", p.githubPath[0], "repo", p.githubPath[1])
@@ -1603,6 +1605,27 @@ func (p *project) retryOnNotFound(ctx context.Context, desc string, fn func() er
 	}
 	p.log.Warn("retries exhausted, still 404", "operation", desc, "attempts", len(retryDelays)+1)
 	return err
+}
+
+// rearchiveGracePeriod is how long the re-archive of a temporarily unarchived
+// repository may still run after the migration was canceled (Ctrl+C). It
+// covers the retries of setArchivedWithRetry. A variable, so tests can make it
+// short.
+var rearchiveGracePeriod = 2 * time.Minute
+
+// detachedContext returns a context with the values of ctx that is not
+// canceled together with ctx. Once ctx is done, the returned context ends
+// after grace. Call stop when the work is done.
+func detachedContext(ctx context.Context, grace time.Duration) (detached context.Context, stop func()) {
+	detached, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopAfter := context.AfterFunc(ctx, func() {
+		timer := time.AfterFunc(grace, cancel)
+		context.AfterFunc(detached, func() { timer.Stop() })
+	})
+	return detached, func() {
+		stopAfter()
+		cancel()
+	}
 }
 
 func (p *project) setArchived(ctx context.Context, archived bool) error {
