@@ -21,6 +21,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage/memory"
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/sebingel/gitlab-migrator/internal/config"
@@ -1052,4 +1053,186 @@ func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *t
 	if got := remoteBranches(t, remoteDir); len(got) != 0 {
 		t.Errorf("remote branches after the migration = %v, want none", got)
 	}
+}
+
+// migrateExistingPullRequest migrates MR !3 from feature to master in the
+// GitLab state mrState. Its pull request 5 exists on GitHub as pr. The GitLab
+// trunk is master and the GitHub trunk is main, as with
+// -rename-master-to-main. The test server answers every edit of pull request 5
+// with the pull request after the edit, like GitHub does. It returns the edits
+// in the order they were sent, each as the JSON object of the request, and the
+// pull request after the migration.
+func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRequest) ([]map[string]any, gogithub.PullRequest) {
+	t.Helper()
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
+	p := newGitLabTestProject(t, mux)
+	p.project.DefaultBranch = "master"
+	p.defaultBranch = "main"
+
+	repo, err := git.Init(memory.NewStorage(), nil)
+	if err != nil {
+		t.Fatalf("creating the local repository: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("feature"), plumbing.NewHash("1111111111111111111111111111111111111111"))); err != nil {
+		t.Fatalf("creating the source branch: %v", err)
+	}
+	p.repo = repo
+
+	pr.Number = Pointer(5)
+	if pr.Body == nil {
+		pr.Body = Pointer("> | **GitLab MR Number** | 3 |")
+	}
+	found := pr
+	p.m.ghClient = &searchGitHub{
+		issues: []*gogithub.Issue{{
+			Number:           Pointer(5),
+			PullRequestLinks: &gogithub.PullRequestLinks{URL: Pointer("https://api.github.com/repos/owner/repo/pulls/5")},
+		}},
+		prs: map[int]*gogithub.PullRequest{5: &found},
+	}
+
+	var edits []map[string]any
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("PATCH /repos/owner/repo/pulls/5", func(w http.ResponseWriter, r *http.Request) {
+		var edit map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&edit); err != nil {
+			t.Errorf("decoding the edit of the pull request: %v", err)
+		}
+		edits = append(edits, edit)
+		if v, ok := edit["state"].(string); ok {
+			pr.State = Pointer(v)
+		}
+		if v, ok := edit["title"].(string); ok {
+			pr.Title = Pointer(v)
+		}
+		if v, ok := edit["body"].(string); ok {
+			pr.Body = Pointer(v)
+		}
+		if v, ok := edit["base"].(string); ok {
+			pr.Base = &gogithub.PullRequestBranch{Ref: Pointer(v)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(pr); err != nil {
+			t.Errorf("writing the edited pull request: %v", err)
+		}
+	})
+	ghMux.HandleFunc("GET /repos/owner/repo/issues/5/comments", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `[]`); err != nil {
+			t.Errorf("writing the pull request comments: %v", err)
+		}
+	})
+	useGitHubMux(t, p, ghMux)
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "master",
+	})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSuccess {
+		t.Fatalf("status = %q, want %q", result.Status, StatusSuccess)
+	}
+	return edits, pr
+}
+
+// openPullRequest returns pull request 5 as open with base branch base, with
+// the title and draft flag of MR !3.
+func openPullRequest(base string) gogithub.PullRequest {
+	return gogithub.PullRequest{
+		State: Pointer("open"),
+		Title: Pointer("some work"),
+		Draft: Pointer(false),
+		Base:  &gogithub.PullRequestBranch{Ref: Pointer(base)},
+	}
+}
+
+func TestMigrateMergeRequest_OpenPullRequestGetsRenamedTrunkAsBase(t *testing.T) {
+	// The pull request of the open MR !3 still targets the old trunk master,
+	// so its base branch must change to the new trunk main.
+	edits, pr := migrateExistingPullRequest(t, "opened", openPullRequest("master"))
+	if len(edits) != 1 || edits[0]["base"] != "main" {
+		t.Fatalf("edits = %v, want one edit with base main", edits)
+	}
+	if got := pr.GetBase().GetRef(); got != "main" {
+		t.Errorf("base branch = %q, want main", got)
+	}
+}
+
+func TestMigrateMergeRequest_OnlyBaseOfOpenPullRequestIsOutOfDate(t *testing.T) {
+	// A first migration writes the current body of MR !3.
+	_, migrated := migrateExistingPullRequest(t, "opened", openPullRequest("main"))
+
+	// With that body and the new trunk as base, nothing is out of date.
+	upToDate := openPullRequest("main")
+	upToDate.Body = migrated.Body
+	if edits, _ := migrateExistingPullRequest(t, "opened", upToDate); len(edits) != 0 {
+		t.Fatalf("edits of an up to date pull request = %v, want none", edits)
+	}
+
+	// Only the base branch is out of date, which alone needs an edit.
+	oldBase := openPullRequest("master")
+	oldBase.Body = migrated.Body
+	edits, _ := migrateExistingPullRequest(t, "opened", oldBase)
+	if len(edits) != 1 || edits[0]["base"] != "main" {
+		t.Fatalf("edits = %v, want one edit with base main", edits)
+	}
+}
+
+func TestMigrateMergeRequest_ClosedPullRequestKeepsItsBase(t *testing.T) {
+	// The pull request of the merged MR !3 is closed and targets the
+	// temporary branch from its migration. GitHub refuses a new base for a
+	// closed pull request, so an up to date pull request gets no edit.
+	closed := gogithub.PullRequest{
+		State: Pointer("closed"),
+		Title: Pointer("some work"),
+		Draft: Pointer(false),
+		Base:  &gogithub.PullRequestBranch{Ref: Pointer("migration-target-3/master")},
+	}
+	_, migrated := migrateExistingPullRequest(t, "merged", closed)
+
+	closed.Body = migrated.Body
+	edits, pr := migrateExistingPullRequest(t, "merged", closed)
+	if len(edits) != 0 {
+		t.Fatalf("edits = %v, want none", edits)
+	}
+	if got := pr.GetBase().GetRef(); got != "migration-target-3/master" {
+		t.Errorf("base branch = %q, want migration-target-3/master", got)
+	}
+}
+
+func TestMigrateMergeRequest_BaseChangesAfterTheStateChange(t *testing.T) {
+	t.Run("reopened merge request", func(t *testing.T) {
+		// MR !3 is open again, so its closed pull request is reopened first
+		// and then gets the new trunk as base.
+		closed := openPullRequest("master")
+		closed.State = Pointer("closed")
+		edits, pr := migrateExistingPullRequest(t, "opened", closed)
+		if len(edits) != 2 || edits[0]["state"] != "open" || edits[0]["base"] != nil || edits[1]["base"] != "main" {
+			t.Fatalf("edits = %v, want the reopening without a base, then an edit with base main", edits)
+		}
+		if got := pr.GetBase().GetRef(); got != "main" {
+			t.Errorf("base branch = %q, want main", got)
+		}
+	})
+
+	t.Run("merged merge request", func(t *testing.T) {
+		// MR !3 was merged, so its open pull request is closed first and
+		// then keeps its base.
+		edits, pr := migrateExistingPullRequest(t, "merged", openPullRequest("master"))
+		if len(edits) == 0 || edits[0]["state"] != "closed" {
+			t.Fatalf("edits = %v, want the closing first", edits)
+		}
+		for i, edit := range edits {
+			if edit["base"] != nil {
+				t.Errorf("edit %d = %v, want no base for the closed pull request", i, edit)
+			}
+		}
+		if got := pr.GetBase().GetRef(); got != "master" {
+			t.Errorf("base branch = %q, want master", got)
+		}
+	})
 }

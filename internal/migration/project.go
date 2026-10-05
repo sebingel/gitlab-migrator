@@ -1101,16 +1101,36 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 		}
 
+		// The base branch follows the target branch of the merge request, for
+		// example the new trunk after -rename-master-to-main or
+		// -rename-trunk-branch. GitHub refuses to change the base branch of a
+		// closed pull request, so only an open pull request gets a new base. It
+		// is checked after the state change above, so a pull request that was
+		// just reopened gets it too. A closed pull request keeps its base: for a
+		// closed or merged merge request that is the temporary target branch
+		// from the time it was migrated.
+		var newBase *string
+		if pullRequest.GetState() == "open" && pullRequest.GetBase().GetRef() != mergeRequest.TargetBranch {
+			newBase = &mergeRequest.TargetBranch
+		}
+
 		if (newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState)) ||
 			(pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
 			(pullRequest.Body == nil || *pullRequest.Body != body) ||
-			(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
+			(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) ||
+			newBase != nil {
 			p.log.Info("updating pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
 
 			pullRequest.Title = &mergeRequest.Title
 			pullRequest.Body = &body
 			pullRequest.Draft = &mergeRequest.Draft
 			pullRequest.MaintainerCanModify = nil
+			if newBase != nil {
+				p.log.Info("changing base branch of pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "old_base", pullRequest.GetBase().GetRef(), "new_base", *newBase)
+				// A new branch value instead of a change in place: the cache
+				// of pull requests holds shallow copies that share the old one.
+				pullRequest.Base = &gogithub.PullRequestBranch{Ref: newBase}
+			}
 
 			pullRequest, err = p.editPullRequest(ctx, "updating pull request", pullRequest.GetNumber(), pullRequest)
 			if err != nil {
