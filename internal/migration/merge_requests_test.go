@@ -382,6 +382,20 @@ func TestReportProject_StopsWhenContextIsCanceled(t *testing.T) {
 	})
 }
 
+func TestListMergeRequestNotes_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests/7/notes", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		_, err := p.listMergeRequestNotes(ctx, 7)
+		return err
+	})
+}
+
 func TestListMergeRequestAwardEmoji_StopsWhenContextIsCanceled(t *testing.T) {
 	mux := http.NewServeMux()
 	p := newGitLabTestProject(t, mux)

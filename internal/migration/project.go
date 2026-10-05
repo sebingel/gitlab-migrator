@@ -1070,27 +1070,10 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		}
 	}
 
-	var comments []*gogitlab.Note
-	noteOpts := &gogitlab.ListMergeRequestNotesOptions{
-		ListOptions: gogitlab.ListOptions{PerPage: 100},
-		OrderBy:     Pointer("created_at"),
-		Sort:        Pointer("asc"),
-	}
-
 	p.log.Debug("retrieving GitLab merge request comments", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
-	for {
-		notes, resp, err := p.m.gl.Notes.ListMergeRequestNotes(p.project.ID, mergeRequest.IID, noteOpts, gogitlab.WithContext(ctx))
-		if err != nil {
-			return result, fmt.Errorf("listing merge request notes: %w", err)
-		}
-
-		comments = append(comments, notes...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-
-		noteOpts.Page = resp.NextPage
+	comments, err := p.listMergeRequestNotes(ctx, mergeRequest.IID)
+	if err != nil {
+		return result, fmt.Errorf("listing merge request notes: %w", err)
 	}
 
 	result.TotalComments = len(comments)
@@ -1252,6 +1235,32 @@ func (p *project) listMergeRequestAwardEmoji(ctx context.Context, mrIID int64) (
 		opts.Page = resp.NextPage
 	}
 	return awards, nil
+}
+
+// listMergeRequestNotes returns all notes of the merge request, the oldest
+// first.
+func (p *project) listMergeRequestNotes(ctx context.Context, mrIID int64) ([]*gogitlab.Note, error) {
+	var notes []*gogitlab.Note
+	opts := &gogitlab.ListMergeRequestNotesOptions{
+		ListOptions: gogitlab.ListOptions{PerPage: 100},
+		OrderBy:     Pointer("created_at"),
+		Sort:        Pointer("asc"),
+	}
+	for {
+		page, resp, err := p.m.gl.Notes.ListMergeRequestNotes(p.project.ID, mrIID, opts, gogitlab.WithContext(ctx))
+		if err != nil {
+			return nil, err
+		}
+
+		notes = append(notes, page...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+	return notes, nil
 }
 
 // createLocalBranch creates a branch ref at hash in the local mirror. Only the ref
