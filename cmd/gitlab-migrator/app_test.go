@@ -784,7 +784,7 @@ func TestRateLimitResetWait(t *testing.T) {
 		{name: "reset one second ago", reset: now.Add(-time.Second), now: now, want: minWait},
 		{name: "reset one day ago", reset: now.Add(-24 * time.Hour), now: now, want: minWait},
 		{name: "reset in 100 s", reset: now.Add(100 * time.Second), now: now, want: 130 * time.Second},
-		{name: "rounded to seconds", reset: now.Add(100 * time.Second), now: now.Add(-600 * time.Millisecond), want: 131 * time.Second},
+		{name: "rounded up to seconds", reset: now.Add(100 * time.Second), now: now.Add(-400 * time.Millisecond), want: 131 * time.Second},
 		{name: "reset at the cap", reset: now.Add(870 * time.Second), now: now, want: maxWait},
 		{name: "reset above the cap", reset: now.Add(871 * time.Second), now: now, want: maxWait},
 		{name: "reset in one hour", reset: now.Add(time.Hour), now: now, want: maxWait},
@@ -880,7 +880,7 @@ func TestRetryClient_RetryAfterHTTPDateInThePast(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
 }
 
-// Backoff waits until the HTTP date of Retry-After, rounded to seconds.
+// Backoff waits until the HTTP date of Retry-After, rounded up to seconds.
 func TestRetryClient_RetryAfterHTTPDate(t *testing.T) {
 	date := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	srv, calls := sequenceServer(t,
@@ -897,9 +897,9 @@ func TestRetryClient_RetryAfterHTTPDate(t *testing.T) {
 	if len(h.waits) != 1 {
 		t.Fatalf("got waits %v, want 1 wait", h.waits)
 	}
-	// Backoff runs between before and after, so its wait lies between these two
-	// bounds.
-	lo, hi := date.Sub(after).Round(time.Second), date.Sub(before).Round(time.Second)
+	// Backoff runs between before and after, and it rounds up by less than one
+	// second, so its wait lies between these two bounds.
+	lo, hi := date.Sub(after), date.Sub(before)+time.Second
 	if h.waits[0] < lo || h.waits[0] > hi {
 		t.Errorf("got wait %v, want between %v and %v", h.waits[0], lo, hi)
 	}
@@ -930,7 +930,7 @@ func TestRetryAfterWait(t *testing.T) {
 		{name: "no number and no date", value: "soon", now: now},
 		{name: "empty", value: "", now: now},
 		{name: "date in ten minutes", value: date(10 * time.Minute), now: now, want: 600 * time.Second, wantOK: true},
-		{name: "date rounded to seconds", value: date(100 * time.Second), now: now.Add(-400 * time.Millisecond), want: 100 * time.Second, wantOK: true},
+		{name: "date rounded up to seconds", value: date(100 * time.Second), now: now.Add(-400 * time.Millisecond), want: 101 * time.Second, wantOK: true},
 		{name: "date below the lower bound", value: date(10 * time.Second), now: now, want: minWait, wantOK: true},
 		{name: "date above the cap", value: date(24 * time.Hour), now: now, want: maxWait, wantOK: true},
 		{name: "date far in the future", value: "Fri, 31 Dec 9999 23:59:59 GMT", now: now, want: maxWait, wantOK: true},

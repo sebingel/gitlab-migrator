@@ -372,10 +372,11 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 // retryAfterWait returns the wait that a Retry-After value asks for, capped at
 // maxWait, so that one response cannot block a worker for longer than the
 // longest wait of Backoff. RFC 9110 allows two forms: a number of seconds, or an
-// HTTP date. A date gives the time from now until that date, rounded to seconds,
-// and at least minWait: the date depends on the clock of the server, so a date
-// in the past (for example when the clock of this machine is ahead) does not let
-// all retries run at once. A number of seconds does not depend on a clock and
+// HTTP date. A date gives the time from now until that date, rounded up to
+// seconds so that the retry is not sent before that date, and at least minWait:
+// the date depends on the clock of the server, so a date in the past (for
+// example when the clock of this machine is ahead) does not let all retries run
+// at once. A number of seconds does not depend on a clock and
 // has no lower bound. ok is false when the value is neither a number of seconds
 // nor an HTTP date, or a negative number (the RFC allows only digits), so
 // Backoff never waits a negative time. The cap is checked before the seconds
@@ -395,20 +396,24 @@ func retryAfterWait(value string, minWait, maxWait time.Duration, now time.Time)
 	if err != nil {
 		return 0, false
 	}
-	return clampAndRound(date.Sub(now), minWait, maxWait), true
+	return clampAndCeil(date.Sub(now), minWait, maxWait), true
 }
 
-// clampAndRound bounds d to [minWait, maxWait] and then rounds it to seconds.
-// The bounds come first: Time.Sub saturates at the smallest or largest
-// time.Duration for a time far away, and roundDuration overflows for those
-// values. minWait and maxWait are whole seconds, so rounding keeps the result
-// inside the bounds.
-func clampAndRound(d, minWait, maxWait time.Duration) time.Duration {
-	return roundDuration(min(max(d, minWait), maxWait), time.Second)
+// clampAndCeil bounds d to [minWait, maxWait] and then rounds it up to seconds,
+// so that a wait never ends before the time it was computed from. The bounds
+// come first: Time.Sub saturates at the smallest or largest time.Duration for a
+// time far away, and rounding up would overflow for the largest one. minWait and
+// maxWait are whole seconds, so rounding up keeps the result inside the bounds.
+func clampAndCeil(d, minWait, maxWait time.Duration) time.Duration {
+	d = min(max(d, minWait), maxWait)
+	if rest := d % time.Second; rest > 0 {
+		d += time.Second - rest
+	}
+	return d
 }
 
 // rateLimitResetWait returns the wait until 30 s after the X-Ratelimit-Reset
-// time resetEpoch (in seconds since the Unix epoch), rounded to seconds. The
+// time resetEpoch (in seconds since the Unix epoch), rounded up to seconds. The
 // wait is capped at maxWait, so that one response cannot block a worker for
 // longer than the longest wait of Backoff; GitHub then answers the retry with
 // the same reset time, and Backoff waits again. It is at least minWait, which is
@@ -416,7 +421,7 @@ func clampAndRound(d, minWait, maxWait time.Duration) time.Duration {
 // when the clock of this machine is ahead of GitHub's) does not give a zero or
 // negative wait, so the retry does not hit the rate limit again at once.
 func rateLimitResetWait(resetEpoch int64, minWait, maxWait time.Duration, now time.Time) time.Duration {
-	return clampAndRound(time.Unix(resetEpoch, 0).Add(30*time.Second).Sub(now), minWait, maxWait)
+	return clampAndCeil(time.Unix(resetEpoch, 0).Add(30*time.Second).Sub(now), minWait, maxWait)
 }
 
 // isNonIdempotentMethod reports whether a request with this method can change
@@ -509,23 +514,4 @@ func parseGitHubError(resp *http.Response) (GitHubError, error) {
 	}
 
 	return errResp, nil
-}
-
-func roundDuration(d, r time.Duration) time.Duration {
-	if r <= 0 {
-		return d
-	}
-	neg := d < 0
-	if neg {
-		d = -d
-	}
-	if m := d % r; m+m < r {
-		d = d - m
-	} else {
-		d = d + r - m
-	}
-	if neg {
-		return -d
-	}
-	return d
 }
