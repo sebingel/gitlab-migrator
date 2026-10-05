@@ -277,13 +277,13 @@ func TestRetryClient_SecondaryRateLimitAfterOtherRetries(t *testing.T) {
 	})
 }
 
-// The mark from CheckRetry belongs to one response. A plain 403 after a
+// The mark from CheckRetry belongs to one response. A plain 429 after a
 // secondary rate limit gets the default backoff for attempt 1 (60 s), not the
 // extended backoff (240 s).
 func TestRetryClient_SecondaryRateLimitMarkDoesNotCarryOver(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
-		respond(http.StatusForbidden, nil, `{"message":"Must have admin rights to Repository."}`),
+		respond(http.StatusTooManyRequests, nil, `{"message":"API rate limit exceeded for user ID 1."}`),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarness(t, fixedRand(0))
@@ -296,8 +296,8 @@ func TestRetryClient_SecondaryRateLimitMarkDoesNotCarryOver(t *testing.T) {
 		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[INFO]  waiting for secondary rate limit recovery: wait_duration=2m0s attempt=0 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=0 max_attempts=15`,
-		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 message="Must have admin rights to Repository."`,
-		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=1m0s attempt=1 max_attempts=15`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 message="API rate limit exceeded for user ID 1."`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 sleep=1m0s attempt=1 max_attempts=15`,
 	})
 }
 
@@ -444,6 +444,44 @@ func TestRetryClient_SAMLEnforcement403(t *testing.T) {
 	assertLines(t, h.logLines(srv.URL), nil)
 }
 
+// A 403 without rate limit headers and without a secondary rate limit message,
+// for example a missing permission, does not go away by waiting. It is not
+// retried, and the caller gets the response with its body.
+func TestRetryClient_PermissionError403(t *testing.T) {
+	const body = `{"message":"Must have admin rights to Repository.","documentation_url":"https://docs.github.com/rest"}`
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"4999"}}, body),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	if got := h.expectResponse(t, srv.URL+"/repos/o/r/branches", http.StatusForbidden); got != body {
+		t.Errorf("got body %q, want %q", got, body)
+	}
+
+	assertCalls(t, calls, 1)
+	assertWaits(t, h.waits, nil)
+	assertLines(t, h.logLines(srv.URL), nil)
+}
+
+// Retry-After alone marks a 403 as a rate limit, also without a rate limit
+// message, so it is retried and Backoff waits as the header says.
+func TestRetryClient_ForbiddenWithRetryAfter(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"Retry-After": {"9"}}, `{"message":"Forbidden"}`),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	h.expectOK(t, srv.URL+"/user")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{9 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/user status=403 message=Forbidden`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/user status=403 sleep=9s attempt=0 max_attempts=15`,
+	})
+}
+
 func TestRetryClient_TooManyRequestsWithRetryAfter(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, `{"message":"API rate limit exceeded for user ID 1."}`),
@@ -522,11 +560,11 @@ func TestRetryClient_BadJSON4xx(t *testing.T) {
 	assertLines(t, h.logLines(srv.URL), nil)
 }
 
-// A retried 403 whose body stream is empty: CheckRetry reads it, and
+// A retried 429 whose body stream is empty: CheckRetry reads it, and
 // retryablehttp drains it again before Backoff.
-func TestRetryClient_EmptyBody403(t *testing.T) {
+func TestRetryClient_EmptyBody429(t *testing.T) {
 	srv, calls := sequenceServer(t,
-		respondEmptyStream(http.StatusForbidden),
+		respondEmptyStream(http.StatusTooManyRequests),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarness(t, rand.Float64)
@@ -536,8 +574,8 @@ func TestRetryClient_EmptyBody403(t *testing.T) {
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=403 message=""`,
-		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=403 sleep=30s attempt=0 max_attempts=15`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=429 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=429 sleep=30s attempt=0 max_attempts=15`,
 	})
 }
 
@@ -615,7 +653,7 @@ func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
 	})
 }
 
-// The 5xx case never parses the body. The 403 case parses it on every attempt,
+// The 5xx case never parses the body. The 429 case parses it on every attempt,
 // and retryablehttp drains the restored body after the last one.
 func TestRetryClient_GivesUpAfterRetryMax(t *testing.T) {
 	tests := []struct {
@@ -625,7 +663,7 @@ func TestRetryClient_GivesUpAfterRetryMax(t *testing.T) {
 		message string
 	}{
 		{name: "500 without body", status: http.StatusInternalServerError},
-		{name: "403 with JSON body", status: http.StatusForbidden, body: `{"message":"Must have admin rights to Repository."}`, message: "Must have admin rights to Repository."},
+		{name: "429 with JSON body", status: http.StatusTooManyRequests, body: `{"message":"API rate limit exceeded for user ID 1."}`, message: "API rate limit exceeded for user ID 1."},
 	}
 
 	for _, tt := range tests {

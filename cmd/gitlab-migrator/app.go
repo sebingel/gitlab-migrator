@@ -287,8 +287,8 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		secondaryRateLimit := (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
 			secondaryRateLimitPattern.MatchString(errResp.Message)
 		if secondaryRateLimit {
-			// A 403 is retried below anyway. For a 403 the WARN line replaces the
-			// TRACE line below. A 429 keeps its TRACE line.
+			// A 403 is retried here. For a 403 the WARN line replaces the TRACE
+			// line below. A 429 keeps its TRACE line.
 			if resp.StatusCode == http.StatusForbidden {
 				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
 					"message", errResp.Message,
@@ -305,6 +305,13 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			if resp.StatusCode == http.StatusForbidden {
 				return true, nil
 			}
+		}
+
+		// Any other 403 is retried only for a primary rate limit. A 403 for a
+		// missing permission does not go away by waiting, and with RetryMax and
+		// RetryWaitMax a retried request would block its worker for hours.
+		if resp.StatusCode == http.StatusForbidden && !isPrimaryRateLimit(resp.Header) {
+			return false, nil
 		}
 
 		retryableStatuses := []int{
@@ -327,6 +334,17 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 	}
 
 	return retryClient
+}
+
+// isPrimaryRateLimit reports whether the headers of a response mark a primary
+// rate limit: GitHub sends Retry-After, or X-RateLimit-Remaining 0. See
+// https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit
+func isPrimaryRateLimit(header http.Header) bool {
+	if header.Get("Retry-After") != "" {
+		return true
+	}
+	remaining, err := strconv.ParseInt(header.Get("X-RateLimit-Remaining"), 10, 64)
+	return err == nil && remaining == 0
 }
 
 func isTransientNetworkError(err error) bool {
