@@ -1458,11 +1458,12 @@ func (p *project) retargetOpenPullRequests(ctx context.Context, oldTrunk string)
 // so migrateMergeRequest does not run for it. It does something only when the
 // GitLab trunk is renamed and the merge request is open and targets the GitLab
 // trunk; the pull request of a closed or merged merge request targets its
-// temporary branch. GitHub refuses a new base for a closed pull request, so a
-// closed one keeps its base. Only the base changes: title, body and state stay
-// as the saved result left them.
+// temporary branch. With -skip-open-merge-requests it does nothing, like the
+// run without -state-dir, which skips open merge requests. GitHub refuses a new
+// base for a closed pull request, so a closed one keeps its base. Only the base
+// changes: title, body and state stay as the saved result left them.
 func (p *project) retargetSavedPullRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest, prNumber *int) error {
-	if prNumber == nil || p.defaultBranch == p.project.DefaultBranch ||
+	if prNumber == nil || p.m.cfg.SkipOpenMergeRequests || p.defaultBranch == p.project.DefaultBranch ||
 		!strings.EqualFold(mergeRequest.State, "opened") || mergeRequest.TargetBranch != p.project.DefaultBranch {
 		return nil
 	}

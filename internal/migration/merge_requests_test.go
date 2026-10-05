@@ -1245,10 +1245,11 @@ func TestMigrateMergeRequest_BaseChangesAfterTheStateChange(t *testing.T) {
 // -state-dir: the state file records MR !3 as migrated to pull request 5. MR !3
 // is in the GitLab state mrState and targets targetBranch. The GitLab trunk is
 // master, the GitHub trunk is githubTrunk. Pull request 5 is pr. The test server answers
-// an edit of pull request 5 with editStatus. It returns the results, the
-// numbers of the pull requests that were read, the edits of pull request 5 and
-// the saved state of MR !3 after the run.
-func resumeWithSavedSuccess(t *testing.T, mrState, targetBranch, githubTrunk string, pr gogithub.PullRequest, editStatus int) ([]MergeRequestResult, []int, []map[string]any, *MRState) {
+// an edit of pull request 5 with editStatus. skipOpen is
+// -skip-open-merge-requests. It returns the results, the numbers of the pull
+// requests that were read, the edits of pull request 5 and the saved state of
+// MR !3 after the run.
+func resumeWithSavedSuccess(t *testing.T, mrState, targetBranch, githubTrunk string, pr gogithub.PullRequest, editStatus int, skipOpen bool) ([]MergeRequestResult, []int, []map[string]any, *MRState) {
 	t.Helper()
 	mux := http.NewServeMux()
 	var calls atomic.Int32
@@ -1258,6 +1259,7 @@ func resumeWithSavedSuccess(t *testing.T, mrState, targetBranch, githubTrunk str
 	p := newGitLabTestProject(t, mux)
 	p.project.DefaultBranch = "master"
 	p.defaultBranch = githubTrunk
+	p.m.cfg.SkipOpenMergeRequests = skipOpen
 
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	state, err := LoadOrCreate(statePath, "group/project", "owner/repo", testLogger())
@@ -1315,7 +1317,7 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 	t.Run("open pull request on the old trunk", func(t *testing.T) {
 		// Only the base branch changes: title, body and state stay as the
 		// saved result left them.
-		results, read, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("master"), http.StatusOK)
+		results, read, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("master"), http.StatusOK, false)
 		if len(read) != 1 || read[0] != 5 {
 			t.Errorf("read pull requests = %v, want [5]", read)
 		}
@@ -1329,7 +1331,7 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 	})
 
 	t.Run("open pull request on the new trunk", func(t *testing.T) {
-		results, _, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("main"), http.StatusOK)
+		results, _, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("main"), http.StatusOK, false)
 		if len(edits) != 0 {
 			t.Fatalf("edits = %v, want none", edits)
 		}
@@ -1343,7 +1345,7 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 		// GitHub refuses a new base for a closed pull request.
 		closed := openPullRequest("master")
 		closed.State = Pointer("closed")
-		_, _, edits, _ := resumeWithSavedSuccess(t, "opened", "master", "main", closed, http.StatusOK)
+		_, _, edits, _ := resumeWithSavedSuccess(t, "opened", "master", "main", closed, http.StatusOK, false)
 		if len(edits) != 0 {
 			t.Fatalf("edits = %v, want none", edits)
 		}
@@ -1351,7 +1353,7 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 
 	t.Run("no rename", func(t *testing.T) {
 		// Without a rename the saved result is enough: no GitHub call.
-		_, read, edits, _ := resumeWithSavedSuccess(t, "opened", "master", "master", openPullRequest("master"), http.StatusOK)
+		_, read, edits, _ := resumeWithSavedSuccess(t, "opened", "master", "master", openPullRequest("master"), http.StatusOK, false)
 		if len(read) != 0 || len(edits) != 0 {
 			t.Fatalf("read pull requests = %v, edits = %v, want none", read, edits)
 		}
@@ -1360,16 +1362,29 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 	t.Run("merge request on another target branch", func(t *testing.T) {
 		// The pull request keeps the target branch of its merge request: no
 		// GitHub call.
-		_, read, edits, _ := resumeWithSavedSuccess(t, "opened", "develop", "main", openPullRequest("develop"), http.StatusOK)
+		_, read, edits, _ := resumeWithSavedSuccess(t, "opened", "develop", "main", openPullRequest("develop"), http.StatusOK, false)
 		if len(read) != 0 || len(edits) != 0 {
 			t.Fatalf("read pull requests = %v, edits = %v, want none", read, edits)
 		}
 	})
 
+	t.Run("skip open merge requests", func(t *testing.T) {
+		// Like a run without -state-dir, the run does not touch the pull
+		// request of an open merge request.
+		results, read, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("master"), http.StatusOK, true)
+		if len(read) != 0 || len(edits) != 0 {
+			t.Fatalf("read pull requests = %v, edits = %v, want none", read, edits)
+		}
+		if len(results) != 1 || results[0].Status != StatusSuccess {
+			t.Errorf("results = %+v, want MR !3 migrated", results)
+		}
+		wantSavedSuccess(t, saved)
+	})
+
 	t.Run("merged merge request", func(t *testing.T) {
 		// The pull request of a closed or merged merge request targets its
 		// temporary branch: no GitHub call.
-		_, read, edits, _ := resumeWithSavedSuccess(t, "merged", "master", "main", openPullRequest("master"), http.StatusOK)
+		_, read, edits, _ := resumeWithSavedSuccess(t, "merged", "master", "main", openPullRequest("master"), http.StatusOK, false)
 		if len(read) != 0 || len(edits) != 0 {
 			t.Fatalf("read pull requests = %v, edits = %v, want none", read, edits)
 		}
@@ -1378,7 +1393,7 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 	t.Run("refused base change", func(t *testing.T) {
 		// The run reports the failure. The saved state stays, so the next
 		// run tries the base again.
-		results, _, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("master"), http.StatusUnprocessableEntity)
+		results, _, edits, saved := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("master"), http.StatusUnprocessableEntity, false)
 		if len(edits) != 1 {
 			t.Fatalf("edits = %v, want one", edits)
 		}
