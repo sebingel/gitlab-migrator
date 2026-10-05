@@ -267,7 +267,7 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		var waitReason string
 		defer func() {
 			if errResp, ok := secondaryRateLimitFrom(resp); ok {
-				logger.Warn("secondary rate limit exceeded - waiting before the retry",
+				logger.Warn("secondary rate limit exceeded, waiting before the retry",
 					"wait_duration", sleep,
 					"wait_reason", waitReason,
 					"attempt", attemptNum,
@@ -310,7 +310,7 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 				}
 
 				sleep = 60 * time.Second
-				waitReason = "X-Ratelimit-Remaining 0 without X-Ratelimit-Reset"
+				waitReason = "X-Ratelimit-Remaining 0 without a valid X-Ratelimit-Reset"
 				return
 			}
 		}

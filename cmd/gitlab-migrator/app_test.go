@@ -225,7 +225,7 @@ func TestRetryClient_SecondaryRateLimit403(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{132 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m12s wait_reason="extended backoff" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m12s wait_reason="extended backoff" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m12s attempt=0 max_attempts=15`,
 	})
 }
@@ -246,7 +246,7 @@ func TestRetryClient_SecondaryRateLimit429(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{144 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] secondary rate limit exceeded: status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m24s wait_reason="extended backoff" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m24s wait_reason="extended backoff" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/issues status=429 sleep=2m24s attempt=0 max_attempts=15`,
 	})
 }
@@ -266,7 +266,7 @@ func TestRetryClient_SecondaryRateLimitWithRetryAfter(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{45 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=45s wait_reason="Retry-After header" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=45s wait_reason="Retry-After header" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=45s attempt=0 max_attempts=15`,
 	})
 }
@@ -299,7 +299,7 @@ func TestRetryClient_SecondaryRateLimit429WithRateLimitResetAtInfo(t *testing.T)
 		t.Errorf("got wait %v, want between %v and %v", wait, lo, hi)
 	}
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=` + h.waits[0].String() + ` wait_reason="X-Ratelimit-Reset header" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=` + h.waits[0].String() + ` wait_reason="X-Ratelimit-Reset header" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
 	})
 }
 
@@ -328,7 +328,7 @@ func TestRetryClient_SecondaryRateLimitAfterOtherRetries(t *testing.T) {
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=2m0s attempt=2 max_attempts=15`,
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=3 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=3 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=3 max_attempts=15`,
 	})
 }
@@ -359,18 +359,18 @@ func TestRetryClient_SecondaryRateLimitsInARow(t *testing.T) {
 	}
 	assertLines(t, h.logLines(srv.URL), []string{
 		trace(403),
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=0 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=0 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=0 max_attempts=15`,
 		trace(429),
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=7s wait_reason="Retry-After header" attempt=1 status=429 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=7s wait_reason="Retry-After header" attempt=1 status=429 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 sleep=7s attempt=1 max_attempts=15`,
 		trace(403),
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=8m0s wait_reason="extended backoff" attempt=2 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=8m0s wait_reason="extended backoff" attempt=2 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=8m0s attempt=2 max_attempts=15`,
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=4m0s attempt=3 max_attempts=15`,
 		trace(403),
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=4 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=4 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=4 max_attempts=15`,
 	})
 }
@@ -392,7 +392,7 @@ func TestRetryClient_SecondaryRateLimitMarkDoesNotCarryOver(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{120 * time.Second, 60 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=0 max_attempts=15`,
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 message="API rate limit exceeded for user ID 1."`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 sleep=1m0s attempt=1 max_attempts=15`,
@@ -427,7 +427,7 @@ func TestRetryClient_SecondaryRateLimitGivesUpAfterRetryMax(t *testing.T) {
 	for i, wait := range wantWaits {
 		wantLines = append(wantLines,
 			trace,
-			fmt.Sprintf(`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=%s wait_reason="extended backoff" attempt=%d status=403 message="%s" method=GET url=SERVER/repos/o/r/pulls`, wait, i, message),
+			fmt.Sprintf(`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=%s wait_reason="extended backoff" attempt=%d status=403 message="%s" method=GET url=SERVER/repos/o/r/pulls`, wait, i, message),
 			fmt.Sprintf(`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=%s attempt=%d max_attempts=15`, wait, i),
 		)
 	}
@@ -486,7 +486,7 @@ func TestRetryClient_SecondaryRateLimitWithoutCounter(t *testing.T) {
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=30s attempt=0 max_attempts=15`,
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[WARN]  cannot count the secondary rate limits of the request because it was not sent through secondaryRateLimitCounting, using the attempt number instead: attempt=1 method=GET url=SERVER/repos/o/r/pulls`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=4m0s wait_reason="extended backoff" attempt=1 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=4m0s wait_reason="extended backoff" attempt=1 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=4m0s attempt=1 max_attempts=15`,
 	})
 }
@@ -509,7 +509,28 @@ func TestRetryClient_SecondaryRateLimitWithRateLimitHeaders(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{60 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=1m0s wait_reason="X-Ratelimit-Remaining 0 without X-Ratelimit-Reset" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=1m0s wait_reason="X-Ratelimit-Remaining 0 without a valid X-Ratelimit-Reset" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=1m0s attempt=0 max_attempts=15`,
+	})
+}
+
+// TestRetryClient_SecondaryRateLimitWithUnparsableRateLimitReset checks that an
+// X-Ratelimit-Reset that is not a number gets the same 60 s wait as a missing
+// one, and that the WARN line does not say the header is missing.
+func TestRetryClient_SecondaryRateLimitWithUnparsableRateLimitReset(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {"soon"}}, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, fixedRand(0.5))
+
+	h.expectOK(t, srv.URL+"/repos/o/r/pulls")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{60 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=1m0s wait_reason="X-Ratelimit-Remaining 0 without a valid X-Ratelimit-Reset" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=1m0s attempt=0 max_attempts=15`,
 	})
 }
@@ -1244,7 +1265,7 @@ func TestRetryClient_GoGitHubCountsSecondaryRateLimits(t *testing.T) {
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=502 message=""`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=502 sleep=30s attempt=0 max_attempts=15`,
 		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
-		`[WARN]  secondary rate limit exceeded - waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=1 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=1 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=403 sleep=2m0s attempt=1 max_attempts=15`,
 	})
 }
