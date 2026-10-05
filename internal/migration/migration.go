@@ -72,8 +72,8 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 	resultChan := make(chan passResult, concurrency*2)
 
 	// With -loop the next pass is queued only after every project of the
-	// previous pass has finished, so a project never runs twice at the same
-	// time. Only one pass runs at a time, so one buffered slot is enough and the
+	// previous pass has finished, so the work of two passes never overlaps.
+	// Only one pass runs at a time, so one buffered slot is enough and the
 	// collector never blocks on it, even after the loop has stopped.
 	// The final report is only written after the loop ends, so the detailed
 	// report is also written each time a pass is complete.
