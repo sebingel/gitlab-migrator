@@ -283,27 +283,18 @@ func (m *Migrator) reportProject(ctx context.Context, slugs []string) (*Report, 
 		return nil, fmt.Errorf("parsing project slugs: %w", err)
 	}
 
+	// The project is looked up by its path, like newProject does. A search
+	// would need to read all of its pages to find the project.
 	m.logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
-	searchTerm := gitlabPath[1]
-	projectResult, _, err := m.gl.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm}, gogitlab.WithContext(ctx))
+	proj, _, err := m.gl.Projects.GetProject(slugs[0], nil, gogitlab.WithContext(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("listing projects: %w", err)
-	}
-
-	var proj *gogitlab.Project
-	for _, item := range projectResult {
-		if item == nil {
-			continue
-		}
-		if item.PathWithNamespace == slugs[0] {
-			m.logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
-			proj = item
-		}
+		return nil, fmt.Errorf("retrieving project: %w", err)
 	}
 
 	if proj == nil {
 		return nil, fmt.Errorf("no matching GitLab project found: %s", slugs[0])
 	}
+	m.logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
 
 	var mergeRequests []*gogitlab.BasicMergeRequest
 

@@ -374,11 +374,11 @@ func wantFinishedResult(t *testing.T, result ProjectResult) {
 func TestReportProject_StopsWhenContextIsCanceled(t *testing.T) {
 	slugs := []string{"group/project", "owner/repo"}
 
-	t.Run("listing projects", func(t *testing.T) {
+	t.Run("retrieving the project", func(t *testing.T) {
 		mux := http.NewServeMux()
 		p := newGitLabTestProject(t, mux)
 		started := make(chan struct{}, 1)
-		serveUntilCanceled(t, mux, "/api/v4/projects", started)
+		serveUntilCanceled(t, mux, "/api/v4/projects/{id}", started)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -391,8 +391,7 @@ func TestReportProject_StopsWhenContextIsCanceled(t *testing.T) {
 	t.Run("listing merge requests", func(t *testing.T) {
 		mux := http.NewServeMux()
 		p := newGitLabTestProject(t, mux)
-		var calls atomic.Int32
-		servePages(t, mux, "/api/v4/projects", []*gogitlab.Project{{ID: 1, PathWithNamespace: "group/project"}}, &calls)
+		serveProjects(t, mux, []*gogitlab.Project{{ID: 1, PathWithNamespace: "group/project"}})
 		started := make(chan struct{}, 1)
 		serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests", started)
 
@@ -417,6 +416,50 @@ func TestListMergeRequestNotes_StopsWhenContextIsCanceled(t *testing.T) {
 		_, err := p.listMergeRequestNotes(ctx, 7)
 		return err
 	})
+}
+
+// serveProjects answers the project search with projects, split into pages,
+// and the lookup of one project by its path with the project of that path.
+func serveProjects(t *testing.T, mux *http.ServeMux, projects []*gogitlab.Project) {
+	t.Helper()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects", projects, &calls)
+	mux.HandleFunc("GET /api/v4/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		for _, proj := range projects {
+			if proj.PathWithNamespace == r.PathValue("id") || strconv.FormatInt(proj.ID, 10) == r.PathValue("id") {
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(proj); err != nil {
+					t.Errorf("encoding project %s: %v", proj.PathWithNamespace, err)
+				}
+				return
+			}
+		}
+		http.Error(w, `{"message":"404 Project Not Found"}`, http.StatusNotFound)
+	})
+}
+
+func TestReportProject_FindsProjectAfterFirstPage(t *testing.T) {
+	// The search for "project" finds many projects of other groups. GitLab
+	// lists 20 per page by default, so group/project is only on page 2.
+	projects := make([]*gogitlab.Project, 0, 30)
+	for i := 1; i <= 25; i++ {
+		projects = append(projects, &gogitlab.Project{ID: int64(100 + i), PathWithNamespace: fmt.Sprintf("other-%02d/project", i)})
+	}
+	projects = append(projects, &gogitlab.Project{ID: 1, PathWithNamespace: "group/project"})
+
+	mux := http.NewServeMux()
+	serveProjects(t, mux, projects)
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{{IID: 1, State: "merged"}, {IID: 2, State: "closed"}}, &calls)
+	p := newGitLabTestProject(t, mux)
+
+	report, err := p.m.reportProject(context.Background(), []string{"group/project", "owner/repo"})
+	if err != nil {
+		t.Fatalf("reportProject: %v", err)
+	}
+	if report.MergeRequestsCount != 2 {
+		t.Errorf("merge requests = %d, want 2", report.MergeRequestsCount)
+	}
 }
 
 func TestListMergeRequestAwardEmoji_StopsWhenContextIsCanceled(t *testing.T) {
