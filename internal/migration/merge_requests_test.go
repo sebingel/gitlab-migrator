@@ -462,6 +462,56 @@ func TestReportProject_FindsProjectAfterFirstPage(t *testing.T) {
 	}
 }
 
+// serveMergeRequestsCreatedAfter answers the merge request list of project 1
+// with the merge requests that were created after the created_after parameter
+// of the request, like GitLab does. Without the parameter it answers all.
+func serveMergeRequestsCreatedAfter(t *testing.T, mux *http.ServeMux, mergeRequests []*gogitlab.BasicMergeRequest) {
+	t.Helper()
+	mux.HandleFunc("GET /api/v4/projects/1/merge_requests", func(w http.ResponseWriter, r *http.Request) {
+		var after time.Time
+		if v := r.URL.Query().Get("created_after"); v != "" {
+			var err error
+			if after, err = time.Parse(time.RFC3339, v); err != nil {
+				t.Errorf("parsing created_after %q: %v", v, err)
+			}
+		}
+		matching := make([]*gogitlab.BasicMergeRequest, 0, len(mergeRequests))
+		for _, mr := range mergeRequests {
+			if mr.CreatedAt.After(after) {
+				matching = append(matching, mr)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(matching); err != nil {
+			t.Errorf("encoding merge requests: %v", err)
+		}
+	})
+}
+
+func TestReportProject_CountsOnlyMergeRequestsInMaxAge(t *testing.T) {
+	// With -merge-requests-max-age 30 a migration processes only the merge
+	// request of 10 days ago, so the report must count only that one.
+	now := time.Now()
+	mergeRequests := []*gogitlab.BasicMergeRequest{
+		{IID: 1, State: "merged", CreatedAt: Pointer(now.AddDate(0, 0, -100))},
+		{IID: 2, State: "merged", CreatedAt: Pointer(now.AddDate(0, 0, -10))},
+	}
+
+	mux := http.NewServeMux()
+	serveProjects(t, mux, []*gogitlab.Project{{ID: 1, PathWithNamespace: "group/project"}})
+	serveMergeRequestsCreatedAfter(t, mux, mergeRequests)
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.MergeRequestsAge = 30
+
+	report, err := p.m.reportProject(context.Background(), []string{"group/project", "owner/repo"})
+	if err != nil {
+		t.Fatalf("reportProject: %v", err)
+	}
+	if report.MergeRequestsCount != 1 {
+		t.Errorf("merge requests = %d, want 1 (only the one of the last 30 days)", report.MergeRequestsCount)
+	}
+}
+
 func TestListMergeRequestAwardEmoji_StopsWhenContextIsCanceled(t *testing.T) {
 	mux := http.NewServeMux()
 	p := newGitLabTestProject(t, mux)

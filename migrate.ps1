@@ -167,7 +167,7 @@ $arguments += "-skip-invalid-merge-requests"
 
 # -merge-requests-max-age: Only merge requests created in the last N days.
 #   Must be a whole number. 0 or less means no limit.
-#   Only with: -migrate-pull-requests. -report ignores it.
+#   Only with: -migrate-pull-requests, or -report (then it lowers the count).
 # $arguments += "-merge-requests-max-age", "365"
 
 # ----------------------------------------------------------------------------

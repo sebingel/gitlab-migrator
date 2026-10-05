@@ -298,11 +298,7 @@ func (m *Migrator) reportProject(ctx context.Context, slugs []string) (*Report, 
 
 	var mergeRequests []*gogitlab.BasicMergeRequest
 
-	opts := &gogitlab.ListProjectMergeRequestsOptions{
-		ListOptions: gogitlab.ListOptions{PerPage: 100},
-		OrderBy:     Pointer("created_at"),
-		Sort:        Pointer("asc"),
-	}
+	opts := mergeRequestListOptions(m.cfg.MergeRequestsAge)
 
 	m.logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
 	for {

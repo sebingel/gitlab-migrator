@@ -532,6 +532,25 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 	return nil
 }
 
+// mergeRequestListOptions returns the options for listing the merge requests
+// of a project, oldest first. With maxAgeDays above 0 only the merge requests
+// created in the last maxAgeDays days are listed (-merge-requests-max-age).
+// The migration and the report both use it, so the report counts the merge
+// requests that a migration processes.
+func mergeRequestListOptions(maxAgeDays int) *gogitlab.ListProjectMergeRequestsOptions {
+	opts := &gogitlab.ListProjectMergeRequestsOptions{
+		ListOptions: gogitlab.ListOptions{PerPage: 100},
+		OrderBy:     Pointer("created_at"),
+		Sort:        Pointer("asc"),
+	}
+
+	if maxAgeDays > 0 {
+		opts.CreatedAfter = Pointer(time.Now().AddDate(0, 0, -maxAgeDays))
+	}
+
+	return opts
+}
+
 // migrateMergeRequests migrates the merge requests of the project. It returns
 // an error when the merge requests cannot be listed (then none of them were
 // migrated and the results are nil) or when ctx is canceled while they are
@@ -540,15 +559,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResult, error) {
 	var mergeRequests []*gogitlab.BasicMergeRequest
 
-	opts := &gogitlab.ListProjectMergeRequestsOptions{
-		ListOptions: gogitlab.ListOptions{PerPage: 100},
-		OrderBy:     Pointer("created_at"),
-		Sort:        Pointer("asc"),
-	}
-
-	if p.m.cfg.MergeRequestsAge > 0 {
-		opts.CreatedAfter = Pointer(time.Now().AddDate(0, 0, -p.m.cfg.MergeRequestsAge))
-	}
+	opts := mergeRequestListOptions(p.m.cfg.MergeRequestsAge)
 
 	p.log.Debug("retrieving GitLab merge requests", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID)
 	for {
