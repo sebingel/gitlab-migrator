@@ -534,8 +534,8 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 
 // migrateMergeRequests migrates the merge requests of the project. It returns
 // an error when the merge requests cannot be listed (then none of them were
-// migrated and the results are nil) or when ctx is canceled before all of them
-// were processed (then the results hold the processed ones). The failures of
+// migrated and the results are nil) or when ctx is canceled while they are
+// processed (then the results hold the processed ones). The failures of
 // single merge requests are in the results.
 func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResult, error) {
 	var mergeRequests []*gogitlab.BasicMergeRequest
@@ -639,6 +639,14 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 				p.log.Error("failed to persist migration state", "error", flushErr)
 			}
 		}
+	}
+
+	// The check at the top of the loop does not see a cancel while the last
+	// merge request was processed. That merge request can still count as
+	// migrated, for example as partial when only a comment failed.
+	if err := ctx.Err(); err != nil && interrupted == nil {
+		p.log.Warn("migration interrupted while processing the merge requests")
+		interrupted = fmt.Errorf("migration interrupted while processing the merge requests: %w", err)
 	}
 
 	var successCount, failureCount, skippedCount int

@@ -483,6 +483,46 @@ func (f *failingSearchGitHub) GetSearchResults(context.Context, string) (*gogith
 	return nil, errors.New("search failed in test")
 }
 
+// cancelingSearchGitHub is a failingSearchGitHub that calls cancel in its
+// search, like a Ctrl+C while the merge request is processed.
+type cancelingSearchGitHub struct {
+	failingSearchGitHub
+	cancel context.CancelFunc
+}
+
+func (c *cancelingSearchGitHub) GetSearchResults(ctx context.Context, query string) (*gogithub.IssuesSearchResult, error) {
+	c.cancel()
+	return c.failingSearchGitHub.GetSearchResults(ctx, query)
+}
+
+func TestMigrateMergeRequests_FailsWhenInterruptedDuringLastMergeRequest(t *testing.T) {
+	// A cancel while the last merge request is processed must stop the
+	// project too. A canceled GitLab user lookup only fails a comment, so the
+	// merge request can end as partial, which counts as migrated.
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{
+		{IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main"},
+	}, &calls)
+	p := newGitLabTestProject(t, mux)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gh := &cancelingSearchGitHub{cancel: cancel}
+	p.m.ghClient = gh
+
+	results, err := p.migrateMergeRequests(ctx)
+	if gh.searches != 1 {
+		t.Fatalf("searches = %d, want 1 (MR !3 processed)", gh.searches)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want the processed MR !3", results)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
 func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 	// migrate runs migrateMergeRequests like a new process of the tool: it
 	// loads the state file and migrates MR !3 in the given GitLab state. It
