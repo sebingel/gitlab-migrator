@@ -46,7 +46,7 @@ func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
 	transport := &clients.SearchModder{
 		Base: &retryablehttp.RoundTripper{Client: retryClient},
 	}
-	paginatedClient := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
+	paginatedClient := clients.NewGitHubPaginationClient(transport, githubpagination.WithPerPage(100))
 
 	var gh *gogithub.Client
 	if cfg.GithubDomain == config.DefaultGithubDomain {
