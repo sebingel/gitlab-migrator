@@ -245,10 +245,7 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 
 	if wasArchived && p.m.cfg.UnarchiveArchivedRepos && !p.m.cfg.DeleteExistingRepos {
 		p.log.Info("GitHub repo is archived, temporarily unarchiving for migration", "owner", p.githubPath[0], "repo", p.githubPath[1])
-		if unarchErr := p.setArchived(ctx, false); unarchErr != nil {
-			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)
-		}
-		defer func() {
+		rearchive := func() {
 			archCtx, stop := detachedContext(ctx, rearchiveGracePeriod)
 			defer stop()
 			if archErr := p.setArchivedWithRetry(archCtx, true); archErr != nil {
@@ -256,7 +253,16 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 			} else {
 				p.log.Info("re-archived GitHub repo to restore original state", "owner", p.githubPath[0], "repo", p.githubPath[1])
 			}
-		}()
+		}
+		if unarchErr := p.setArchived(ctx, false); unarchErr != nil {
+			// After Ctrl+C during the request, GitHub may have applied the
+			// unarchive although the client only reports the cancel.
+			if ctx.Err() != nil {
+				rearchive()
+			}
+			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)
+		}
+		defer rearchive()
 	}
 
 	// The storage is created by mirrorRepository and is still needed by migrateMergeRequests.

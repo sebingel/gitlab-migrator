@@ -57,7 +57,8 @@ func serveArchivedGitHubRepo(t *testing.T, p *project) *archiveServer {
 			s.onEdit(r, *edit.Archived)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprintf(w, `{"name":"repo","archived":%t}`, *edit.Archived); err != nil {
+		// The client may have gone away when onEdit waited for a cancel.
+		if _, err := fmt.Fprintf(w, `{"name":"repo","archived":%t}`, *edit.Archived); err != nil && r.Context().Err() == nil {
 			t.Errorf("writing the edited GitHub repository: %v", err)
 		}
 	})
@@ -92,6 +93,32 @@ func TestMigrate_ReArchivesRepoAfterInterrupt(t *testing.T) {
 
 	if _, err := p.migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+	if got := gh.recordedEdits(); len(got) != 2 || got[0] || !got[1] {
+		t.Fatalf("archived edits = %v, want [false true]", got)
+	}
+}
+
+func TestMigrate_ReArchivesRepoWhenInterruptedDuringUnarchive(t *testing.T) {
+	// Ctrl+C can come while the unarchive request is in flight: GitHub
+	// applies the unarchive, but the client only sees the canceled context.
+	// The repository must be archived again in that case, too.
+	p := newGitLabTestProject(t, http.NewServeMux())
+	p.m.cfg.UnarchiveArchivedRepos = true
+	p.m.cfg.PullRequestsOnly = true
+	gh := serveArchivedGitHubRepo(t, p)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gh.onEdit = func(r *http.Request, archived bool) {
+		if !archived {
+			cancel()
+			<-r.Context().Done()
+		}
+	}
+
+	if _, err := p.migrate(ctx); err == nil {
+		t.Fatal("migrate: want an error for the interrupted unarchive")
 	}
 	if got := gh.recordedEdits(); len(got) != 2 || got[0] || !got[1] {
 		t.Fatalf("archived edits = %v, want [false true]", got)
