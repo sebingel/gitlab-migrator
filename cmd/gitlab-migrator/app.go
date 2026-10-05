@@ -260,7 +260,22 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			}
 		}
 
+		// waitReason names what decided the wait of a secondary rate limit, for
+		// its WARN line. retryablehttp calls Backoff only when a retry follows, so
+		// the line is only logged then, and it says which wait really happens:
+		// the header based wait or the extended backoff.
+		var waitReason string
 		defer func() {
+			if errResp, ok := secondaryRateLimitFrom(resp); ok {
+				logger.Warn("secondary rate limit exceeded - waiting before the retry",
+					"wait_duration", sleep,
+					"wait_reason", waitReason,
+					"attempt", attemptNum,
+					"status", resp.StatusCode,
+					"message", errResp.Message,
+					"method", requestMethod,
+					"url", requestUrl)
+			}
 			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
 		}()
 
@@ -279,6 +294,7 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		if s, ok := resp.Header["Retry-After"]; ok {
 			if wait, ok := retryAfterWait(s[0], min, max, time.Now()); ok {
 				sleep = wait
+				waitReason = "Retry-After header"
 				return
 			}
 		}
@@ -288,16 +304,18 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 				if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
 					if resetEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
 						sleep = rateLimitResetWait(resetEpoch, min, max, time.Now())
+						waitReason = "X-Ratelimit-Reset header"
 						return
 					}
 				}
 
 				sleep = 60 * time.Second
+				waitReason = "X-Ratelimit-Remaining 0 without X-Ratelimit-Reset"
 				return
 			}
 		}
 
-		if errResp, ok := secondaryRateLimitFrom(resp); ok {
+		if _, ok := secondaryRateLimitFrom(resp); ok {
 			// CheckRetry counted resp before it marked it, so count is at least 1.
 			before := attemptNum
 			if count, ok := secondaryRateLimitsInARow(resp); ok {
@@ -309,12 +327,7 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 					"url", requestUrl)
 			}
 			sleep = secondaryRateLimitWait(max, before, randFloat)
-			logger.Info("waiting for secondary rate limit recovery",
-				"wait_duration", sleep,
-				"attempt", attemptNum,
-				"message", errResp.Message,
-				"method", requestMethod,
-				"url", requestUrl)
+			waitReason = "extended backoff"
 			return
 		}
 
@@ -389,14 +402,15 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		// rate limit with Retry-After counts too: the limit goes on.
 		countSecondaryRateLimit(ctx, secondaryRateLimit)
 		if secondaryRateLimit {
-			// A 403 is retried here. For a 403 the WARN line replaces the TRACE
-			// line below. A 429 keeps its TRACE line.
-			if resp.StatusCode == http.StatusForbidden {
-				logger.Warn("secondary rate limit exceeded - will retry with extended backoff",
-					"message", errResp.Message,
-					"method", requestMethod,
-					"url", requestUrl)
-			}
+			// CheckRetry does not know whether a retry follows: after the last
+			// attempt retryablehttp gives up. So this line is TRACE and does not
+			// say "retry". Backoff runs only before a retry and logs the WARN line
+			// with the wait that really happens (issues #87 and #88).
+			logger.Trace("secondary rate limit exceeded",
+				"status", resp.StatusCode,
+				"message", errResp.Message,
+				"method", requestMethod,
+				"url", requestUrl)
 
 			marked := markSecondaryRateLimit(resp, errResp)
 			if !marked {
@@ -404,9 +418,8 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 					"status", resp.StatusCode)
 			}
 
-			if resp.StatusCode == http.StatusForbidden {
-				return true, nil
-			}
+			// 403 and 429 are both rate limits, which are retried for all methods.
+			return true, nil
 		}
 
 		// Any other 403 is retried only for a primary rate limit. A 403 for a
