@@ -404,26 +404,11 @@ func TestReportProject_StopsWhenContextIsCanceled(t *testing.T) {
 	})
 }
 
-func TestListMergeRequestNotes_StopsWhenContextIsCanceled(t *testing.T) {
-	mux := http.NewServeMux()
-	p := newGitLabTestProject(t, mux)
-	started := make(chan struct{}, 1)
-	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests/7/notes", started)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	wantCanceledAfterStart(t, started, cancel, func() error {
-		_, err := p.listMergeRequestNotes(ctx, 7)
-		return err
-	})
-}
-
-// serveProjects answers the project search with projects, split into pages,
-// and the lookup of one project by its path with the project of that path.
+// serveProjects answers the lookup of one project by its path or its ID with
+// the matching project of projects. It serves no project search: a report
+// that searches gets a 404 and fails.
 func serveProjects(t *testing.T, mux *http.ServeMux, projects []*gogitlab.Project) {
 	t.Helper()
-	var calls atomic.Int32
-	servePages(t, mux, "/api/v4/projects", projects, &calls)
 	mux.HandleFunc("GET /api/v4/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
 		for _, proj := range projects {
 			if proj.PathWithNamespace == r.PathValue("id") || strconv.FormatInt(proj.ID, 10) == r.PathValue("id") {
@@ -439,8 +424,10 @@ func serveProjects(t *testing.T, mux *http.ServeMux, projects []*gogitlab.Projec
 }
 
 func TestReportProject_FindsProjectAfterFirstPage(t *testing.T) {
-	// The search for "project" finds many projects of other groups. GitLab
-	// lists 20 per page by default, so group/project is only on page 2.
+	// Many projects of other groups are also named "project". GitLab lists 20
+	// per page by default, so a search for the name would list group/project
+	// only on page 2. The report looks the project up by its path and must
+	// find it anyway.
 	projects := make([]*gogitlab.Project, 0, 30)
 	for i := 1; i <= 25; i++ {
 		projects = append(projects, &gogitlab.Project{ID: int64(100 + i), PathWithNamespace: fmt.Sprintf("other-%02d/project", i)})
@@ -510,6 +497,20 @@ func TestReportProject_CountsOnlyMergeRequestsInMaxAge(t *testing.T) {
 	if report.MergeRequestsCount != 1 {
 		t.Errorf("merge requests = %d, want 1 (only the one of the last 30 days)", report.MergeRequestsCount)
 	}
+}
+
+func TestListMergeRequestNotes_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests/7/notes", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		_, err := p.listMergeRequestNotes(ctx, 7)
+		return err
+	})
 }
 
 func TestListMergeRequestAwardEmoji_StopsWhenContextIsCanceled(t *testing.T) {
