@@ -137,6 +137,8 @@ func TestWarnings_PullRequestFlags(t *testing.T) {
 		name  string
 		setup func(c *Config)
 		want  []string
+		// hint is the reason every warning of the case must end with.
+		hint string
 	}{
 		{
 			name:  "no pull request flags",
@@ -152,6 +154,7 @@ func TestWarnings_PullRequestFlags(t *testing.T) {
 				c.MergeRequestsAge = 365
 			},
 			want: []string{"-skip-invalid-merge-requests", "-skip-open-merge-requests", "-state-dir", "-merge-requests-max-age"},
+			hint: "without -migrate-pull-requests",
 		},
 		{
 			name: "all flags with -migrate-pull-requests",
@@ -185,6 +188,22 @@ func TestWarnings_PullRequestFlags(t *testing.T) {
 				c.MergeRequestsAge = 365
 			},
 			want: []string{"-skip-invalid-merge-requests", "-state-dir"},
+			hint: "with -report",
+		},
+		{
+			// The report does not read these two flags, so
+			// -migrate-pull-requests does not give them an effect.
+			name: "all flags with -report and -migrate-pull-requests",
+			setup: func(c *Config) {
+				c.Report = true
+				c.EnablePullRequests = true
+				c.SkipInvalidMergeRequests = true
+				c.SkipOpenMergeRequests = true
+				c.StateDir = "./state"
+				c.MergeRequestsAge = 365
+			},
+			want: []string{"-skip-invalid-merge-requests", "-state-dir"},
+			hint: "with -report",
 		},
 		{
 			name: "max age of 0 or less is no limit",
@@ -208,8 +227,8 @@ func TestWarnings_PullRequestFlags(t *testing.T) {
 				if !strings.HasPrefix(got[i], flagName+" ") {
 					t.Errorf("warning %d is %q, want it to start with %q", i, got[i], flagName)
 				}
-				if !strings.Contains(got[i], "-migrate-pull-requests") {
-					t.Errorf("warning %q does not name -migrate-pull-requests", got[i])
+				if !strings.HasSuffix(got[i], " "+tt.hint) {
+					t.Errorf("warning %q does not end with %q", got[i], tt.hint)
 				}
 			}
 		})
