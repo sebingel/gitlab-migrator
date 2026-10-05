@@ -1236,3 +1236,81 @@ func TestMigrateMergeRequest_BaseChangesAfterTheStateChange(t *testing.T) {
 		}
 	})
 }
+
+// retargetBeforeTrim calls retargetPullRequestsBeforeTrim for the GitLab trunk
+// master and the GitHub trunk githubTrunk, with branchesToDelete as the
+// branches the trim deletes. The test server lists the open pull requests 5
+// and 6 on master, on two pages. It returns the edits in the order they were
+// sent, each with the number of the pull request and the JSON object of the
+// request.
+func retargetBeforeTrim(t *testing.T, githubTrunk string, branchesToDelete []string) ([]map[string]any, error) {
+	t.Helper()
+	p := newGitLabTestProject(t, http.NewServeMux())
+	p.project.DefaultBranch = "master"
+	p.defaultBranch = githubTrunk
+
+	var edits []map[string]any
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("GET /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("state") != "open" || query.Get("base") != "master" {
+			t.Errorf("listed pull requests with %v, want the open ones on master", query)
+		}
+		prs := []*gogithub.PullRequest{{Number: Pointer(5)}}
+		if query.Get("page") == "2" {
+			prs = []*gogithub.PullRequest{{Number: Pointer(6)}}
+		} else {
+			query.Set("page", "2")
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s%s?%s>; rel="next"`, r.Host, r.URL.Path, query.Encode()))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(prs); err != nil {
+			t.Errorf("writing the pull requests: %v", err)
+		}
+	})
+	ghMux.HandleFunc("PATCH /repos/owner/repo/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		var edit map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&edit); err != nil {
+			t.Errorf("decoding the edit of the pull request: %v", err)
+		}
+		edit["number"] = r.PathValue("number")
+		edits = append(edits, edit)
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprintf(w, `{"number":%s}`, r.PathValue("number")); err != nil {
+			t.Errorf("writing the edited pull request: %v", err)
+		}
+	})
+	useGitHubMux(t, p, ghMux)
+
+	err := p.retargetPullRequestsBeforeTrim(context.Background(), branchesToDelete)
+	return edits, err
+}
+
+func TestRetargetPullRequestsBeforeTrim_OldTrunkIsTrimmed(t *testing.T) {
+	// The trim deletes master, which closes the open pull requests on it. So
+	// they get the new trunk main as base first, and the edit changes nothing
+	// else.
+	edits, err := retargetBeforeTrim(t, "main", []string{"stale", "master"})
+	if err != nil {
+		t.Fatalf("retargetPullRequestsBeforeTrim: %v", err)
+	}
+	want := []map[string]any{{"number": "5", "base": "main"}, {"number": "6", "base": "main"}}
+	if fmt.Sprint(edits) != fmt.Sprint(want) {
+		t.Fatalf("edits = %v, want %v", edits, want)
+	}
+}
+
+func TestRetargetPullRequestsBeforeTrim_NothingToDo(t *testing.T) {
+	t.Run("old trunk is not trimmed", func(t *testing.T) {
+		edits, err := retargetBeforeTrim(t, "main", []string{"stale"})
+		if err != nil || len(edits) != 0 {
+			t.Fatalf("edits = %v, err = %v, want no edits and no error", edits, err)
+		}
+	})
+	t.Run("trunk is not renamed", func(t *testing.T) {
+		edits, err := retargetBeforeTrim(t, "master", []string{"stale", "master"})
+		if err != nil || len(edits) != 0 {
+			t.Fatalf("edits = %v, err = %v, want no edits and no error", edits, err)
+		}
+	})
+}

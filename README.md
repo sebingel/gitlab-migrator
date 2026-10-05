@@ -158,7 +158,7 @@ _Example migrated pull request (closed)_
 
 As a bonus, this tool can transparently rename the trunk branch on your GitHub repository - enable with the `-rename-trunk-branch` argument. This will also work for any open merge requests as they are translated to pull requests.
 
-Pull requests that exist on GitHub from an earlier run also get the new trunk as their base branch, as long as they are open. GitHub does not allow to change the base branch of a closed pull request, so closed pull requests keep their base branch. A pull request that is reopened because its merge request is open again gets the new base branch after it is reopened.
+Pull requests that exist on GitHub from an earlier run also get the new trunk as their base branch, as long as they are open. GitHub does not allow to change the base branch of a closed pull request, so closed pull requests keep their base branch. A pull request that is reopened because its merge request is open again gets the new base branch after it is reopened. With `-trim-branches-on-github`, the old trunk is deleted on GitHub during the push, and GitHub closes the open pull requests whose base branch is deleted. So before the old trunk is deleted, all open pull requests on it get the new trunk as their base branch.
 
 ## Concurrency
 
