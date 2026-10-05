@@ -282,12 +282,18 @@ fi
 # Display configuration
 echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
 echo -e "\033[36m=====================================\033[0m"
-# The prepare mode block does not pass these four values, so they are not shown then
+# The prepare mode block does not pass these values, so they are not shown then
 if [ "$prepare_mode" = false ]; then
     echo "GitHub User:    $GITHUB_USER"
     echo "GitLab Domain:  $GITLAB_DOMAIN"
     echo "GitHub Domain:  $GITHUB_DOMAIN"
-    echo "Projects CSV:   $PROJECTS_CSV"
+    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
+    # when -projects-csv is passed, with the value that is passed
+    for ((j = 0; j < ${#arguments[@]} - 1; j++)); do
+        if [[ "${arguments[$j]}" == "-projects-csv" || "${arguments[$j]}" == "--projects-csv" ]]; then
+            echo "Projects CSV:   ${arguments[$((j + 1))]}"
+        fi
+    done
 fi
 echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
 echo "Log Level:      $LOG_LEVEL"
