@@ -256,8 +256,9 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 		}
 		if unarchErr := p.setArchived(ctx, false); unarchErr != nil {
 			// After Ctrl+C during the request, GitHub may have applied the
-			// unarchive although the client only reports the cancel.
-			if ctx.Err() != nil {
+			// unarchive although the client only reports the cancel. Any other
+			// error means GitHub did not unarchive, even when Ctrl+C came later.
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(unarchErr, ctxErr) {
 				rearchive()
 			}
 			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)

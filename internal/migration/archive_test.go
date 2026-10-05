@@ -17,11 +17,13 @@ import (
 
 // archiveServer is a GitHub test server for the archived repository
 // owner/repo. It records the archived value of every repository edit and
-// calls onEdit (when set) with it.
+// calls onEdit (when set) with it. When unarchiveStatus is set, it answers an
+// unarchive edit with that status.
 type archiveServer struct {
-	mu     sync.Mutex
-	edits  []bool
-	onEdit func(r *http.Request, archived bool)
+	mu              sync.Mutex
+	edits           []bool
+	onEdit          func(r *http.Request, archived bool)
+	unarchiveStatus int
 }
 
 func (s *archiveServer) recordedEdits() []bool {
@@ -55,6 +57,10 @@ func serveArchivedGitHubRepo(t *testing.T, p *project) *archiveServer {
 		s.mu.Unlock()
 		if s.onEdit != nil {
 			s.onEdit(r, *edit.Archived)
+		}
+		if !*edit.Archived && s.unarchiveStatus != 0 {
+			http.Error(w, `{"message":"unarchive rejected"}`, s.unarchiveStatus)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// The client may have gone away when onEdit waited for a cancel.
@@ -122,6 +128,43 @@ func TestMigrate_ReArchivesRepoWhenInterruptedDuringUnarchive(t *testing.T) {
 	}
 	if got := gh.recordedEdits(); len(got) != 2 || got[0] || !got[1] {
 		t.Fatalf("archived edits = %v, want [false true]", got)
+	}
+}
+
+// cancelAfterPatch is a transport that cancels the migration context after the
+// response of a repository edit has arrived.
+type cancelAfterPatch struct {
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterPatch) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if r.Method == http.MethodPatch {
+		c.cancel()
+	}
+	return resp, err
+}
+
+func TestMigrate_NoReArchiveWhenUnarchiveFailsBeforeInterrupt(t *testing.T) {
+	// When GitHub rejects the unarchive, the repository is still archived.
+	// A Ctrl+C that comes after the rejection must not start a re-archive.
+	p := newGitLabTestProject(t, http.NewServeMux())
+	p.m.cfg.UnarchiveArchivedRepos = true
+	p.m.cfg.PullRequestsOnly = true
+	gh := serveArchivedGitHubRepo(t, p)
+	gh.unarchiveStatus = http.StatusForbidden
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := gogithub.NewClient(&http.Client{Transport: cancelAfterPatch{cancel: cancel}})
+	client.BaseURL = p.m.gh.BaseURL
+	p.m.gh = client
+
+	if _, err := p.migrate(ctx); err == nil {
+		t.Fatal("migrate: want an error for the rejected unarchive")
+	}
+	if got := gh.recordedEdits(); len(got) != 1 || got[0] {
+		t.Fatalf("archived edits = %v, want [false]", got)
 	}
 }
 
