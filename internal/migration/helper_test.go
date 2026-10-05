@@ -2,7 +2,9 @@ package migration
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	gitconfig "github.com/go-git/go-git/v5/config"
 )
@@ -94,6 +96,41 @@ func TestParseProjectSlugs(t *testing.T) {
 						t.Errorf("githubPath[%d] = %q, want %q", i, githubPath[i], v)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestShortenTitle(t *testing.T) {
+	ascii40 := strings.Repeat("a", 40)
+	tests := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{name: "empty", title: "", want: ""},
+		{name: "short ascii", title: "short", want: "short"},
+		{name: "exactly 40 ascii", title: ascii40, want: ascii40},
+		{name: "41 ascii", title: ascii40 + "b", want: ascii40 + "..."},
+		// 39 ASCII bytes plus "ä" (2 bytes) end at byte 41: a byte cut at 40 splits the rune.
+		{name: "two byte rune across byte 40", title: strings.Repeat("a", 39) + "äbcd", want: strings.Repeat("a", 39) + "ä..."},
+		// 40 runes of 3 bytes each (120 bytes) are not longer than 40 runes.
+		{name: "40 three byte runes", title: strings.Repeat("日", 40), want: strings.Repeat("日", 40)},
+		{name: "41 three byte runes", title: strings.Repeat("日", 41), want: strings.Repeat("日", 40) + "..."},
+		// 38 ASCII bytes plus an emoji (4 bytes) end at byte 42.
+		{name: "four byte rune across byte 40", title: strings.Repeat("a", 38) + "😀😀😀", want: strings.Repeat("a", 38) + "😀😀..."},
+		// 20 runes of 2 bytes are 40 bytes but only 20 runes: no cut.
+		{name: "short in runes, 40 bytes", title: strings.Repeat("ü", 20), want: strings.Repeat("ü", 20)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shortenTitle(tt.title)
+			if got != tt.want {
+				t.Errorf("shortenTitle(%q) = %q, want %q", tt.title, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("shortenTitle(%q) = %q is not valid UTF-8", tt.title, got)
 			}
 		})
 	}

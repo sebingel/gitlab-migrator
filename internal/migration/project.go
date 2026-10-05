@@ -245,16 +245,25 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 
 	if wasArchived && p.m.cfg.UnarchiveArchivedRepos && !p.m.cfg.DeleteExistingRepos {
 		p.log.Info("GitHub repo is archived, temporarily unarchiving for migration", "owner", p.githubPath[0], "repo", p.githubPath[1])
-		if unarchErr := p.setArchived(ctx, false); unarchErr != nil {
-			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)
-		}
-		defer func() {
-			if archErr := p.setArchivedWithRetry(ctx, true); archErr != nil {
+		rearchive := func() {
+			archCtx, stop := detachedContext(ctx, rearchiveGracePeriod)
+			defer stop()
+			if archErr := p.setArchivedWithRetry(archCtx, true); archErr != nil {
 				p.log.Warn("failed to re-archive GitHub repo after migration, manual re-archive required", "owner", p.githubPath[0], "repo", p.githubPath[1], "error", archErr)
 			} else {
 				p.log.Info("re-archived GitHub repo to restore original state", "owner", p.githubPath[0], "repo", p.githubPath[1])
 			}
-		}()
+		}
+		if unarchErr := p.setArchived(ctx, false); unarchErr != nil {
+			// After Ctrl+C during the request, GitHub may have applied the
+			// unarchive although the client only reports the cancel. Any other
+			// error means GitHub did not unarchive, even when Ctrl+C came later.
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(unarchErr, ctxErr) {
+				rearchive()
+			}
+			return p.result, fmt.Errorf("unarchiving github repo for migration: %w", unarchErr)
+		}
+		defer rearchive()
 	}
 
 	// The storage is created by mirrorRepository and is still needed by migrateMergeRequests.
@@ -532,6 +541,25 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 	return nil
 }
 
+// mergeRequestListOptions returns the options for listing the merge requests
+// of a project, oldest first. With maxAgeDays above 0 only the merge requests
+// created in the last maxAgeDays days are listed (-merge-requests-max-age).
+// The migration and the report both use it, so the report counts the merge
+// requests that a migration processes.
+func mergeRequestListOptions(maxAgeDays int) *gogitlab.ListProjectMergeRequestsOptions {
+	opts := &gogitlab.ListProjectMergeRequestsOptions{
+		ListOptions: gogitlab.ListOptions{PerPage: 100},
+		OrderBy:     Pointer("created_at"),
+		Sort:        Pointer("asc"),
+	}
+
+	if maxAgeDays > 0 {
+		opts.CreatedAfter = Pointer(time.Now().AddDate(0, 0, -maxAgeDays))
+	}
+
+	return opts
+}
+
 // migrateMergeRequests migrates the merge requests of the project. It returns
 // an error when the merge requests cannot be listed (then none of them were
 // migrated and the results are nil) or when ctx is canceled while they are
@@ -540,15 +568,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResult, error) {
 	var mergeRequests []*gogitlab.BasicMergeRequest
 
-	opts := &gogitlab.ListProjectMergeRequestsOptions{
-		ListOptions: gogitlab.ListOptions{PerPage: 100},
-		OrderBy:     Pointer("created_at"),
-		Sort:        Pointer("asc"),
-	}
-
-	if p.m.cfg.MergeRequestsAge > 0 {
-		opts.CreatedAfter = Pointer(time.Now().AddDate(0, 0, -p.m.cfg.MergeRequestsAge))
-	}
+	opts := mergeRequestListOptions(p.m.cfg.MergeRequestsAge)
 
 	p.log.Debug("retrieving GitLab merge requests", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID)
 	for {
@@ -685,6 +705,15 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	var pullRequest *gogithub.PullRequest
 
+	// The deferred cleanups below delete the temporary branches of a closed
+	// merge request when its pull request exists, or when GitHub refused the
+	// pull request because the branches have no commits between them: then no
+	// pull request will ever use them. After other errors the branches stay.
+	noCommitsBetween := false
+	keepTempBranches := func() bool {
+		return pullRequest == nil && !noCommitsBetween
+	}
+
 	p.log.Debug("searching for any existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID, "state", mergeRequest.State, "source_branch", mergeRequest.SourceBranch)
 	sourceBranches := []string{mergeRequest.SourceBranch, sourceBranchForClosedMergeRequest}
 	branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
@@ -717,24 +746,35 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 
 			if issue.IsPullRequest() {
-				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
-				if err != nil {
-					return result, fmt.Errorf("parsing pull request url: %w", err)
+				// The number of a pull request is the number of its issue. It
+				// is used when GitHub sends no pull request URL.
+				prNumber := issue.GetNumber()
+				if rawURL := issue.GetPullRequestLinks().GetURL(); rawURL != "" {
+					prUrl, err := url.Parse(rawURL)
+					if err != nil {
+						return result, fmt.Errorf("parsing pull request url: %w", err)
+					}
+					m := prNumberRegex.FindStringSubmatch(prUrl.Path)
+					if len(m) != 2 {
+						continue
+					}
+					prNumber, _ = strconv.Atoi(m[1])
+				}
+				if prNumber == 0 {
+					p.log.Debug("ignoring search result without pull request number", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
+					continue
 				}
 
-				if m := prNumberRegex.FindStringSubmatch(prUrl.Path); len(m) == 2 {
-					prNumber, _ := strconv.Atoi(m[1])
-					pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
-					if err != nil {
-						return result, fmt.Errorf("retrieving pull request: %w", err)
-					}
+				pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], prNumber)
+				if err != nil {
+					return result, fmt.Errorf("retrieving pull request: %w", err)
+				}
 
-					if bodyMatchesMergeRequest(pr.GetBody(), mergeRequest.IID) {
-						p.log.Debug("found existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber())
-						pullRequest = pr
-						result.GitHubPRNumber = pullRequest.Number
-						break
-					}
+				if bodyMatchesMergeRequest(pr.GetBody(), mergeRequest.IID) {
+					p.log.Debug("found existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber())
+					pullRequest = pr
+					result.GitHubPRNumber = pullRequest.Number
+					break
 				}
 			}
 		}
@@ -793,7 +833,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				return result, nil
 			}
 			defer func() {
-				if pullRequest == nil {
+				if keepTempBranches() {
 					return
 				}
 				p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -879,7 +919,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 
 			defer func() {
-				if pullRequest == nil {
+				if keepTempBranches() {
 					return
 				}
 				p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -958,10 +998,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", mergeRequest.MergedAt.Format(config.DateFormat))
 	}
 
-	mergeRequestTitle := mergeRequest.Title
-	if len(mergeRequestTitle) > 40 {
-		mergeRequestTitle = mergeRequestTitle[:40] + "..."
-	}
+	mergeRequestTitle := shortenTitle(mergeRequest.Title)
 
 	body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab
@@ -980,7 +1017,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], mergeRequest.CreatedAt.Format(config.DateFormat), closeDate, approval, originalState, p.m.cfg.GitlabDomain, mergeRequestTitle)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, p.gitlabPath[0], p.gitlabPath[1], formatDate(mergeRequest.CreatedAt), closeDate, approval, originalState, p.m.cfg.GitlabDomain, mergeRequestTitle)
 
 	created := false
 	if pullRequest == nil {
@@ -1004,6 +1041,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		if err != nil {
 			if strings.Contains(err.Error(), "No commits between") {
 				p.log.Debug("skipping merge request as the change is already present in trunk branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
+				noCommitsBetween = true
 				result.Status = StatusSkipped
 				result.SkipReason = fmt.Sprintf("branch '%s' has no new commits relative to '%s'; changes are already present in the target branch", mergeRequest.SourceBranch, mergeRequest.TargetBranch)
 				return result, nil
@@ -1098,34 +1136,55 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	} else {
 		p.log.Info("migrating merge request comments from GitLab to GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "count", len(comments))
 
-		for _, comment := range comments {
-			if comment == nil || comment.System {
-				continue
-			}
+		p.migrateComments(ctx, pullRequest, comments, prComments, &result)
+	}
 
-			if comment.Author.Username == "" {
-				p.log.Warn("skipping comment with unknown author", "comment_id", comment.ID)
-				continue
-			}
+	if result.FailedComments > 0 {
+		result.Status = StatusPartial
+	} else {
+		result.Status = StatusSuccess
+	}
 
-			commentResult := CommentResult{
-				GitLabNoteID:   comment.ID,
-				AuthorUsername: comment.Author.Username,
-				CreatedAt:      *comment.CreatedAt,
-			}
+	return result, nil
+}
 
-			commentAuthor, err := p.m.glClient.GetUser(ctx, comment.Author.Username)
-			if err != nil {
-				commentResult.Status = StatusFailed
-				commentResult.Error = fmt.Sprintf("retrieving gitlab user: %v", err)
-				result.Comments = append(result.Comments, commentResult)
-				result.FailedComments++
-				p.log.Error("retrieving gitlab user for comment", "comment_id", comment.ID, "error", err)
-				continue
-			}
-			githubCommentAuthorName := githubMention(commentAuthor, comment.Author.Name)
+// migrateComments writes the GitLab notes of a merge request as comments of its
+// pull request. prComments are the comments the pull request has already. A
+// note whose comment exists is updated when its text changed, any other note
+// gets a new comment. Every note that is not skipped adds exactly one entry to
+// result.Comments. Nil notes, system notes and notes without an author username
+// are skipped.
+func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.PullRequest, comments []*gogitlab.Note, prComments []*gogithub.IssueComment, result *MergeRequestResult) {
+	for _, comment := range comments {
+		if comment == nil || comment.System {
+			continue
+		}
 
-			commentBody := fmt.Sprintf(`> [!NOTE]
+		if comment.Author.Username == "" {
+			p.log.Warn("skipping comment with unknown author", "comment_id", comment.ID)
+			continue
+		}
+
+		commentResult := CommentResult{
+			GitLabNoteID:   comment.ID,
+			AuthorUsername: comment.Author.Username,
+		}
+		if comment.CreatedAt != nil {
+			commentResult.CreatedAt = *comment.CreatedAt
+		}
+
+		commentAuthor, err := p.m.glClient.GetUser(ctx, comment.Author.Username)
+		if err != nil {
+			commentResult.Status = StatusFailed
+			commentResult.Error = fmt.Sprintf("retrieving gitlab user: %v", err)
+			result.Comments = append(result.Comments, commentResult)
+			result.FailedComments++
+			p.log.Error("retrieving gitlab user for comment", "comment_id", comment.ID, "error", err)
+			continue
+		}
+		githubCommentAuthorName := githubMention(commentAuthor, comment.Author.Name)
+
+		commentBody := fmt.Sprintf(`> [!NOTE]
 > This comment was migrated from GitLab
 >
 > |      |      |
@@ -1136,69 +1195,50 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 > |      |      |
 >
 
-## Original Comment
+%[5]s
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format(config.DateFormat), comment.Body)
+%[4]s`, githubCommentAuthorName, comment.ID, formatDate(comment.CreatedAt), comment.Body, commentTextHeading)
 
-			foundExistingComment := false
-			for _, prComment := range prComments {
-				if prComment == nil {
-					continue
-				}
-
-				if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Note ID** | %d", comment.ID)) {
-					foundExistingComment = true
-
-					if prComment.Body == nil || *prComment.Body != commentBody {
-						p.log.Debug("updating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
-						prComment.Body = &commentBody
-						if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], prComment.GetID(), prComment); err != nil {
-							commentResult.Status = StatusFailed
-							commentResult.Error = fmt.Sprintf("updating comment: %v", err)
-							result.Comments = append(result.Comments, commentResult)
-							result.FailedComments++
-							p.log.Error("updating pull request comment", "comment_id", comment.ID, "error", err)
-							continue
-						}
-					}
-					commentResult.Status = StatusSuccess
-					commentResult.GitHubCommentID = Pointer(prComment.GetID())
-					result.MigratedComments++
-				} else {
-					p.log.Trace("existing pull request comment is up-to-date", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
-				}
-			}
-
-			if !foundExistingComment {
-				p.log.Debug("creating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
-				newComment := gogithub.IssueComment{
-					Body: &commentBody,
-				}
-				createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
-				if err != nil {
+		existingComment := findMigratedComment(prComments, comment.ID)
+		if existingComment != nil {
+			if existingComment.Body == nil || *existingComment.Body != commentBody {
+				p.log.Debug("updating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", existingComment.GetID())
+				existingComment.Body = &commentBody
+				if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], existingComment.GetID(), existingComment); err != nil {
 					commentResult.Status = StatusFailed
-					commentResult.Error = fmt.Sprintf("creating comment: %v", err)
+					commentResult.Error = fmt.Sprintf("updating comment: %v", err)
 					result.Comments = append(result.Comments, commentResult)
 					result.FailedComments++
-					p.log.Error("creating pull request comment", "comment_id", comment.ID, "error", err)
+					p.log.Error("updating pull request comment", "comment_id", comment.ID, "error", err)
 					continue
 				}
-				commentResult.Status = StatusSuccess
-				commentResult.GitHubCommentID = createdComment.ID
-				result.MigratedComments++
+			} else {
+				p.log.Trace("existing pull request comment is up-to-date", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", existingComment.GetID())
 			}
-
-			result.Comments = append(result.Comments, commentResult)
+			commentResult.Status = StatusSuccess
+			commentResult.GitHubCommentID = Pointer(existingComment.GetID())
+			result.MigratedComments++
+		} else {
+			p.log.Debug("creating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
+			newComment := gogithub.IssueComment{
+				Body: &commentBody,
+			}
+			createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
+			if err != nil {
+				commentResult.Status = StatusFailed
+				commentResult.Error = fmt.Sprintf("creating comment: %v", err)
+				result.Comments = append(result.Comments, commentResult)
+				result.FailedComments++
+				p.log.Error("creating pull request comment", "comment_id", comment.ID, "error", err)
+				continue
+			}
+			commentResult.Status = StatusSuccess
+			commentResult.GitHubCommentID = createdComment.ID
+			result.MigratedComments++
 		}
-	}
 
-	if result.FailedComments > 0 {
-		result.Status = StatusPartial
-	} else {
-		result.Status = StatusSuccess
+		result.Comments = append(result.Comments, commentResult)
 	}
-
-	return result, nil
 }
 
 // listMergeRequestCommits returns all commits of the merge request, oldest
@@ -1414,6 +1454,42 @@ func githubMention(u *gogitlab.User, fallback string) string {
 	return "@" + strings.TrimPrefix(strings.ToLower(u.WebsiteURL), "https://github.com/")
 }
 
+// commentTextHeading is the line of a migrated comment that ends the generated
+// header and starts the original text of the GitLab note.
+const commentTextHeading = "## Original Comment"
+
+// bodyMatchesNote reports whether body is the text of a comment that the tool
+// migrated for the GitLab note noteID. It matches the whole table cell
+// including the closing pipe, so note 12 does not match the comment of note 123.
+// It looks only at the header the tool generates, which ends before the
+// original text: users write that text, and it can quote another header.
+// The heading must be a whole line, so a line like "## Original Commentary" does
+// not end the header. The line may end with CRLF: the GitHub web editor saves
+// comments that way. A body without the heading is not a comment of the tool,
+// so it never matches.
+func bodyMatchesNote(body string, noteID int64) bool {
+	loc := commentTextHeadingLine.FindStringIndex(body)
+	if loc == nil {
+		return false
+	}
+	return strings.Contains(body[:loc[0]], fmt.Sprintf("**Note ID** | %d |", noteID))
+}
+
+// commentTextHeadingLine finds commentTextHeading as a whole line, with the line
+// break in front of it.
+var commentTextHeadingLine = regexp.MustCompile(`\n` + regexp.QuoteMeta(commentTextHeading) + `\r?(\n|$)`)
+
+// findMigratedComment returns the first of prComments that was migrated for the
+// GitLab note noteID, or nil when there is none.
+func findMigratedComment(prComments []*gogithub.IssueComment, noteID int64) *gogithub.IssueComment {
+	for _, prComment := range prComments {
+		if prComment != nil && bodyMatchesNote(prComment.GetBody(), noteID) {
+			return prComment
+		}
+	}
+	return nil
+}
+
 func bodyMatchesMergeRequest(body string, mrIID int64) bool {
 	return strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | %d |", mrIID)) ||
 		strings.Contains(body, fmt.Sprintf("**GitLab MR Number** | [%d]", mrIID))
@@ -1536,6 +1612,27 @@ func (p *project) retryOnNotFound(ctx context.Context, desc string, fn func() er
 	}
 	p.log.Warn("retries exhausted, still 404", "operation", desc, "attempts", len(retryDelays)+1)
 	return err
+}
+
+// rearchiveGracePeriod is how long the re-archive of a temporarily unarchived
+// repository may still run after the migration was canceled (Ctrl+C). It
+// covers the retries of setArchivedWithRetry. A variable, so tests can make it
+// short.
+var rearchiveGracePeriod = 2 * time.Minute
+
+// detachedContext returns a context with the values of ctx that is not
+// canceled together with ctx. Once ctx is done, the returned context ends
+// after grace. Call stop when the work is done.
+func detachedContext(ctx context.Context, grace time.Duration) (detached context.Context, stop func()) {
+	detached, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopAfter := context.AfterFunc(ctx, func() {
+		timer := time.AfterFunc(grace, cancel)
+		context.AfterFunc(detached, func() { timer.Stop() })
+	})
+	return detached, func() {
+		stopAfter()
+		cancel()
+	}
 }
 
 func (p *project) setArchived(ctx context.Context, archived bool) error {

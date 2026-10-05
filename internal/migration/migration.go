@@ -71,13 +71,21 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 	queue := make(chan queuedProject, concurrency*2)
 	resultChan := make(chan passResult, concurrency*2)
 
-	// With -loop the final report is only written after the loop ends, so the
-	// detailed report is also written each time a pass is complete.
+	// With -loop the next pass is queued only after every project of the
+	// previous pass has finished, so the work of two passes never overlaps.
+	// Only one pass runs at a time, so one buffered slot is enough and the
+	// collector never blocks on it, even after the loop has stopped.
+	// The final report is only written after the loop ends, so the detailed
+	// report is also written each time a pass is complete.
 	var onPassDone func(pass int)
-	if m.cfg.Loop && m.cfg.DetailedReport {
+	passDone := make(chan struct{}, 1)
+	if m.cfg.Loop {
 		onPassDone = func(pass int) {
 			m.logger.Info("loop pass finished", "pass", pass)
-			m.writeDetailedReport(collector.Snapshot(), sessionID)
+			if m.cfg.DetailedReport {
+				m.writeDetailedReport(collector.Snapshot(), sessionID)
+			}
+			passDone <- struct{}{}
 		}
 	}
 
@@ -129,27 +137,23 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 		}()
 	}
 
-	queueProjects := func(pass int) {
-		for _, proj := range projects {
-			if err := ctx.Err(); err != nil {
-				break
-			}
-			queue <- queuedProject{slugs: proj, pass: pass}
-		}
-	}
-
 	if m.cfg.Loop {
 		m.logger.Info("looping migration until canceled")
 		for pass := 1; ; pass++ {
 			if err := ctx.Err(); err != nil {
 				break
 			}
-			queueProjects(pass)
+			queueProjects(ctx, queue, projects, pass)
+			select {
+			case <-passDone:
+			case <-ctx.Done():
+			}
 		}
 	} else {
-		queueProjects(1)
-		close(queue)
+		queueProjects(ctx, queue, projects, 1)
 	}
+	// Workers that wait for the next project stop when the queue is closed.
+	close(queue)
 
 	wg.Wait()
 	close(resultChan)
@@ -178,6 +182,24 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 type queuedProject struct {
 	slugs CSVRow
 	pass  int
+}
+
+// queueProjects sends every project of the list to the queue as part of the
+// given pass. It stops when ctx is canceled, also while it waits for a free
+// slot. In PerformMigration a plain send would not hang, because each worker
+// takes one more item before it sees the cancel. The send watches ctx anyway,
+// so the sender does not depend on that.
+func queueProjects(ctx context.Context, queue chan<- queuedProject, projects []CSVRow, pass int) {
+	for _, proj := range projects {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		select {
+		case queue <- queuedProject{slugs: proj, pass: pass}:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // passResult is the result of a queuedProject.
@@ -283,35 +305,22 @@ func (m *Migrator) reportProject(ctx context.Context, slugs []string) (*Report, 
 		return nil, fmt.Errorf("parsing project slugs: %w", err)
 	}
 
+	// The project is looked up by its path, like newProject does. A search
+	// would need to read all of its pages to find the project.
 	m.logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
-	searchTerm := gitlabPath[1]
-	projectResult, _, err := m.gl.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm}, gogitlab.WithContext(ctx))
+	proj, _, err := m.gl.Projects.GetProject(slugs[0], nil, gogitlab.WithContext(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("listing projects: %w", err)
-	}
-
-	var proj *gogitlab.Project
-	for _, item := range projectResult {
-		if item == nil {
-			continue
-		}
-		if item.PathWithNamespace == slugs[0] {
-			m.logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
-			proj = item
-		}
+		return nil, fmt.Errorf("retrieving project: %w", err)
 	}
 
 	if proj == nil {
 		return nil, fmt.Errorf("no matching GitLab project found: %s", slugs[0])
 	}
+	m.logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
 
 	var mergeRequests []*gogitlab.BasicMergeRequest
 
-	opts := &gogitlab.ListProjectMergeRequestsOptions{
-		ListOptions: gogitlab.ListOptions{PerPage: 100},
-		OrderBy:     Pointer("created_at"),
-		Sort:        Pointer("asc"),
-	}
+	opts := mergeRequestListOptions(m.cfg.MergeRequestsAge)
 
 	m.logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
 	for {

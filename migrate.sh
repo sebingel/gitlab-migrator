@@ -168,7 +168,7 @@ arguments+=("-skip-invalid-merge-requests")
 
 # -merge-requests-max-age: Only merge requests created in the last N days.
 #   Must be a whole number. 0 or less means no limit.
-#   Only with: -migrate-pull-requests. -report ignores it.
+#   Only with: -migrate-pull-requests, or -report (then it lowers the count).
 # arguments+=("-merge-requests-max-age" "365")
 
 # ----------------------------------------------------------------------------
@@ -195,9 +195,8 @@ arguments+=("-state-dir" "./state")
 # arguments+=("-max-concurrency" "8")
 
 # -loop: After the last project, start again with the first one, until you press Ctrl+C.
-#   A new pass does not wait for the last one to end, so with two or more projects and
-#   -max-concurrency above 1 (the default is 4) the same project can be migrated twice
-#   at the same time.
+#   A new pass starts only when every project of the last pass is done, so passes do
+#   not overlap.
 #   No effect with: -report.
 # arguments+=("-loop")
 
