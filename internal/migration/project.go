@@ -211,7 +211,7 @@ func formatPushError(msg, hint string, err error, sideband string) error {
 	return fmt.Errorf("%s", base)
 }
 
-func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
+func (p *project) migrate(ctx context.Context) (result ProjectResult, err error) {
 	p.result = ProjectResult{
 		GitLabGroup:      p.gitlabPath[0],
 		GitLabProject:    p.gitlabPath[1],
@@ -221,6 +221,15 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 		BranchesMigrated: make([]string, 0),
 		MergeRequests:    make([]MergeRequestResult, 0),
 	}
+	// Every return, also an error return, reports the end time and the
+	// branches mirrored so far. This deferred func runs last, after the
+	// re-archive and the storage cleanup.
+	defer func() {
+		p.result.EndTime = time.Now()
+		p.result.Duration = p.result.EndTime.Sub(p.result.StartTime)
+		p.result.BranchCount = len(p.result.BranchesMigrated)
+		result = p.result
+	}()
 
 	p.log.Debug("checking for existing repository on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1])
 	githubRepo, _, err := p.m.gh.Repositories.Get(ctx, p.githubPath[0], p.githubPath[1])
@@ -303,10 +312,6 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			}
 		}
 	}
-
-	p.result.EndTime = time.Now()
-	p.result.Duration = p.result.EndTime.Sub(p.result.StartTime)
-	p.result.BranchCount = len(p.result.BranchesMigrated)
 
 	// The report keeps the merge requests processed before an interrupt and
 	// the branches mirrored before the failure.

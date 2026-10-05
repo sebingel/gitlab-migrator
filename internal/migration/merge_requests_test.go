@@ -333,6 +333,29 @@ func TestMigrate_FailsWhenInterruptedBeforeAllMergeRequests(t *testing.T) {
 	wantFinishedResult(t, result)
 }
 
+func TestMigrate_SetsEndTimeWhenStateDirFails(t *testing.T) {
+	// Every early return of migrate() must leave a finished result, not only
+	// the merge request error path.
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.EnablePullRequests = true
+	p.m.cfg.PullRequestsOnly = true
+	serveGitHubRepo(t, p)
+
+	// A state dir below a regular file cannot be created.
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("writing the blocking file: %v", err)
+	}
+	p.m.cfg.StateDir = filepath.Join(file, "state")
+
+	result, err := p.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "creating state directory") {
+		t.Fatalf("migrate error = %v, want the failed state directory", err)
+	}
+	wantFinishedResult(t, result)
+}
+
 // wantFinishedResult checks that the report fields that migrate() sets at its
 // end are set, also for a project that failed.
 func wantFinishedResult(t *testing.T, result ProjectResult) {
