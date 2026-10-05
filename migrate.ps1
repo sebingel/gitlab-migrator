@@ -301,10 +301,17 @@ Write-Host "Press Ctrl+C to cancel..." -ForegroundColor Yellow
 Write-Host ""
 
 # Run the migration
+# Clear the exit code first: when the exe cannot be started (wrong working directory, not built),
+# $LASTEXITCODE stays empty or keeps the value of an earlier command
+$global:LASTEXITCODE = $null
 & .\gitlab-migrator.exe @arguments
 
 # Check exit code
 $exitCode = $LASTEXITCODE
+if ($null -eq $exitCode) {
+    Write-Host "gitlab-migrator.exe could not be started" -ForegroundColor Red
+    $exitCode = 1
+}
 # -version prints the version and exits with 0 before any migration: no success message then
 $showVersion = ($arguments -ccontains "-version") -or ($arguments -ccontains "--version")
 if ($exitCode -eq 0) {
