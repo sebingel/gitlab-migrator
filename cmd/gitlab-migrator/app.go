@@ -87,7 +87,11 @@ func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) {
 	a.migrator.PrintReport(ctx, projects)
 }
 
-var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
+// errNoResponseNoError is the error of CheckRetry for a call with neither a
+// response nor an error.
+var errNoResponseNoError = errors.New("retry check got neither a response nor an error")
+
+var secondaryRateLimitPattern =regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
 
 // secondaryRateLimitBaseWait is the first wait for a secondary rate limit
 // without rate limit headers. It doubles with each attempt.
@@ -252,8 +256,10 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			return false, err
 		}
 
+		// net/http never returns no response and no error. If it did, a retry
+		// would hide the defect, so the request fails with an error that names it.
 		if resp == nil {
-			return true, nil
+			return false, errNoResponseNoError
 		}
 
 		requestMethod := "unknown"

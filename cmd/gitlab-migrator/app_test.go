@@ -926,6 +926,25 @@ func TestParseGitHubError_WrapsErrors(t *testing.T) {
 	}
 }
 
+// net/http never returns no response and no error, so this state cannot happen
+// in the client. If it did, a retry would hide the defect, and retryablehttp
+// would call drainBody on a nil response and panic. CheckRetry stops and
+// returns an error that names the state.
+func TestRetryClient_CheckRetryNoResponseNoError(t *testing.T) {
+	h := newRetryHarness(t, rand.Float64)
+
+	retry, err := h.client.CheckRetry(context.Background(), nil, nil)
+	if retry {
+		t.Errorf("got retry true, want false")
+	}
+	if !errors.Is(err, errNoResponseNoError) {
+		t.Fatalf("got error %v, want %v", err, errNoResponseNoError)
+	}
+	if !strings.Contains(err.Error(), "neither a response nor an error") {
+		t.Errorf("got error %q, want it to name the state", err)
+	}
+}
+
 // Without a response, retryablehttp calls CheckRetry with the error and then
 // Backoff with resp == nil. No body is involved, so the test calls both directly.
 func TestRetryClient_NetworkErrors(t *testing.T) {
@@ -948,13 +967,6 @@ func TestRetryClient_NetworkErrors(t *testing.T) {
 	cancel()
 	if retry, err := h.client.CheckRetry(cancelled, nil, dropped); retry || err != dropped {
 		t.Errorf("cancelled context: got (%v, %v), want (false, %v)", retry, err, dropped)
-	}
-
-	// net/http never returns no response and no error, so this case cannot
-	// happen in the client. If it did, retryablehttp would call drainBody on a
-	// nil response and panic. The test only pins the current result.
-	if retry, err := h.client.CheckRetry(ctx, nil, nil); !retry || err != nil {
-		t.Errorf("no response and no error: got (%v, %v), want (true, nil)", retry, err)
 	}
 
 	h.client.Backoff(h.client.RetryWaitMin, h.client.RetryWaitMax, 0, nil)
