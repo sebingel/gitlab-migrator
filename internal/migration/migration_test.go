@@ -1,8 +1,91 @@
 package migration
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+	"github.com/sebingel/gitlab-migrator/internal/config"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
+
+// TestPerformMigration_LoopStartsNextPassAfterPreviousPass runs -loop with a
+// slow and a fast project. A new pass that does not wait for the previous one
+// lets the worker of the fast project start the slow project again while the
+// other worker still runs it.
+func TestPerformMigration_LoopStartsNextPassAfterPreviousPass(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const stopAfter = 6 // three passes over two projects
+	var (
+		mu       sync.Mutex
+		running  = make(map[string]int)
+		overlaps []string
+		requests int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+		mu.Lock()
+		running[path]++
+		if running[path] > 1 {
+			overlaps = append(overlaps, path)
+		}
+		requests++
+		if requests == stopAfter {
+			cancel()
+		}
+		mu.Unlock()
+
+		if strings.HasSuffix(path, "slow") {
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		mu.Lock()
+		running[path]--
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	gl, err := gogitlab.NewClient("test-token", gogitlab.WithBaseURL(srv.URL))
+	if err != nil {
+		t.Fatalf("creating GitLab client: %v", err)
+	}
+	m := &Migrator{
+		cfg:    &config.Config{Loop: true, MaxConcurrency: 4},
+		gl:     gl,
+		logger: hclog.NewNullLogger(),
+	}
+	projects := []CSVRow{{"group/slow", "owner/slow"}, {"group/fast", "owner/fast"}}
+
+	done := make(chan struct{})
+	go func() {
+		_ = m.PerformMigration(ctx, projects, NewResultCollector(), "test-session")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("PerformMigration did not return after the context was canceled")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(overlaps) > 0 {
+		t.Errorf("projects ran twice at the same time: %v", overlaps)
+	}
+	if requests < stopAfter {
+		t.Errorf("got %d project lookups, want at least %d", requests, stopAfter)
+	}
+}
 
 func TestCollectResults_CallsOnPassDoneWhenAPassIsComplete(t *testing.T) {
 	collector := NewResultCollector()

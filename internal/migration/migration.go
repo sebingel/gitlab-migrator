@@ -71,13 +71,21 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 	queue := make(chan queuedProject, concurrency*2)
 	resultChan := make(chan passResult, concurrency*2)
 
-	// With -loop the final report is only written after the loop ends, so the
-	// detailed report is also written each time a pass is complete.
+	// With -loop the next pass is queued only after every project of the
+	// previous pass has finished, so a project never runs twice at the same
+	// time. Only one pass runs at a time, so one buffered slot is enough and the
+	// collector never blocks on it, even after the loop has stopped.
+	// The final report is only written after the loop ends, so the detailed
+	// report is also written each time a pass is complete.
 	var onPassDone func(pass int)
-	if m.cfg.Loop && m.cfg.DetailedReport {
+	passDone := make(chan struct{}, 1)
+	if m.cfg.Loop {
 		onPassDone = func(pass int) {
 			m.logger.Info("loop pass finished", "pass", pass)
-			m.writeDetailedReport(collector.Snapshot(), sessionID)
+			if m.cfg.DetailedReport {
+				m.writeDetailedReport(collector.Snapshot(), sessionID)
+			}
+			passDone <- struct{}{}
 		}
 	}
 
@@ -145,11 +153,16 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 				break
 			}
 			queueProjects(pass)
+			select {
+			case <-passDone:
+			case <-ctx.Done():
+			}
 		}
 	} else {
 		queueProjects(1)
-		close(queue)
 	}
+	// Workers that wait for the next project stop when the queue is closed.
+	close(queue)
 
 	wg.Wait()
 	close(resultChan)
