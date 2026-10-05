@@ -48,6 +48,11 @@ func TestCreateGitStorage_FilesystemWithSubgroupPath(t *testing.T) {
 			if !strings.HasPrefix(filepath.Base(p.storagePath), "gitlab-migrator-") {
 				t.Errorf("storage directory name = %q, want prefix gitlab-migrator-", filepath.Base(p.storagePath))
 			}
+			// On Linux a backslash is an ordinary file name character, so the
+			// parent check above does not catch it. Check the name itself.
+			if base := filepath.Base(p.storagePath); strings.ContainsAny(base, `/\`) {
+				t.Errorf("storage directory name = %q, must not contain a path separator", base)
+			}
 			if _, err := os.Stat(filepath.Join(p.storagePath, ".git")); err != nil {
 				t.Errorf(".git directory missing: %v", err)
 			}
