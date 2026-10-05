@@ -203,3 +203,26 @@ func TestMigrateComments_NoteIDInTheOriginalTextIsNotAMatch(t *testing.T) {
 		t.Errorf("created comments = %d, want 1 for note 12", len(cs.created))
 	}
 }
+
+func TestMigrateComments_CommentWithoutOriginalCommentHeadingIsNotAMatch(t *testing.T) {
+	cs := &commentServer{}
+	p := newCommentProject(t, cs)
+	var result MergeRequestResult
+
+	// A comment that a person wrote on the pull request has no generated
+	// header, so a quoted header line in it must not make it a match.
+	commentID := int64(500)
+	body := "I saw this line in another comment:\n> | **Note ID** | 12 |\n"
+	personal := &gogithub.IssueComment{ID: &commentID, Body: &body}
+
+	p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+		[]*gogitlab.Note{gitLabNote(12, "text of note 12")},
+		[]*gogithub.IssueComment{personal}, &result)
+
+	if len(cs.edited) != 0 {
+		t.Errorf("edited comments = %v, want none: the comment is not a migrated comment", cs.edited)
+	}
+	if len(cs.created) != 1 {
+		t.Errorf("created comments = %d, want 1 for note 12", len(cs.created))
+	}
+}

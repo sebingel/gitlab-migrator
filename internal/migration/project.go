@@ -1434,8 +1434,12 @@ const commentTextHeading = "## Original Comment"
 // including the closing pipe, so note 12 does not match the comment of note 123.
 // It looks only at the header the tool generates, which ends before the
 // original text: users write that text, and it can quote another header.
+// A body without the heading is not a comment of the tool, so it never matches.
 func bodyMatchesNote(body string, noteID int64) bool {
-	header, _, _ := strings.Cut(body, "\n"+commentTextHeading)
+	header, _, found := strings.Cut(body, "\n"+commentTextHeading)
+	if !found {
+		return false
+	}
 	return strings.Contains(header, fmt.Sprintf("**Note ID** | %d |", noteID))
 }
 
