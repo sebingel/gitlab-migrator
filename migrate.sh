@@ -282,10 +282,13 @@ fi
 # Display configuration
 echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
 echo -e "\033[36m=====================================\033[0m"
-echo "GitHub User:    $GITHUB_USER"
-echo "GitLab Domain:  $GITLAB_DOMAIN"
-echo "GitHub Domain:  $GITHUB_DOMAIN"
-echo "Projects CSV:   $PROJECTS_CSV"
+# The prepare mode block does not pass these four values, so they are not shown then
+if [ "$prepare_mode" = false ]; then
+    echo "GitHub User:    $GITHUB_USER"
+    echo "GitLab Domain:  $GITLAB_DOMAIN"
+    echo "GitHub Domain:  $GITHUB_DOMAIN"
+    echo "Projects CSV:   $PROJECTS_CSV"
+fi
 echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
 echo "Log Level:      $LOG_LEVEL"
 echo ""

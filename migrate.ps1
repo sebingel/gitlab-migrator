@@ -276,10 +276,13 @@ if (-not $prepareMode) {
 # Display configuration
 Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
-Write-Host "GitHub User:    $GitHubUser"
-Write-Host "GitLab Domain:  $GitLabDomain"
-Write-Host "GitHub Domain:  $GitHubDomain"
-Write-Host "Projects CSV:   $ProjectsCsv"
+# The prepare mode block does not pass these four values, so they are not shown then
+if (-not $prepareMode) {
+    Write-Host "GitHub User:    $GitHubUser"
+    Write-Host "GitLab Domain:  $GitLabDomain"
+    Write-Host "GitHub Domain:  $GitHubDomain"
+    Write-Host "Projects CSV:   $ProjectsCsv"
+}
 Write-Host "Log Directory:  $(if ($LogDirectory) { $LogDirectory } else { '(default: ./logs)' })"
 Write-Host "Log Level:      $($env:LOG_LEVEL)"
 Write-Host ""
