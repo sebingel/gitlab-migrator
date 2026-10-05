@@ -301,17 +301,25 @@ function Format-Argument([string]$value) {
     }
     return $value
 }
+# Windows PowerShell 5.1 (and pwsh before 7.3, or with $PSNativeCommandArgumentPassing set to
+# "Legacy") does not pass an empty argument to the exe at all, so the display leaves it out too.
+# The next argument then becomes the value of the flag, as the tool gets it.
+$shownArguments = $arguments
+$argumentPassing = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
+if ($argumentPassing -ne "Standard" -and $argumentPassing -ne "Windows") {
+    $shownArguments = @($arguments | Where-Object { [string]$_ -ne "" })
+}
 Write-Host "Arguments:"
 $i = 0
-while ($i -lt $arguments.Count) {
-    $arg = [string]$arguments[$i]
+while ($i -lt $shownArguments.Count) {
+    $arg = [string]$shownArguments[$i]
     $line = Format-Argument $arg
     $i++
     # -flag and --flag are the same flag, and -flag=value already holds its value
     $name = "-" + ($arg -replace "^--?", "")
     if ($arg -match "^-." -and $arg -ne "--" -and $arg -notmatch "=" -and
-        $noValueFlags -cnotcontains $name -and $i -lt $arguments.Count) {
-        $line += " " + (Format-Argument ([string]$arguments[$i]))
+        $noValueFlags -cnotcontains $name -and $i -lt $shownArguments.Count) {
+        $line += " " + (Format-Argument ([string]$shownArguments[$i]))
         $i++
     }
     Write-Host "  $line"
