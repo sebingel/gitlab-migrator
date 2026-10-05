@@ -108,6 +108,28 @@ func createLogWriter(logOutput, logDirectory, sessionID string) (io.Writer, *os.
 	return os.Stderr, nil, nil
 }
 
+// loadConfig applies the -merge-requests-max-age flag value to cfg and then
+// loads the -config file, so a value from the file overrides the flag like it
+// does for every other flag. An empty mergeRequestsAgeRaw keeps the current
+// value; text that is not an integer is an error.
+func loadConfig(cfg *config.Config, configPath, mergeRequestsAgeRaw string) error {
+	if mergeRequestsAgeRaw != "" {
+		age, err := strconv.Atoi(mergeRequestsAgeRaw)
+		if err != nil {
+			return fmt.Errorf("must specify an integer for -merge-requests-max-age, got %q", mergeRequestsAgeRaw)
+		}
+		cfg.MergeRequestsAge = age
+	}
+
+	if configPath != "" {
+		if err := cfg.LoadFile(configPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	var err error
 
@@ -182,11 +204,9 @@ func main() {
 		return
 	}
 
-	if configPath != "" {
-		if err = cfg.LoadFile(configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
+	if err = loadConfig(cfg, configPath, mergeRequestsAgeRaw); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	sessionID := time.Now().Format("2006-01-02-150405")
@@ -249,13 +269,6 @@ func main() {
 	if cfg.GithubUser == "" {
 		logger.Error("must specify GitHub user")
 		os.Exit(1)
-	}
-
-	if mergeRequestsAgeRaw != "" {
-		if cfg.MergeRequestsAge, err = strconv.Atoi(mergeRequestsAgeRaw); err != nil {
-			logger.Error("must specify an integer for -merge-requests-age")
-			os.Exit(1)
-		}
 	}
 
 	if cfg.PullRequestsOnly {

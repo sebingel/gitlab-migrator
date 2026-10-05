@@ -110,11 +110,20 @@ func (c *Config) LoadFile(path string) error {
 	return nil
 }
 
+// validateLogDirectory checks that -log-directory is used together with a
+// -log-output that writes to a file. Normal mode and prepare mode share it.
+func (c *Config) validateLogDirectory() error {
+	if c.LogDirectory != "" && !strings.Contains(strings.ToLower(c.LogOutput), "file") {
+		return fmt.Errorf("-log-directory requires -log-output to include 'file' (e.g. -log-output=file or -log-output=console,file)")
+	}
+	return nil
+}
+
 // Validate checks that the migration configuration is consistent and complete.
 // It returns the first validation error encountered.
 func (c *Config) Validate() error {
-	if c.LogDirectory != "" && !strings.Contains(strings.ToLower(c.LogOutput), "file") {
-		return fmt.Errorf("-log-directory requires -log-output to include 'file' (e.g. -log-output=file or -log-output=console,file)")
+	if err := c.validateLogDirectory(); err != nil {
+		return err
 	}
 
 	repoSpecifiedInline := c.GithubRepo != "" && c.GitlabProject != ""
@@ -164,6 +173,9 @@ func (c *Config) Validate() error {
 
 // ValidatePrepare checks that prepare-mode configuration is consistent.
 func (c *Config) ValidatePrepare() error {
+	if err := c.validateLogDirectory(); err != nil {
+		return err
+	}
 	if c.PrepareCloneURL == "" || c.PrepareTargetURL == "" {
 		return fmt.Errorf("-prepare requires both -prepare-clone-url and -prepare-target-url")
 	}
@@ -172,6 +184,10 @@ func (c *Config) ValidatePrepare() error {
 	}
 	if c.GithubRepo != "" || c.GitlabProject != "" || c.ProjectsCsvPath != "" {
 		return fmt.Errorf("-prepare cannot be combined with -github-repo, -gitlab-project, or -projects-csv")
+	}
+	// 0 means automatic; a negative value gives an invalid batch size.
+	if c.PrepareBatchCount < 0 {
+		return fmt.Errorf("-prepare-batch-count must not be negative, got %d", c.PrepareBatchCount)
 	}
 	return nil
 }

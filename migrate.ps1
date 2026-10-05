@@ -16,17 +16,6 @@ $env:LOG_LEVEL = "TRACE"
 # $env:GITHUB_TOKEN = "github_pat_..."
 # $env:GITLAB_TOKEN = "glpat-..."
 
-# Verify tokens are set
-if (-not $env:GITHUB_TOKEN) {
-    Write-Error "GITHUB_TOKEN environment variable is not set"
-    exit 1
-}
-
-if (-not $env:GITLAB_TOKEN) {
-    Write-Error "GITLAB_TOKEN environment variable is not set"
-    exit 1
-}
-
 # ============================================================================
 # Command arguments
 # ============================================================================
@@ -228,8 +217,7 @@ if ($LogDirectory) {
 # ----------------------------------------------------------------------------
 
 # -config: JSON file with settings. Its values override the flags of this script,
-#   except -merge-requests-max-age (the flag wins) and the flags that -pull-requests-only
-#   implies (they stay on).
+#   except the flags that -pull-requests-only implies (they stay on).
 #   Tokens are not allowed in it. They come from the environment only.
 # $arguments += "-config", "migration.json"
 
@@ -245,8 +233,11 @@ if ($LogDirectory) {
 # optional: add only what you need. The block replaces all flags above. Of those, only
 # -log-output, -log-directory and -config still work in prepare mode: add them after the
 # block. -version also exits before prepare mode starts.
-# In prepare mode, the tool does not check that -log-output has "file" for -log-directory.
-# Prepare mode needs no tokens, but this script checks them anyway.
+# As in normal mode, the tool stops with an error when -log-directory is set but -log-output
+# has no "file".
+# Prepare mode needs no tokens: the script skips the token check when the arguments
+# contain -prepare. (A -prepare set only in the -config file is not seen: the script
+# then still checks the tokens.)
 #
 # -prepare: Start prepare mode.
 #   Requires: -prepare-clone-url, -prepare-target-url.
@@ -257,7 +248,7 @@ if ($LogDirectory) {
 #   Without it, prepare mode stops when it finds a file over 100 MB.
 # -prepare-batch-count: Number of push batches. Default (and 0): batches only for repos over
 #   2 GiB, 10 per GiB (at least 10). A value above 0 forces batches, also for small repos.
-#   The tool does not reject negative values (they push one commit at a time): do not use them.
+#   A negative value is an error.
 # The -prepare-* flags have no effect without -prepare.
 # $arguments = @(
 #     "-prepare",
@@ -266,6 +257,20 @@ if ($LogDirectory) {
 # )
 # $arguments += "-prepare-large-files", "remove"  # or "lfs"
 # $arguments += "-prepare-batch-count", "10"
+
+# Verify tokens are set (prepare mode needs no tokens)
+$prepareMode = ($arguments -ccontains "-prepare") -or ($arguments -ccontains "--prepare")
+if (-not $prepareMode) {
+    if (-not $env:GITHUB_TOKEN) {
+        Write-Error "GITHUB_TOKEN environment variable is not set"
+        exit 1
+    }
+
+    if (-not $env:GITLAB_TOKEN) {
+        Write-Error "GITLAB_TOKEN environment variable is not set"
+        exit 1
+    }
+}
 
 # Display configuration
 Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
@@ -295,19 +300,36 @@ Write-Host "Press Ctrl+C to cancel..." -ForegroundColor Yellow
 Write-Host ""
 
 # Run the migration
-& .\gitlab-migrator.exe @arguments
+# Clear the exit code first: when the exe cannot be started (wrong working directory, not built),
+# $LASTEXITCODE stays empty or keeps the value of an earlier command
+$global:LASTEXITCODE = $null
+$startError = $null
+try {
+    & .\gitlab-migrator.exe @arguments
+} catch {
+    # PowerShell throws when it cannot start the exe. Catch it, so that only one message is printed.
+    $startError = $_.Exception.Message
+}
 
 # Check exit code
+$exitCode = $LASTEXITCODE
+if ($startError -or $null -eq $exitCode) {
+    # No migration ran and the tool wrote no log files: skip the generic error messages below
+    Write-Host "gitlab-migrator.exe could not be started$(if ($startError) { ": $startError" })" -ForegroundColor Red
+    exit 1
+}
 # -version prints the version and exits with 0 before any migration: no success message then
 $showVersion = ($arguments -ccontains "-version") -or ($arguments -ccontains "--version")
-if ($LASTEXITCODE -eq 0) {
+if ($exitCode -eq 0) {
     if (-not $showVersion) {
         Write-Host ""
         Write-Host "Migration completed successfully!" -ForegroundColor Green
     }
 } else {
     Write-Host ""
-    Write-Host "Migration completed with errors (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+    Write-Host "Migration completed with errors (exit code: $exitCode)" -ForegroundColor Yellow
     Write-Host "Check log files for details" -ForegroundColor Yellow
 }
 
+# Pass on the exit code of the tool, so a caller or scheduler sees a failed migration
+exit $exitCode
