@@ -10,12 +10,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/sebingel/gitlab-migrator/internal/config"
@@ -831,5 +836,220 @@ func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
 	}
 	if want := "> | **Date Originally Opened** | " + unknownDate + " |"; !strings.Contains(editedBody, want) {
 		t.Errorf("pull request body = %q, want it to contain %q", editedBody, want)
+	}
+}
+
+// useGitHubMux points the GitHub API client of p to a test server for ghMux.
+func useGitHubMux(t *testing.T, p *project, ghMux *http.ServeMux) {
+	t.Helper()
+	ghSrv := httptest.NewServer(ghMux)
+	t.Cleanup(ghSrv.Close)
+	gh := gogithub.NewClient(nil)
+	baseURL, err := url.Parse(ghSrv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing GitHub test server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+	p.m.gh = gh
+}
+
+// noCommitsBetween returns a handler that answers the creation of a pull
+// request with the 422 error that GitHub sends when the head branch has no
+// commits that the base branch does not have. It calls onCreate first, when it
+// is not nil.
+func noCommitsBetween(t *testing.T, onCreate func()) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if onCreate != nil {
+			onCreate()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		if _, err := fmt.Fprint(w, `{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"No commits between migration-target-3/main and migration-source-3/feature"}]}`); err != nil {
+			t.Errorf("writing the pull request error: %v", err)
+		}
+	}
+}
+
+// wantNoCommitsBetweenSkip checks that MR !3 was skipped because its branches
+// have no commits between them.
+func wantNoCommitsBetweenSkip(t *testing.T, result MergeRequestResult, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSkipped || !strings.Contains(result.SkipReason, "has no new commits") {
+		t.Fatalf("result = %+v, want skipped because the branches have no commits between them", result)
+	}
+}
+
+// migrateWithTempBranchesViaAPI migrates the merged MR !3 with
+// -pull-requests-only, so its temporary branches are created by API. GitHub
+// answers the creation of the pull request with createPR. It returns the
+// result, the branches that were deleted and the error.
+func migrateWithTempBranchesViaAPI(t *testing.T, createPR http.HandlerFunc) (MergeRequestResult, []string, error) {
+	t.Helper()
+	const startSHA = "1111111111111111111111111111111111111111"
+	const endSHA = "2222222222222222222222222222222222222222"
+
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/commits", []*gogitlab.Commit{
+		{ID: startSHA, ShortID: startSHA[:8]},
+		{ID: endSHA, ShortID: endSHA[:8]},
+	}, &calls)
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.PullRequestsOnly = true
+	p.m.ghClient = &searchGitHub{}
+
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("GET /repos/owner/repo/git/commits/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprintf(w, `{"sha":%q,"parents":[{"sha":"0000000000000000000000000000000000000000"}]}`, r.PathValue("sha")); err != nil {
+			t.Errorf("writing the commit: %v", err)
+		}
+	})
+	var created, deleted []string
+	ghMux.HandleFunc("POST /repos/owner/repo/git/refs", func(w http.ResponseWriter, r *http.Request) {
+		var ref gogithub.CreateRef
+		if err := json.NewDecoder(r.Body).Decode(&ref); err != nil {
+			t.Errorf("decoding the created reference: %v", err)
+		}
+		created = append(created, ref.Ref)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		if _, err := fmt.Fprintf(w, `{"ref":%q}`, ref.Ref); err != nil {
+			t.Errorf("writing the created reference: %v", err)
+		}
+	})
+	ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+		deleted = append(deleted, "refs/"+r.PathValue("ref"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ghMux.HandleFunc("POST /repos/owner/repo/pulls", createPR)
+	useGitHubMux(t, p, ghMux)
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
+	})
+
+	if want := []string{"refs/heads/migration-target-3/main", "refs/heads/migration-source-3/feature"}; !slices.Equal(created, want) {
+		t.Fatalf("created branches = %v, want %v", created, want)
+	}
+	slices.Sort(deleted)
+	return result, deleted, err
+}
+
+func TestMigrateMergeRequest_NoCommitsBetweenDeletesTemporaryBranchesViaAPI(t *testing.T) {
+	// GitHub refuses the pull request because the temporary branches have no
+	// commits between them, so both temporary branches must be deleted again.
+	result, deleted, err := migrateWithTempBranchesViaAPI(t, noCommitsBetween(t, nil))
+	wantNoCommitsBetweenSkip(t, result, err)
+
+	if want := []string{"refs/heads/migration-source-3/feature", "refs/heads/migration-target-3/main"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted branches = %v, want %v", deleted, want)
+	}
+}
+
+func TestMigrateMergeRequest_FailedPullRequestKeepsTemporaryBranchesViaAPI(t *testing.T) {
+	// Any other error of the pull request creation fails the merge request,
+	// and the temporary branches stay as before.
+	result, deleted, err := migrateWithTempBranchesViaAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	if err == nil || !strings.Contains(err.Error(), "creating pull request") {
+		t.Fatalf("migrateMergeRequest = %+v, %v, want the failed pull request creation", result, err)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deleted branches = %v, want none", deleted)
+	}
+}
+
+// remoteBranches returns the sorted branch names of the repository at dir. It
+// reports errors with t.Errorf, so an HTTP handler of a test may call it.
+func remoteBranches(t *testing.T, dir string) []string {
+	t.Helper()
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Errorf("opening the remote repository: %v", err)
+		return nil
+	}
+	refs, err := repo.Branches()
+	if err != nil {
+		t.Errorf("listing the remote branches: %v", err)
+		return nil
+	}
+	var names []string
+	if err := refs.ForEach(func(ref *plumbing.Reference) error {
+		names = append(names, ref.Name().Short())
+		return nil
+	}); err != nil {
+		t.Errorf("reading the remote branches: %v", err)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *testing.T) {
+	// MR !3 gets its temporary branches by a git push to the remote "github".
+	// GitHub then refuses the pull request because the branches have no
+	// commits between them, so both temporary branches must be deleted again.
+	remoteDir := t.TempDir()
+	if _, err := git.PlainInit(remoteDir, true); err != nil {
+		t.Fatalf("creating the remote repository: %v", err)
+	}
+	repo, err := git.PlainInit(t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("creating the local repository: %v", err)
+	}
+	if _, err := repo.CreateRemote(&gitconfig.RemoteConfig{Name: "github", URLs: []string{remoteDir}}); err != nil {
+		t.Fatalf("adding the remote: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("opening the worktree: %v", err)
+	}
+	commit := func(msg string) plumbing.Hash {
+		t.Helper()
+		hash, err := worktree.Commit(msg, &git.CommitOptions{
+			AllowEmptyCommits: true,
+			Author:            &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()},
+		})
+		if err != nil {
+			t.Fatalf("committing %q: %v", msg, err)
+		}
+		return hash
+	}
+	commit("base")
+	mrCommit := commit("merge request work")
+
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/commits", []*gogitlab.Commit{
+		{ID: mrCommit.String(), ShortID: mrCommit.String()[:8]},
+	}, &calls)
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
+	p := newGitLabTestProject(t, mux)
+	p.repo = repo
+	p.m.ghClient = &searchGitHub{}
+
+	ghMux := http.NewServeMux()
+	var pushedBeforeCreate []string
+	ghMux.HandleFunc("POST /repos/owner/repo/pulls", noCommitsBetween(t, func() {
+		pushedBeforeCreate = remoteBranches(t, remoteDir)
+	}))
+	useGitHubMux(t, p, ghMux)
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
+	})
+	wantNoCommitsBetweenSkip(t, result, err)
+
+	if want := []string{"migration-source-3/feature", "migration-target-3/main"}; !slices.Equal(pushedBeforeCreate, want) {
+		t.Fatalf("remote branches when the pull request was created = %v, want %v", pushedBeforeCreate, want)
+	}
+	if got := remoteBranches(t, remoteDir); len(got) != 0 {
+		t.Errorf("remote branches after the migration = %v, want none", got)
 	}
 }

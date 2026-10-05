@@ -696,6 +696,15 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	var pullRequest *gogithub.PullRequest
 
+	// The deferred cleanups below delete the temporary branches of a closed
+	// merge request when its pull request exists, or when GitHub refused the
+	// pull request because the branches have no commits between them: then no
+	// pull request will ever use them. After other errors the branches stay.
+	noCommitsBetween := false
+	keepTempBranches := func() bool {
+		return pullRequest == nil && !noCommitsBetween
+	}
+
 	p.log.Debug("searching for any existing pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID, "state", mergeRequest.State, "source_branch", mergeRequest.SourceBranch)
 	sourceBranches := []string{mergeRequest.SourceBranch, sourceBranchForClosedMergeRequest}
 	branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
@@ -815,7 +824,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				return result, nil
 			}
 			defer func() {
-				if pullRequest == nil {
+				if keepTempBranches() {
 					return
 				}
 				p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -901,7 +910,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 
 			defer func() {
-				if pullRequest == nil {
+				if keepTempBranches() {
 					return
 				}
 				p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -1023,6 +1032,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		if err != nil {
 			if strings.Contains(err.Error(), "No commits between") {
 				p.log.Debug("skipping merge request as the change is already present in trunk branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "merge_request_id", mergeRequest.IID)
+				noCommitsBetween = true
 				result.Status = StatusSkipped
 				result.SkipReason = fmt.Sprintf("branch '%s' has no new commits relative to '%s'; changes are already present in the target branch", mergeRequest.SourceBranch, mergeRequest.TargetBranch)
 				return result, nil
