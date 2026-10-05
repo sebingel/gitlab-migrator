@@ -448,6 +448,14 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 		return fmt.Errorf("adding github remote: %w", err)
 	}
 
+	return p.pushToGitHub(ctx, githubUrl)
+}
+
+// pushToGitHub pushes the branches and tags of p.repo to its remote "github",
+// then sets the default branch of the GitHub repository and, with
+// -trim-branches-on-github, deletes the GitHub branches that GitLab does not
+// have. githubUrl is the repository URL without credentials, for the log.
+func (p *project) pushToGitHub(ctx context.Context, githubUrl string) error {
 	p.log.Debug("determining branches to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 	branches, err := p.repo.Branches()
 	if err != nil {
@@ -490,6 +498,32 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 		}
 	}
 
+	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	tagOpts := &git.PushOptions{
+		RemoteName: "github",
+		Force:      !p.m.cfg.NoForce,
+		RefSpecs:   []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
+	}
+	tagSideband, err := p.pushWithSideband(ctx, tagOpts)
+	if err != nil {
+		if errors.Is(err, git.NoErrAlreadyUpToDate) {
+			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+		} else {
+			return formatPushError("pushing tags to github repo", p.pushErrHint(err), err, tagSideband)
+		}
+	}
+
+	p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
+	updateRepoDefault := gogithub.Repository{
+		DefaultBranch: &p.defaultBranch,
+	}
+	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
+		return fmt.Errorf("setting default branch: %w", err)
+	}
+
+	// The trim comes after the default branch is set: GitHub refuses to
+	// delete its default branch, and after a trunk rename the old trunk is
+	// the default until then.
 	if p.m.cfg.TrimGithubBranches {
 		p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 		refSpecsToDelete := make([]gitconfig.RefSpec, 0)
@@ -525,29 +559,6 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 				}
 			}
 		}
-	}
-
-	p.log.Debug(pushMode+" tags to GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-	tagOpts := &git.PushOptions{
-		RemoteName: "github",
-		Force:      !p.m.cfg.NoForce,
-		RefSpecs:   []gitconfig.RefSpec{"refs/tags/*:refs/tags/*"},
-	}
-	tagSideband, err := p.pushWithSideband(ctx, tagOpts)
-	if err != nil {
-		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			p.log.Debug("repository already up-to-date on GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		} else {
-			return formatPushError("pushing tags to github repo", p.pushErrHint(err), err, tagSideband)
-		}
-	}
-
-	p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
-	updateRepoDefault := gogithub.Repository{
-		DefaultBranch: &p.defaultBranch,
-	}
-	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
-		return fmt.Errorf("setting default branch: %w", err)
 	}
 	return nil
 }
