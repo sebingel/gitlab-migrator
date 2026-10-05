@@ -285,9 +285,6 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 
 	if p.m.cfg.EnablePullRequests {
 		mrResults, err := p.migrateMergeRequests(ctx)
-		if err != nil {
-			return p.result, err
-		}
 		p.result.MergeRequests = mrResults
 
 		for _, mr := range mrResults {
@@ -302,6 +299,11 @@ func (p *project) migrate(ctx context.Context) (ProjectResult, error) {
 			case StatusPartial:
 				p.result.SuccessfulMRs++
 			}
+		}
+
+		// The report keeps the merge requests processed before an interrupt.
+		if err != nil {
+			return p.result, err
 		}
 	}
 
@@ -523,8 +525,10 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 }
 
 // migrateMergeRequests migrates the merge requests of the project. It returns
-// an error only when the merge requests cannot be listed: then none of them
-// were migrated. The failures of single merge requests are in the results.
+// an error when the merge requests cannot be listed (then none of them were
+// migrated and the results are nil) or when ctx is canceled before all of them
+// were processed (then the results hold the processed ones). The failures of
+// single merge requests are in the results.
 func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResult, error) {
 	var mergeRequests []*gogitlab.BasicMergeRequest
 
@@ -557,9 +561,11 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 	results := make([]MergeRequestResult, 0, len(mergeRequests))
 	p.log.Info("migrating merge requests from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "count", len(mergeRequests))
 
+	var interrupted error
 	for _, mergeRequest := range mergeRequests {
 		if err := ctx.Err(); err != nil {
 			p.log.Warn("migration interrupted, stopping merge request processing", "remaining", len(mergeRequests)-len(results))
+			interrupted = fmt.Errorf("migration interrupted after %d of %d merge requests: %w", len(results), len(mergeRequests), err)
 			break
 		}
 
@@ -641,7 +647,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 
 	p.log.Info("migrated merge requests from GitLab to GitHub", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "successful", successCount, "failed", failureCount, "skipped", skippedCount)
 
-	return results, nil
+	return results, interrupted
 }
 
 func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (MergeRequestResult, error) {

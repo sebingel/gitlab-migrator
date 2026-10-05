@@ -258,7 +258,18 @@ func TestMigrate_FailsWhenMergeRequestListFails(t *testing.T) {
 	p := newGitLabTestProject(t, mux)
 	p.m.cfg.EnablePullRequests = true
 	p.m.cfg.PullRequestsOnly = true
+	serveGitHubRepo(t, p)
 
+	_, err := p.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "retrieving gitlab merge requests") {
+		t.Fatalf("migrate error = %v, want the failed merge request list", err)
+	}
+}
+
+// serveGitHubRepo points the GitHub client of p to a test server that knows
+// the repository owner/repo, so migrate() can run in pull-requests-only mode.
+func serveGitHubRepo(t *testing.T, p *project) {
+	t.Helper()
 	ghMux := http.NewServeMux()
 	ghMux.HandleFunc("GET /repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -275,10 +286,48 @@ func TestMigrate_FailsWhenMergeRequestListFails(t *testing.T) {
 	}
 	gh.BaseURL = baseURL
 	p.m.gh = gh
+}
 
-	_, err = p.migrate(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "retrieving gitlab merge requests") {
-		t.Fatalf("migrate error = %v, want the failed merge request list", err)
+// cancelOnLog is a log output that calls cancel when a log line contains msg.
+type cancelOnLog struct {
+	msg    string
+	cancel context.CancelFunc
+}
+
+func (c cancelOnLog) Write(b []byte) (int, error) {
+	if strings.Contains(string(b), c.msg) {
+		c.cancel()
+	}
+	return len(b), nil
+}
+
+func TestMigrate_FailsWhenInterruptedBeforeAllMergeRequests(t *testing.T) {
+	// The project must not be reported as migrated when the run is canceled
+	// after the merge requests were listed but before all were processed.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/1/merge_requests", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `[{"iid":1,"state":"merged"},{"iid":2,"state":"merged"}]`); err != nil {
+			t.Errorf("writing the merge requests: %v", err)
+		}
+	})
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.EnablePullRequests = true
+	p.m.cfg.PullRequestsOnly = true
+	serveGitHubRepo(t, p)
+
+	// The cancel comes with the log line that is written after the list and
+	// before the loop over the merge requests, so no request is in flight.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.log = hclog.New(&hclog.LoggerOptions{
+		Level:  hclog.Info,
+		Output: cancelOnLog{msg: "migrating merge requests from GitLab to GitHub", cancel: cancel},
+	})
+
+	_, err := p.migrate(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("migrate error = %v, want context.Canceled", err)
 	}
 }
 
