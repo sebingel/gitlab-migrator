@@ -200,20 +200,6 @@ arguments+=("-state-dir" "./state")
 arguments+=("-detailed-report")
 
 # ----------------------------------------------------------------------------
-# Logging (the log level is LOG_LEVEL at the top of this script)
-# ----------------------------------------------------------------------------
-
-# -log-output: console (default), file, or console,file.
-arguments+=("-log-output" "console,file")
-
-# -log-directory: Directory for log files (default: the logs folder next to the executable).
-#   Set it with the log directory variable at the top. It is added only if it is not empty.
-#   Requires: -log-output with "file".
-if [ -n "$LOG_DIRECTORY" ]; then
-    arguments+=("-log-directory" "$LOG_DIRECTORY")
-fi
-
-# ----------------------------------------------------------------------------
 # Other
 # ----------------------------------------------------------------------------
 
@@ -232,8 +218,8 @@ fi
 # ----------------------------------------------------------------------------
 # Uncomment the block below to use it. The two lines after it (large files, batch count) are
 # optional: add only what you need. The block replaces all flags above. Of those, only
-# -log-output, -log-directory and -config still work in prepare mode: add them after the
-# block. -version also exits before prepare mode starts.
+# -config still works in prepare mode: add it after the block. -version also exits before
+# prepare mode starts. The logging flags come after this section, so the block keeps them.
 # As in normal mode, the tool stops with an error when -log-directory is set but -log-output
 # has no "file".
 # Prepare mode needs no tokens: the script skips the token check when the arguments
@@ -258,6 +244,21 @@ fi
 # )
 # arguments+=("-prepare-large-files" "remove")  # or "lfs"
 # arguments+=("-prepare-batch-count" "10")
+
+# ----------------------------------------------------------------------------
+# Logging (the log level is LOG_LEVEL at the top of this script)
+# ----------------------------------------------------------------------------
+# These flags come after the prepare mode block, so they are passed in both modes.
+
+# -log-output: console (default), file, or console,file.
+arguments+=("-log-output" "console,file")
+
+# -log-directory: Directory for log files (default: the logs folder next to the executable).
+#   Set it with the log directory variable at the top. It is added only if it is not empty.
+#   Requires: -log-output with "file".
+if [ -n "$LOG_DIRECTORY" ]; then
+    arguments+=("-log-directory" "$LOG_DIRECTORY")
+fi
 
 # Verify tokens are set (prepare mode needs no tokens)
 prepare_mode=false
