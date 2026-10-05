@@ -788,6 +788,8 @@ func TestRateLimitResetWait(t *testing.T) {
 		{name: "reset at the cap", reset: now.Add(870 * time.Second), now: now, want: maxWait},
 		{name: "reset above the cap", reset: now.Add(871 * time.Second), now: now, want: maxWait},
 		{name: "reset in one hour", reset: now.Add(time.Hour), now: now, want: maxWait},
+		{name: "reset far in the past", reset: time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC), now: now, want: minWait},
+		{name: "reset far in the future", reset: time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), now: now, want: maxWait},
 	}
 
 	for _, tt := range tests {
@@ -861,6 +863,23 @@ func TestRetryClient_NegativeRetryAfterIsIgnored(t *testing.T) {
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
 }
 
+// A Retry-After HTTP date in the past (for example when the clock of this
+// machine is ahead of the server's) waits RetryWaitMin (30 s), not 0, so the
+// retries do not all run at once.
+func TestRetryClient_RetryAfterHTTPDateInThePast(t *testing.T) {
+	date := time.Now().Add(-2 * time.Minute).UTC()
+	srv, calls := sequenceServer(t,
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date.Format(http.TimeFormat)}}, ""),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	h.expectOK(t, srv.URL+"/repos/o/r")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+}
+
 // Backoff waits until the HTTP date of Retry-After, rounded to seconds.
 func TestRetryClient_RetryAfterHTTPDate(t *testing.T) {
 	date := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
@@ -891,7 +910,7 @@ func TestRetryClient_RetryAfterHTTPDate(t *testing.T) {
 }
 
 func TestRetryAfterWait(t *testing.T) {
-	const maxWait = 900 * time.Second
+	const minWait, maxWait = 30 * time.Second, 900 * time.Second
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	date := func(d time.Duration) string { return now.Add(d).Format(http.TimeFormat) }
 
@@ -911,16 +930,19 @@ func TestRetryAfterWait(t *testing.T) {
 		{name: "no number and no date", value: "soon", now: now},
 		{name: "empty", value: "", now: now},
 		{name: "date in ten minutes", value: date(10 * time.Minute), now: now, want: 600 * time.Second, wantOK: true},
-		{name: "date rounded to seconds", value: date(10 * time.Second), now: now.Add(-400 * time.Millisecond), want: 10 * time.Second, wantOK: true},
+		{name: "date rounded to seconds", value: date(100 * time.Second), now: now.Add(-400 * time.Millisecond), want: 100 * time.Second, wantOK: true},
+		{name: "date below the lower bound", value: date(10 * time.Second), now: now, want: minWait, wantOK: true},
 		{name: "date above the cap", value: date(24 * time.Hour), now: now, want: maxWait, wantOK: true},
-		{name: "date now", value: date(0), now: now, want: 0, wantOK: true},
-		{name: "date in the past", value: date(-time.Minute), now: now, want: 0, wantOK: true},
+		{name: "date far in the future", value: "Fri, 31 Dec 9999 23:59:59 GMT", now: now, want: maxWait, wantOK: true},
+		{name: "date now", value: date(0), now: now, want: minWait, wantOK: true},
+		{name: "date in the past", value: date(-time.Minute), now: now, want: minWait, wantOK: true},
+		{name: "date far in the past", value: "Mon, 01 Jan 0001 00:00:00 GMT", now: now, want: minWait, wantOK: true},
 		{name: "date in RFC 850 form", value: now.Add(time.Minute).Format(time.RFC850), now: now, want: time.Minute, wantOK: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := retryAfterWait(tt.value, maxWait, tt.now)
+			got, ok := retryAfterWait(tt.value, minWait, maxWait, tt.now)
 			if got != tt.want || ok != tt.wantOK {
 				t.Errorf("retryAfterWait(%q) = (%v, %v), want (%v, %v)", tt.value, got, ok, tt.want, tt.wantOK)
 			}

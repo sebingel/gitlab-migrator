@@ -209,7 +209,7 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		// secondary rate limit to Backoff through resp.Request instead, see
 		// markSecondaryRateLimit.
 		if s, ok := resp.Header["Retry-After"]; ok {
-			if wait, ok := retryAfterWait(s[0], max, time.Now()); ok {
+			if wait, ok := retryAfterWait(s[0], min, max, time.Now()); ok {
 				sleep = wait
 				return
 			}
@@ -373,12 +373,14 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 // maxWait, so that one response cannot block a worker for longer than the
 // longest wait of Backoff. RFC 9110 allows two forms: a number of seconds, or an
 // HTTP date. A date gives the time from now until that date, rounded to seconds,
-// and a date that is not after now gives 0, as Retry-After 0 does. ok is false
-// when the value is neither a number of seconds nor an HTTP date, or a negative
-// number (the RFC allows only digits), so Backoff never waits a negative time.
-// The cap is checked before the seconds become a time.Duration, so a very large
-// value does not overflow.
-func retryAfterWait(value string, maxWait time.Duration, now time.Time) (wait time.Duration, ok bool) {
+// and at least minWait: the date depends on the clock of the server, so a date
+// in the past (for example when the clock of this machine is ahead) does not let
+// all retries run at once. A number of seconds does not depend on a clock and
+// has no lower bound. ok is false when the value is neither a number of seconds
+// nor an HTTP date, or a negative number (the RFC allows only digits), so
+// Backoff never waits a negative time. The cap is checked before the seconds
+// become a time.Duration, so a very large value does not overflow.
+func retryAfterWait(value string, minWait, maxWait time.Duration, now time.Time) (wait time.Duration, ok bool) {
 	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
 		if seconds < 0 {
 			return 0, false
@@ -393,7 +395,16 @@ func retryAfterWait(value string, maxWait time.Duration, now time.Time) (wait ti
 	if err != nil {
 		return 0, false
 	}
-	return min(max(roundDuration(date.Sub(now), time.Second), 0), maxWait), true
+	return clampAndRound(date.Sub(now), minWait, maxWait), true
+}
+
+// clampAndRound bounds d to [minWait, maxWait] and then rounds it to seconds.
+// The bounds come first: Time.Sub saturates at the smallest or largest
+// time.Duration for a time far away, and roundDuration overflows for those
+// values. minWait and maxWait are whole seconds, so rounding keeps the result
+// inside the bounds.
+func clampAndRound(d, minWait, maxWait time.Duration) time.Duration {
+	return roundDuration(min(max(d, minWait), maxWait), time.Second)
 }
 
 // rateLimitResetWait returns the wait until 30 s after the X-Ratelimit-Reset
@@ -405,8 +416,7 @@ func retryAfterWait(value string, maxWait time.Duration, now time.Time) (wait ti
 // when the clock of this machine is ahead of GitHub's) does not give a zero or
 // negative wait, so the retry does not hit the rate limit again at once.
 func rateLimitResetWait(resetEpoch int64, minWait, maxWait time.Duration, now time.Time) time.Duration {
-	wait := roundDuration(time.Unix(resetEpoch, 0).Add(30*time.Second).Sub(now), time.Second)
-	return min(max(wait, minWait), maxWait)
+	return clampAndRound(time.Unix(resetEpoch, 0).Add(30*time.Second).Sub(now), minWait, maxWait)
 }
 
 // isNonIdempotentMethod reports whether a request with this method can change
