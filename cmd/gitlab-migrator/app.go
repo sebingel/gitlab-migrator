@@ -91,7 +91,7 @@ func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) {
 // response nor an error.
 var errNoResponseNoError = errors.New("retry check got neither a response nor an error")
 
-var secondaryRateLimitPattern =regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
+var secondaryRateLimitPattern = regexp.MustCompile(`(?i)secondary rate limit|abuse detection|content creation`)
 
 // secondaryRateLimitBaseWait is the first wait for a secondary rate limit
 // without rate limit headers. It doubles with each attempt.
