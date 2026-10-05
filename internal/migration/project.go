@@ -1124,7 +1124,9 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 // migrateComments writes the GitLab notes of a merge request as comments of its
 // pull request. prComments are the comments the pull request has already. A
 // note whose comment exists is updated when its text changed, any other note
-// gets a new comment. Every note adds exactly one entry to result.Comments.
+// gets a new comment. Every note that is not skipped adds exactly one entry to
+// result.Comments. Nil notes, system notes and notes without an author username
+// are skipped.
 func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.PullRequest, comments []*gogitlab.Note, prComments []*gogithub.IssueComment, result *MergeRequestResult) {
 	for _, comment := range comments {
 		if comment == nil || comment.System {
@@ -1164,9 +1166,9 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 > |      |      |
 >
 
-## Original Comment
+%[5]s
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format(config.DateFormat), comment.Body)
+%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format(config.DateFormat), comment.Body, commentTextHeading)
 
 		existingComment := findMigratedComment(prComments, comment.ID)
 		if existingComment != nil {
@@ -1423,11 +1425,18 @@ func githubMention(u *gogitlab.User, fallback string) string {
 	return "@" + strings.TrimPrefix(strings.ToLower(u.WebsiteURL), "https://github.com/")
 }
 
+// commentTextHeading is the line of a migrated comment that ends the generated
+// header and starts the original text of the GitLab note.
+const commentTextHeading = "## Original Comment"
+
 // bodyMatchesNote reports whether body is the text of a comment that the tool
 // migrated for the GitLab note noteID. It matches the whole table cell
 // including the closing pipe, so note 12 does not match the comment of note 123.
+// It looks only at the header the tool generates, which ends before the
+// original text: users write that text, and it can quote another header.
 func bodyMatchesNote(body string, noteID int64) bool {
-	return strings.Contains(body, fmt.Sprintf("**Note ID** | %d |", noteID))
+	header, _, _ := strings.Cut(body, "\n"+commentTextHeading)
+	return strings.Contains(header, fmt.Sprintf("**Note ID** | %d |", noteID))
 }
 
 // findMigratedComment returns the first of prComments that was migrated for the

@@ -180,3 +180,26 @@ func TestMigrateComments_UpdatesOnlyTheFirstMatchingComment(t *testing.T) {
 		t.Errorf("migrated/failed = %d/%d, want 1/0", result.MigratedComments, result.FailedComments)
 	}
 }
+
+func TestMigrateComments_NoteIDInTheOriginalTextIsNotAMatch(t *testing.T) {
+	cs := &commentServer{}
+	p := newCommentProject(t, cs)
+	var result MergeRequestResult
+
+	// The comment of note 99 quotes the header line of note 12 in its text. It
+	// must not be taken for the comment of note 12.
+	quoting := migratedComment(500, 99)
+	body := *quoting.Body + "\n\n> | **Note ID** | 12 |\n"
+	quoting.Body = &body
+
+	p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+		[]*gogitlab.Note{gitLabNote(12, "text of note 12")},
+		[]*gogithub.IssueComment{quoting}, &result)
+
+	if len(cs.edited) != 0 {
+		t.Errorf("edited comments = %v, want none: the quoted header line is part of the text of note 99", cs.edited)
+	}
+	if len(cs.created) != 1 {
+		t.Errorf("created comments = %d, want 1 for note 12", len(cs.created))
+	}
+}
