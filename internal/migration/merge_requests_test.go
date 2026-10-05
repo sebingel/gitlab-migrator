@@ -497,8 +497,11 @@ func (c *cancelingSearchGitHub) GetSearchResults(ctx context.Context, query stri
 
 func TestMigrateMergeRequests_FailsWhenInterruptedDuringLastMergeRequest(t *testing.T) {
 	// A cancel while the last merge request is processed must stop the
-	// project too. A canceled GitLab user lookup only fails a comment, so the
-	// merge request can end as partial, which counts as migrated.
+	// project too, whatever status that merge request ends with. In real
+	// runs it can end as partial (a canceled GitLab user lookup only fails a
+	// comment), which counts as migrated. Here the fake search fails, so MR
+	// !3 ends as failed. The check after the loop does not look at the
+	// status, so a failed merge request is enough to test it.
 	mux := http.NewServeMux()
 	var calls atomic.Int32
 	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{
