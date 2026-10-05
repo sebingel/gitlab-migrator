@@ -245,7 +245,7 @@ Values in the file override any matching command-line flags. Field names are `sn
 
 Pass `-state-dir` with a directory path to have the tool persist per-merge-request migration state to a JSON file as it works. If a migration is interrupted, re-running with the same `-state-dir` will skip merge requests that already completed successfully, so you can safely resume large or long-running migrations without redoing completed work.
 
-With `-rename-master-to-main` or `-rename-trunk-branch`, a skipped merge request that is open and targets the GitLab trunk still gets the new trunk as the base branch of its pull request, if the pull request is open. Nothing else of the pull request is updated. If GitHub refuses the new base branch, the merge request counts as failed in this run, and the state file keeps it as successful, so the next run tries the base branch again.
+With `-rename-master-to-main` or `-rename-trunk-branch`, a merge request that the state file records as migrated, and that is open and targets the GitLab trunk, still gets the new trunk as the base branch of its pull request, if the pull request is open. With `-skip-open-merge-requests` this does not happen. Nothing else of the pull request is updated. If GitHub refuses the new base branch, the merge request counts as failed in this run, and the state file keeps it as successful, so the next run tries the base branch again.
 
 ## Archived repositories
 
