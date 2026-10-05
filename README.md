@@ -193,7 +193,7 @@ By default, git repositories are cloned into memory (`-storage-type=memory`). Fo
 gitlab-migrator -storage-type=filesystem ...
 ```
 
-By default, a temporary directory is used. Specify `-storage-dir` to use a specific directory, which can help with debugging or resuming interrupted migrations.
+By default, the temporary directory of the system is used. Specify `-storage-dir` to create the temporary directory for each project inside another directory, for example on a disk with more free space. The tool removes this temporary directory when the project is done, so `-storage-dir` does not keep anything and cannot resume a migration. To resume an interrupted migration, use `-state-dir` (see [Resuming interrupted migrations](#resuming-interrupted-migrations)).
 
 For very large repositories with many branches, use `-push-batch-size` to push branches in smaller batches (e.g., `-push-batch-size=50`) to avoid timeouts.
 
