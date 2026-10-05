@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,7 +94,7 @@ func TestListMergeRequestCommits_ReadsAllPages(t *testing.T) {
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/7/commits", commits, &calls)
 	p := newGitLabTestProject(t, mux)
 
-	got, err := p.listMergeRequestCommits(7)
+	got, err := p.listMergeRequestCommits(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("listMergeRequestCommits: %v", err)
 	}
@@ -141,7 +143,7 @@ func TestListMergeRequestCommits_UsesGitLabOrder(t *testing.T) {
 			servePages(t, mux, "/api/v4/projects/1/merge_requests/7/commits", commits, &calls)
 			p := newGitLabTestProject(t, mux)
 
-			got, err := p.listMergeRequestCommits(7)
+			got, err := p.listMergeRequestCommits(context.Background(), 7)
 			if err != nil {
 				t.Fatalf("listMergeRequestCommits: %v", err)
 			}
@@ -155,6 +157,280 @@ func TestListMergeRequestCommits_UsesGitLabOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// serveUntilCanceled answers GET requests for path only when the request
+// context ends or the test is over. It tells started when a request arrived.
+// Call it after the test server was started: the cleanup that ends waiting
+// requests must run before the server closes, because Close waits for them.
+func serveUntilCanceled(t *testing.T, mux *http.ServeMux, path string, started chan<- struct{}) {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+}
+
+// wantCanceledAfterStart cancels the context once the first request arrived
+// and checks that call returns context.Canceled soon after.
+func wantCanceledAfterStart(t *testing.T, started <-chan struct{}, cancel context.CancelFunc, call func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no GitLab request arrived")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the GitLab request did not stop after the context was canceled")
+	}
+}
+
+func TestListMergeRequestCommits_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests/7/commits", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		_, err := p.listMergeRequestCommits(ctx, 7)
+		return err
+	})
+}
+
+func TestNewProject_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/{id}", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		_, err := p.m.newProject(ctx, []string{"group/project", "owner/repo"})
+		return err
+	})
+}
+
+func TestMigrateMergeRequests_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		results, err := p.migrateMergeRequests(ctx)
+		if len(results) != 0 {
+			return fmt.Errorf("results = %+v, want none", results)
+		}
+		return err
+	})
+}
+
+func TestMigrate_FailsWhenMergeRequestListFails(t *testing.T) {
+	// The project must not be reported as migrated when its merge requests
+	// could not be listed, because then none of them were migrated.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/1/merge_requests", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"403 Forbidden"}`, http.StatusForbidden)
+	})
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.EnablePullRequests = true
+	p.m.cfg.PullRequestsOnly = true
+	serveGitHubRepo(t, p)
+
+	result, err := p.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "retrieving gitlab merge requests") {
+		t.Fatalf("migrate error = %v, want the failed merge request list", err)
+	}
+	wantFinishedResult(t, result)
+}
+
+// serveGitHubRepo points the GitHub client of p to a test server that knows
+// the repository owner/repo, so migrate() can run in pull-requests-only mode.
+func serveGitHubRepo(t *testing.T, p *project) {
+	t.Helper()
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("GET /repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `{"name":"repo"}`); err != nil {
+			t.Errorf("writing the GitHub repository: %v", err)
+		}
+	})
+	ghSrv := httptest.NewServer(ghMux)
+	t.Cleanup(ghSrv.Close)
+	gh := gogithub.NewClient(nil)
+	baseURL, err := url.Parse(ghSrv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing GitHub test server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+	p.m.gh = gh
+}
+
+// cancelOnLog is a log output that calls cancel when a log line contains msg.
+type cancelOnLog struct {
+	msg    string
+	cancel context.CancelFunc
+}
+
+func (c cancelOnLog) Write(b []byte) (int, error) {
+	if strings.Contains(string(b), c.msg) {
+		c.cancel()
+	}
+	return len(b), nil
+}
+
+func TestMigrate_FailsWhenInterruptedBeforeAllMergeRequests(t *testing.T) {
+	// The project must not be reported as migrated when the run is canceled
+	// after the merge requests were listed but before all were processed.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/1/merge_requests", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `[{"iid":1,"state":"merged"},{"iid":2,"state":"merged"}]`); err != nil {
+			t.Errorf("writing the merge requests: %v", err)
+		}
+	})
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.EnablePullRequests = true
+	p.m.cfg.PullRequestsOnly = true
+	serveGitHubRepo(t, p)
+
+	// The cancel comes with the log line that is written after the list and
+	// before the loop over the merge requests, so no request is in flight.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.log = hclog.New(&hclog.LoggerOptions{
+		Level:  hclog.Info,
+		Output: cancelOnLog{msg: "migrating merge requests from GitLab to GitHub", cancel: cancel},
+	})
+
+	result, err := p.migrate(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("migrate error = %v, want context.Canceled", err)
+	}
+	wantFinishedResult(t, result)
+}
+
+func TestMigrate_SetsEndTimeWhenStateDirFails(t *testing.T) {
+	// Every early return of migrate() must leave a finished result, not only
+	// the merge request error path.
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.EnablePullRequests = true
+	p.m.cfg.PullRequestsOnly = true
+	serveGitHubRepo(t, p)
+
+	// A state dir below a regular file cannot be created.
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("writing the blocking file: %v", err)
+	}
+	p.m.cfg.StateDir = filepath.Join(file, "state")
+
+	result, err := p.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "creating state directory") {
+		t.Fatalf("migrate error = %v, want the failed state directory", err)
+	}
+	wantFinishedResult(t, result)
+}
+
+// wantFinishedResult checks that the report fields that migrate() sets at its
+// end are set, also for a project that failed.
+func wantFinishedResult(t *testing.T, result ProjectResult) {
+	t.Helper()
+	if result.EndTime.IsZero() {
+		t.Error("EndTime is not set")
+	}
+	if result.Duration != result.EndTime.Sub(result.StartTime) {
+		t.Errorf("Duration = %v, want EndTime - StartTime = %v", result.Duration, result.EndTime.Sub(result.StartTime))
+	}
+	if result.BranchCount != len(result.BranchesMigrated) {
+		t.Errorf("BranchCount = %d, want %d", result.BranchCount, len(result.BranchesMigrated))
+	}
+}
+
+func TestReportProject_StopsWhenContextIsCanceled(t *testing.T) {
+	slugs := []string{"group/project", "owner/repo"}
+
+	t.Run("listing projects", func(t *testing.T) {
+		mux := http.NewServeMux()
+		p := newGitLabTestProject(t, mux)
+		started := make(chan struct{}, 1)
+		serveUntilCanceled(t, mux, "/api/v4/projects", started)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		wantCanceledAfterStart(t, started, cancel, func() error {
+			_, err := p.m.reportProject(ctx, slugs)
+			return err
+		})
+	})
+
+	t.Run("listing merge requests", func(t *testing.T) {
+		mux := http.NewServeMux()
+		p := newGitLabTestProject(t, mux)
+		var calls atomic.Int32
+		servePages(t, mux, "/api/v4/projects", []*gogitlab.Project{{ID: 1, PathWithNamespace: "group/project"}}, &calls)
+		started := make(chan struct{}, 1)
+		serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests", started)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		wantCanceledAfterStart(t, started, cancel, func() error {
+			_, err := p.m.reportProject(ctx, slugs)
+			return err
+		})
+	})
+}
+
+func TestListMergeRequestNotes_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests/7/notes", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		_, err := p.listMergeRequestNotes(ctx, 7)
+		return err
+	})
+}
+
+func TestListMergeRequestAwardEmoji_StopsWhenContextIsCanceled(t *testing.T) {
+	mux := http.NewServeMux()
+	p := newGitLabTestProject(t, mux)
+	started := make(chan struct{}, 1)
+	serveUntilCanceled(t, mux, "/api/v4/projects/1/merge_requests/7/award_emoji", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantCanceledAfterStart(t, started, cancel, func() error {
+		_, err := p.listMergeRequestAwardEmoji(ctx, 7)
+		return err
+	})
 }
 
 func TestListMergeRequestAwardEmoji_ReadsAllPages(t *testing.T) {
@@ -172,7 +448,7 @@ func TestListMergeRequestAwardEmoji_ReadsAllPages(t *testing.T) {
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/7/award_emoji", awards, &calls)
 	p := newGitLabTestProject(t, mux)
 
-	got, err := p.listMergeRequestAwardEmoji(7)
+	got, err := p.listMergeRequestAwardEmoji(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("listMergeRequestAwardEmoji: %v", err)
 	}
@@ -207,6 +483,49 @@ func (f *failingSearchGitHub) GetSearchResults(context.Context, string) (*gogith
 	return nil, errors.New("search failed in test")
 }
 
+// cancelingSearchGitHub is a failingSearchGitHub that calls cancel in its
+// search, like a Ctrl+C while the merge request is processed.
+type cancelingSearchGitHub struct {
+	failingSearchGitHub
+	cancel context.CancelFunc
+}
+
+func (c *cancelingSearchGitHub) GetSearchResults(ctx context.Context, query string) (*gogithub.IssuesSearchResult, error) {
+	c.cancel()
+	return c.failingSearchGitHub.GetSearchResults(ctx, query)
+}
+
+func TestMigrateMergeRequests_FailsWhenInterruptedDuringLastMergeRequest(t *testing.T) {
+	// A cancel while the last merge request is processed must stop the
+	// project too, whatever status that merge request ends with. In real
+	// runs it can end as partial (a canceled GitLab user lookup only fails a
+	// comment), which counts as migrated. Here the fake search fails, so MR
+	// !3 ends as failed. The check after the loop does not look at the
+	// status, so a failed merge request is enough to test it.
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{
+		{IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main"},
+	}, &calls)
+	p := newGitLabTestProject(t, mux)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gh := &cancelingSearchGitHub{cancel: cancel}
+	p.m.ghClient = gh
+
+	results, err := p.migrateMergeRequests(ctx)
+	if gh.searches != 1 {
+		t.Fatalf("searches = %d, want 1 (MR !3 processed)", gh.searches)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want the processed MR !3", results)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
 func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 	// migrate runs migrateMergeRequests like a new process of the tool: it
 	// loads the state file and migrates MR !3 in the given GitLab state. It
@@ -230,7 +549,11 @@ func TestMigrateMergeRequests_OpenMergeRequestSkipIsNotFinal(t *testing.T) {
 		}
 		p.state = state
 
-		return p.migrateMergeRequests(context.Background()), gh.searches
+		results, err := p.migrateMergeRequests(context.Background())
+		if err != nil {
+			t.Fatalf("migrateMergeRequests: %v", err)
+		}
+		return results, gh.searches
 	}
 
 	// wantProcessed checks that MR !3 went through migrateMergeRequest. The
