@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/gofri/go-github-pagination/githubpagination"
@@ -277,13 +279,13 @@ func TestRetryClient_SecondaryRateLimitAfterOtherRetries(t *testing.T) {
 	})
 }
 
-// The mark from CheckRetry belongs to one response. A plain 403 after a
+// The mark from CheckRetry belongs to one response. A plain 429 after a
 // secondary rate limit gets the default backoff for attempt 1 (60 s), not the
 // extended backoff (240 s).
 func TestRetryClient_SecondaryRateLimitMarkDoesNotCarryOver(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
-		respond(http.StatusForbidden, nil, `{"message":"Must have admin rights to Repository."}`),
+		respond(http.StatusTooManyRequests, nil, `{"message":"API rate limit exceeded for user ID 1."}`),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarness(t, fixedRand(0))
@@ -296,8 +298,8 @@ func TestRetryClient_SecondaryRateLimitMarkDoesNotCarryOver(t *testing.T) {
 		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[INFO]  waiting for secondary rate limit recovery: wait_duration=2m0s attempt=0 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=0 max_attempts=15`,
-		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 message="Must have admin rights to Repository."`,
-		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=1m0s attempt=1 max_attempts=15`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 message="API rate limit exceeded for user ID 1."`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 sleep=1m0s attempt=1 max_attempts=15`,
 	})
 }
 
@@ -444,6 +446,44 @@ func TestRetryClient_SAMLEnforcement403(t *testing.T) {
 	assertLines(t, h.logLines(srv.URL), nil)
 }
 
+// A 403 without rate limit headers and without a secondary rate limit message,
+// for example a missing permission, does not go away by waiting. It is not
+// retried, and the caller gets the response with its body.
+func TestRetryClient_PermissionError403(t *testing.T) {
+	const body = `{"message":"Must have admin rights to Repository.","documentation_url":"https://docs.github.com/rest"}`
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"4999"}}, body),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	if got := h.expectResponse(t, srv.URL+"/repos/o/r/branches", http.StatusForbidden); got != body {
+		t.Errorf("got body %q, want %q", got, body)
+	}
+
+	assertCalls(t, calls, 1)
+	assertWaits(t, h.waits, nil)
+	assertLines(t, h.logLines(srv.URL), nil)
+}
+
+// Retry-After alone marks a 403 as a rate limit, also without a rate limit
+// message, so it is retried and Backoff waits as the header says.
+func TestRetryClient_ForbiddenWithRetryAfter(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"Retry-After": {"9"}}, `{"message":"Forbidden"}`),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	h.expectOK(t, srv.URL+"/user")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{9 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/user status=403 message=Forbidden`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/user status=403 sleep=9s attempt=0 max_attempts=15`,
+	})
+}
+
 func TestRetryClient_TooManyRequestsWithRetryAfter(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, `{"message":"API rate limit exceeded for user ID 1."}`),
@@ -507,26 +547,31 @@ func TestRetryClient_RequestTimeoutAndFailedDependency(t *testing.T) {
 	})
 }
 
-// A 4xx body that is no JSON stops the request, even for a retryable status.
+// A 4xx body that is no JSON gives a WARN line and no message. The status
+// still decides: a 403 without rate limit headers is not retried, and the
+// caller gets the response with its status and body.
 func TestRetryClient_BadJSON4xx(t *testing.T) {
+	const body = "<html>forbidden</html>"
 	srv, calls := sequenceServer(t,
-		respond(http.StatusForbidden, nil, "<html>forbidden</html>"),
+		respond(http.StatusForbidden, nil, body),
 	)
 	h := newRetryHarness(t, rand.Float64)
 
-	h.expectGiveUp(t, srv.URL+"/repos/o/r",
-		"GET "+srv.URL+"/repos/o/r giving up after 1 attempt(s): unmarshaling response body: invalid character '<' looking for beginning of value")
+	if got := h.expectResponse(t, srv.URL+"/repos/o/r", http.StatusForbidden); got != body {
+		t.Errorf("got body %q, want %q", got, body)
+	}
 
 	assertCalls(t, calls, 1)
 	assertWaits(t, h.waits, nil)
-	assertLines(t, h.logLines(srv.URL), nil)
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[WARN]  cannot parse the error body of the response, going on without its message: method=GET url=SERVER/repos/o/r status=403 error="unmarshaling response body: invalid character '<' looking for beginning of value"`,
+	})
 }
 
-// A retried 403 whose body stream is empty: CheckRetry reads it, and
-// retryablehttp drains it again before Backoff.
-func TestRetryClient_EmptyBody403(t *testing.T) {
+// A retryable 4xx with a body that is no JSON is retried like one with JSON.
+func TestRetryClient_BadJSON429IsRetried(t *testing.T) {
 	srv, calls := sequenceServer(t,
-		respondEmptyStream(http.StatusForbidden),
+		respond(http.StatusTooManyRequests, nil, "<html>too many requests</html>"),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarness(t, rand.Float64)
@@ -536,8 +581,28 @@ func TestRetryClient_EmptyBody403(t *testing.T) {
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=403 message=""`,
-		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=403 sleep=30s attempt=0 max_attempts=15`,
+		`[WARN]  cannot parse the error body of the response, going on without its message: method=GET url=SERVER/repos/o/r status=429 error="unmarshaling response body: invalid character '<' looking for beginning of value"`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=429 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=429 sleep=30s attempt=0 max_attempts=15`,
+	})
+}
+
+// A retried 429 whose body stream is empty: CheckRetry reads it, and
+// retryablehttp drains it again before Backoff.
+func TestRetryClient_EmptyBody429(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respondEmptyStream(http.StatusTooManyRequests),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	h.expectOK(t, srv.URL+"/repos/o/r")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=429 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=429 sleep=30s attempt=0 max_attempts=15`,
 	})
 }
 
@@ -615,7 +680,7 @@ func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
 	})
 }
 
-// The 5xx case never parses the body. The 403 case parses it on every attempt,
+// The 5xx case never parses the body. The 429 case parses it on every attempt,
 // and retryablehttp drains the restored body after the last one.
 func TestRetryClient_GivesUpAfterRetryMax(t *testing.T) {
 	tests := []struct {
@@ -625,7 +690,7 @@ func TestRetryClient_GivesUpAfterRetryMax(t *testing.T) {
 		message string
 	}{
 		{name: "500 without body", status: http.StatusInternalServerError},
-		{name: "403 with JSON body", status: http.StatusForbidden, body: `{"message":"Must have admin rights to Repository."}`, message: "Must have admin rights to Repository."},
+		{name: "429 with JSON body", status: http.StatusTooManyRequests, body: `{"message":"API rate limit exceeded for user ID 1."}`, message: "API rate limit exceeded for user ID 1."},
 	}
 
 	for _, tt := range tests {
@@ -716,6 +781,39 @@ func TestRetryClient_GoGitHubGetsNotFoundMessage(t *testing.T) {
 	assertLines(t, h.logLines(srv.URL), nil)
 }
 
+// A 403 with a body that is no JSON (for example an HTML page of a proxy) and
+// without rate limit headers is not retried. go-github gets the response and
+// returns its *github.ErrorResponse with the status, not an unmarshal error.
+func TestRetryClient_GoGitHubGetsForbiddenStatusForHTMLBody(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"Content-Type": {"text/html"}}, "<html>forbidden</html>"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	transport := &clients.SearchModder{Base: &retryablehttp.RoundTripper{Client: h.client}}
+	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100))).WithAuthToken("test-token")
+	baseURL, err := url.Parse(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+
+	_, _, err = gh.Repositories.Get(context.Background(), "o", "r")
+	var errResp *gogithub.ErrorResponse
+	if !errors.As(err, &errResp) {
+		t.Fatalf("got error %v (%T), want *github.ErrorResponse", err, err)
+	}
+	if errResp.Response.StatusCode != http.StatusForbidden {
+		t.Errorf("got status %d, want 403", errResp.Response.StatusCode)
+	}
+
+	assertCalls(t, calls, 1)
+	assertWaits(t, h.waits, nil)
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[WARN]  cannot parse the error body of the response, going on without its message: method=GET url=SERVER/repos/o/r?per_page=100 status=403 error="unmarshaling response body: invalid character '<' looking for beginning of value"`,
+	})
+}
+
 // An empty 4xx body is no error, and the caller can still read the (empty) body.
 func TestRetryClient_EmptyBodyNotFoundIsReadable(t *testing.T) {
 	srv, calls := sequenceServer(t,
@@ -749,9 +847,9 @@ func TestRetryClient_ByteOrderMarkOnlyIsReadable(t *testing.T) {
 	assertLines(t, h.logLines(srv.URL), nil)
 }
 
-// When the 4xx body is no JSON, CheckRetry returns an error. retryablehttp then
-// drains the body, so no caller reads it today. The test checks that CheckRetry
-// does not leave a closed body behind anyway.
+// When the 4xx body is no JSON, CheckRetry goes on without a message and
+// returns no error, so the caller gets the response. The body must still be
+// readable for the caller.
 func TestRetryClient_CheckRetryBadJSONKeepsBody(t *testing.T) {
 	const body = "<html>forbidden</html>"
 	srv, _ := sequenceServer(t,
@@ -765,10 +863,8 @@ func TestRetryClient_CheckRetryBadJSONKeepsBody(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
-	retry, err := h.client.CheckRetry(context.Background(), resp, nil)
-	want := "unmarshaling response body: invalid character '<' looking for beginning of value"
-	if retry || err == nil || err.Error() != want {
-		t.Fatalf("got (%v, %v), want (false, %s)", retry, err, want)
+	if retry, err := h.client.CheckRetry(context.Background(), resp, nil); retry || err != nil {
+		t.Fatalf("got (%v, %v), want (false, nil)", retry, err)
 	}
 	if got := readBody(t, resp); got != body {
 		t.Errorf("got body %q, want %q", got, body)
@@ -793,18 +889,41 @@ func TestRetryClient_ByteOrderMarkIsRemoved(t *testing.T) {
 }
 
 // The server sends fewer bytes than it declares, so reading the 4xx body fails.
+// CheckRetry goes on without a message, and the caller gets the status and the
+// bytes that were read.
 func TestRetryClient_BodyReadError4xx(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, http.Header{"Content-Length": {"100"}}, `{"message":`),
 	)
 	h := newRetryHarness(t, rand.Float64)
 
-	h.expectGiveUp(t, srv.URL+"/repos/o/r",
-		"GET "+srv.URL+"/repos/o/r giving up after 1 attempt(s): parsing response body: unexpected EOF")
+	if got := h.expectResponse(t, srv.URL+"/repos/o/r", http.StatusForbidden); got != `{"message":` {
+		t.Errorf("got body %q, want %q", got, `{"message":`)
+	}
 
 	assertCalls(t, calls, 1)
 	assertWaits(t, h.waits, nil)
-	assertLines(t, h.logLines(srv.URL), nil)
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[WARN]  cannot parse the error body of the response, going on without its message: method=GET url=SERVER/repos/o/r status=403 error="reading response body: unexpected EOF"`,
+	})
+}
+
+// parseGitHubError wraps the read and decode errors, so errors.Is and
+// errors.As find them.
+func TestParseGitHubError_WrapsErrors(t *testing.T) {
+	readFails := &http.Response{Body: io.NopCloser(io.MultiReader(strings.NewReader(`{"message":`), iotest.ErrReader(io.ErrUnexpectedEOF)))}
+	if _, err := parseGitHubError(readFails); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("read error: got %v, want an error that wraps io.ErrUnexpectedEOF", err)
+	}
+	if got := readBody(t, readFails); got != `{"message":` {
+		t.Errorf("read error: got body %q, want %q", got, `{"message":`)
+	}
+
+	noJSON := &http.Response{Body: io.NopCloser(strings.NewReader("<html>forbidden</html>"))}
+	var syntaxErr *json.SyntaxError
+	if _, err := parseGitHubError(noJSON); !errors.As(err, &syntaxErr) {
+		t.Errorf("no JSON: got %v (%T), want an error that wraps *json.SyntaxError", err, err)
+	}
 }
 
 // Without a response, retryablehttp calls CheckRetry with the error and then
