@@ -740,6 +740,65 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	})
 }
 
+// The wait until 30 s after X-Ratelimit-Reset is capped at RetryWaitMax (900 s).
+// A reset time in the past (for example when the clock of this machine is ahead
+// of GitHub's) waits RetryWaitMin (30 s), the wait for a reset time of now.
+func TestRetryClient_RateLimitResetIsBounded(t *testing.T) {
+	tests := []struct {
+		name  string
+		reset int64
+		want  time.Duration
+	}{
+		{name: "one hour ahead", reset: time.Now().Unix() + 3600, want: 900 * time.Second},
+		{name: "ten minutes ago", reset: time.Now().Unix() - 600, want: 30 * time.Second},
+		{name: "epoch 0", reset: 0, want: 30 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {strconv.FormatInt(tt.reset, 10)}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, rand.Float64)
+
+			h.expectOK(t, srv.URL+"/user")
+
+			assertCalls(t, calls, 2)
+			assertWaits(t, h.waits, []time.Duration{tt.want})
+		})
+	}
+}
+
+func TestRateLimitResetWait(t *testing.T) {
+	const minWait, maxWait = 30 * time.Second, 900 * time.Second
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		reset time.Time
+		now   time.Time
+		want  time.Duration
+	}{
+		{name: "reset now waits the 30 s margin", reset: now, now: now, want: minWait},
+		{name: "reset one second ago", reset: now.Add(-time.Second), now: now, want: minWait},
+		{name: "reset one day ago", reset: now.Add(-24 * time.Hour), now: now, want: minWait},
+		{name: "reset in 100 s", reset: now.Add(100 * time.Second), now: now, want: 130 * time.Second},
+		{name: "rounded to seconds", reset: now.Add(100 * time.Second), now: now.Add(-600 * time.Millisecond), want: 131 * time.Second},
+		{name: "reset at the cap", reset: now.Add(870 * time.Second), now: now, want: maxWait},
+		{name: "reset above the cap", reset: now.Add(871 * time.Second), now: now, want: maxWait},
+		{name: "reset in one hour", reset: now.Add(time.Hour), now: now, want: maxWait},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rateLimitResetWait(tt.reset.Unix(), minWait, maxWait, tt.now); got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRetryClient_RetryAfterWinsOverRateLimitHeaders(t *testing.T) {
 	reset := strconv.FormatInt(time.Now().Unix()+600, 10)
 	srv, calls := sequenceServer(t,
@@ -758,11 +817,40 @@ func TestRetryClient_RetryAfterWinsOverRateLimitHeaders(t *testing.T) {
 	})
 }
 
-// Backoff reads Retry-After only in seconds. An HTTP date gives the default backoff.
-func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
-	date := time.Now().Add(10 * time.Minute).UTC().Format(http.TimeFormat)
+// A Retry-After in seconds above RetryWaitMax (900 s) is capped at 900 s, so one
+// response cannot block a worker for longer. A value too large for a
+// time.Duration does not overflow.
+func TestRetryClient_RetryAfterSecondsIsCapped(t *testing.T) {
+	tests := []struct {
+		name       string
+		retryAfter string
+	}{
+		{name: "one second above the cap", retryAfter: "901"},
+		{name: "one day", retryAfter: "86400"},
+		{name: "too large for a duration", retryAfter: "9223372036854775807"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusTooManyRequests, http.Header{"Retry-After": {tt.retryAfter}}, ""),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, rand.Float64)
+
+			h.expectOK(t, srv.URL+"/repos/o/r")
+
+			assertCalls(t, calls, 2)
+			assertWaits(t, h.waits, []time.Duration{900 * time.Second})
+		})
+	}
+}
+
+// RFC 9110 allows only digits in Retry-After seconds. A negative value is no
+// valid value, so Backoff uses the default backoff instead of a negative wait.
+func TestRetryClient_NegativeRetryAfterIsIgnored(t *testing.T) {
 	srv, calls := sequenceServer(t,
-		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date}}, ""),
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {"-5"}}, ""),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarness(t, rand.Float64)
@@ -771,10 +859,73 @@ func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
 
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+}
+
+// Backoff waits until the HTTP date of Retry-After, rounded to seconds.
+func TestRetryClient_RetryAfterHTTPDate(t *testing.T) {
+	date := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	srv, calls := sequenceServer(t,
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date.Format(http.TimeFormat)}}, ""),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	before := time.Now()
+	h.expectOK(t, srv.URL+"/repos/o/r")
+	after := time.Now()
+
+	assertCalls(t, calls, 2)
+	if len(h.waits) != 1 {
+		t.Fatalf("got waits %v, want 1 wait", h.waits)
+	}
+	// Backoff runs between before and after, so its wait lies between these two
+	// bounds.
+	lo, hi := date.Sub(after).Round(time.Second), date.Sub(before).Round(time.Second)
+	if h.waits[0] < lo || h.waits[0] > hi {
+		t.Errorf("got wait %v, want between %v and %v", h.waits[0], lo, hi)
+	}
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=503 message=""`,
-		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=503 sleep=30s attempt=0 max_attempts=15`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=503 sleep=` + h.waits[0].String() + ` attempt=0 max_attempts=15`,
 	})
+}
+
+func TestRetryAfterWait(t *testing.T) {
+	const maxWait = 900 * time.Second
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	date := func(d time.Duration) string { return now.Add(d).Format(http.TimeFormat) }
+
+	tests := []struct {
+		name   string
+		value  string
+		now    time.Time
+		want   time.Duration
+		wantOK bool
+	}{
+		{name: "zero seconds", value: "0", now: now, want: 0, wantOK: true},
+		{name: "seconds below the cap", value: "45", now: now, want: 45 * time.Second, wantOK: true},
+		{name: "seconds at the cap", value: "900", now: now, want: maxWait, wantOK: true},
+		{name: "seconds above the cap", value: "901", now: now, want: maxWait, wantOK: true},
+		{name: "seconds too large for a duration", value: "9223372036854775807", now: now, want: maxWait, wantOK: true},
+		{name: "negative seconds", value: "-5", now: now},
+		{name: "no number and no date", value: "soon", now: now},
+		{name: "empty", value: "", now: now},
+		{name: "date in ten minutes", value: date(10 * time.Minute), now: now, want: 600 * time.Second, wantOK: true},
+		{name: "date rounded to seconds", value: date(10 * time.Second), now: now.Add(-400 * time.Millisecond), want: 10 * time.Second, wantOK: true},
+		{name: "date above the cap", value: date(24 * time.Hour), now: now, want: maxWait, wantOK: true},
+		{name: "date now", value: date(0), now: now, want: 0, wantOK: true},
+		{name: "date in the past", value: date(-time.Minute), now: now, want: 0, wantOK: true},
+		{name: "date in RFC 850 form", value: now.Add(time.Minute).Format(time.RFC850), now: now, want: time.Minute, wantOK: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := retryAfterWait(tt.value, maxWait, tt.now)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("retryAfterWait(%q) = (%v, %v), want (%v, %v)", tt.value, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
 }
 
 // The 5xx case never parses the body. The 429 case parses it on every attempt,

@@ -201,14 +201,16 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		// least one minute with an exponentially increasing wait for a secondary
 		// rate limit. See
 		// https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit
+		// The waits from Retry-After and X-Ratelimit-Reset are capped at max
+		// (RetryWaitMax), see retryAfterWait and rateLimitResetWait.
 		//
 		// Backoff does not read the body: retryablehttp drains up to 4096 bytes of
 		// resp.Body after CheckRetry and before Backoff. CheckRetry hands a
 		// secondary rate limit to Backoff through resp.Request instead, see
 		// markSecondaryRateLimit.
 		if s, ok := resp.Header["Retry-After"]; ok {
-			if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
-				sleep = time.Second * time.Duration(retryAfter)
+			if wait, ok := retryAfterWait(s[0], max, time.Now()); ok {
+				sleep = wait
 				return
 			}
 		}
@@ -216,8 +218,8 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 		if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
 			if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
 				if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
-					if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-						sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+30, 0)), time.Second)
+					if resetEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
+						sleep = rateLimitResetWait(resetEpoch, min, max, time.Now())
 						return
 					}
 				}
@@ -238,8 +240,10 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 			return
 		}
 
-		// resp is not passed on purpose: Retry-After in seconds was handled above,
-		// and a Retry-After HTTP date is ignored, as before.
+		// resp is not passed on purpose: Retry-After in both forms was handled
+		// above with a cap, and DefaultBackoff would use it again without one. A
+		// Retry-After value that retryAfterWait cannot read gets the default
+		// backoff.
 		sleep = retryablehttp.DefaultBackoff(min, max, attemptNum, nil)
 		return
 	}
@@ -363,6 +367,46 @@ func newRetryClient(logger hclog.Logger, randFloat func() float64) *retryablehtt
 	}
 
 	return retryClient
+}
+
+// retryAfterWait returns the wait that a Retry-After value asks for, capped at
+// maxWait, so that one response cannot block a worker for longer than the
+// longest wait of Backoff. RFC 9110 allows two forms: a number of seconds, or an
+// HTTP date. A date gives the time from now until that date, rounded to seconds,
+// and a date that is not after now gives 0, as Retry-After 0 does. ok is false
+// when the value is neither a number of seconds nor an HTTP date, or a negative
+// number (the RFC allows only digits), so Backoff never waits a negative time.
+// The cap is checked before the seconds become a time.Duration, so a very large
+// value does not overflow.
+func retryAfterWait(value string, maxWait time.Duration, now time.Time) (wait time.Duration, ok bool) {
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return 0, false
+		}
+		if seconds > int64(maxWait/time.Second) {
+			return maxWait, true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+
+	date, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	return min(max(roundDuration(date.Sub(now), time.Second), 0), maxWait), true
+}
+
+// rateLimitResetWait returns the wait until 30 s after the X-Ratelimit-Reset
+// time resetEpoch (in seconds since the Unix epoch), rounded to seconds. The
+// wait is capped at maxWait, so that one response cannot block a worker for
+// longer than the longest wait of Backoff; GitHub then answers the retry with
+// the same reset time, and Backoff waits again. It is at least minWait, which is
+// also the wait for a reset time of now: a reset time in the past (for example
+// when the clock of this machine is ahead of GitHub's) does not give a zero or
+// negative wait, so the retry does not hit the rate limit again at once.
+func rateLimitResetWait(resetEpoch int64, minWait, maxWait time.Duration, now time.Time) time.Duration {
+	wait := roundDuration(time.Unix(resetEpoch, 0).Add(30*time.Second).Sub(now), time.Second)
+	return min(max(wait, minWait), maxWait)
 }
 
 // isNonIdempotentMethod reports whether a request with this method can change
