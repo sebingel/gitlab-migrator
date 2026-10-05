@@ -204,6 +204,52 @@ func TestMigrateComments_NoteIDInTheOriginalTextIsNotAMatch(t *testing.T) {
 	}
 }
 
+func TestMigrateComments_HeadingThatOnlyStartsWithOriginalCommentIsNotAMatch(t *testing.T) {
+	cs := &commentServer{}
+	p := newCommentProject(t, cs)
+	var result MergeRequestResult
+
+	// A line like "## Original Commentary" only starts with the heading text. It
+	// is not the heading of the tool, so the header line after it is not a
+	// generated header.
+	commentID := int64(500)
+	body := "> | **Original Author** | Some One |\n> | **Note ID** | 12 |\n\n## Original Commentary\n\nsome text"
+	personal := &gogithub.IssueComment{ID: &commentID, Body: &body}
+
+	p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+		[]*gogitlab.Note{gitLabNote(12, "text of note 12")},
+		[]*gogithub.IssueComment{personal}, &result)
+
+	if len(cs.edited) != 0 {
+		t.Errorf("edited comments = %v, want none: the heading is not the heading of the tool", cs.edited)
+	}
+	if len(cs.created) != 1 {
+		t.Errorf("created comments = %d, want 1 for note 12", len(cs.created))
+	}
+}
+
+func TestMigrateComments_CommentSavedWithCRLFStillMatches(t *testing.T) {
+	cs := &commentServer{}
+	p := newCommentProject(t, cs)
+	var result MergeRequestResult
+
+	// The GitHub web editor saves a comment with CRLF line endings.
+	commentID := int64(500)
+	body := "> | **Original Author** | Some One |\r\n> | **Note ID** | 12 |\r\n\r\n## Original Comment\r\n\r\nedited text"
+	edited := &gogithub.IssueComment{ID: &commentID, Body: &body}
+
+	p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+		[]*gogitlab.Note{gitLabNote(12, "text of note 12")},
+		[]*gogithub.IssueComment{edited}, &result)
+
+	if len(cs.edited) != 1 || cs.edited[0] != 500 {
+		t.Errorf("edited comments = %v, want [500]", cs.edited)
+	}
+	if len(cs.created) != 0 {
+		t.Errorf("created comments = %d, want none: the comment exists", len(cs.created))
+	}
+}
+
 func TestMigrateComments_CommentWithoutOriginalCommentHeadingIsNotAMatch(t *testing.T) {
 	cs := &commentServer{}
 	p := newCommentProject(t, cs)
