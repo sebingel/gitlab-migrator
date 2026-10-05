@@ -278,6 +278,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	for _, warning := range cfg.Warnings() {
+		logger.Warn(warning)
+	}
+
 	app, err := NewApp(cfg, logger)
 	if err != nil {
 		logger.Error(err.Error())
