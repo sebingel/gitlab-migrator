@@ -184,6 +184,33 @@ func TestShouldSkip(t *testing.T) {
 	}
 }
 
+// loadStateWithNullEntry loads a state file in which MR 12 is null, for example
+// after someone edited the file by hand.
+func loadStateWithNullEntry(t *testing.T) *MigrationState {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.json")
+	raw := `{"version":1,"gitlab_project":"g/p","github_repo":"o/r","merge_requests":{"12":null,"13":{"status":"success"}}}`
+	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadOrCreate(path, "g/p", "o/r", testLogger())
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	return s
+}
+
+func TestShouldSkip_NullEntry(t *testing.T) {
+	s := loadStateWithNullEntry(t)
+
+	if s.ShouldSkip(12) {
+		t.Error("ShouldSkip(12) = true, want false: a null entry has no result, so the MR must be processed")
+	}
+	if !s.ShouldSkip(13) {
+		t.Error("ShouldSkip(13) = false, want true")
+	}
+}
+
 func TestGetState(t *testing.T) {
 	s := &MigrationState{
 		data: &StateFile{
@@ -360,6 +387,16 @@ func TestSummary(t *testing.T) {
 	}
 	if partial != 1 {
 		t.Errorf("partial = %d, want 1", partial)
+	}
+}
+
+func TestSummary_NullEntry(t *testing.T) {
+	s := loadStateWithNullEntry(t)
+
+	total, success, failed, skipped, partial := s.Summary()
+	if total != 1 || success != 1 || failed != 0 || skipped != 0 || partial != 0 {
+		t.Errorf("Summary() = %d/%d/%d/%d/%d (total/success/failed/skipped/partial), want 1/1/0/0/0: a null entry has no result",
+			total, success, failed, skipped, partial)
 	}
 }
 

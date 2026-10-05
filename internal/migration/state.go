@@ -155,8 +155,10 @@ func (s *MigrationState) ShouldSkip(mrIID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	st, ok := s.data.MergeRequests[strconv.FormatInt(mrIID, 10)]
-	if !ok {
+	// A null entry (for example in a hand-edited file) has no result, so the
+	// MR is processed again.
+	st := s.data.MergeRequests[strconv.FormatInt(mrIID, 10)]
+	if st == nil {
 		return false
 	}
 	if st.Status == MRStateSkipped {
@@ -264,12 +266,16 @@ func (s *MigrationState) Flush() error {
 	return nil
 }
 
-// Summary returns counts of each status for logging purposes.
+// Summary returns counts of each status for logging purposes. A null entry has
+// no status and is not counted.
 func (s *MigrationState) Summary() (total, success, failed, skipped, partial int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, st := range s.data.MergeRequests {
+		if st == nil {
+			continue
+		}
 		total++
 		switch st.Status {
 		case MRStateSuccess:
