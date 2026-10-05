@@ -15,6 +15,10 @@ import (
 // replaces the body of the error response with the merged earlier pages, so
 // go-github cannot read the message of the error. Here every request gets its
 // own keepErrorBodyDriver, which leaves the body of an error response alone.
+//
+// A githubpagination.WithDriver in opts has no effect: the per request driver
+// replaces it. To use another driver, put it in the context of the request with
+// githubpagination.WithOverrideConfig.
 func NewGitHubPaginationClient(base http.RoundTripper, opts ...githubpagination.Option) *http.Client {
 	return &http.Client{
 		Transport: &keepErrorBodyTransport{next: githubpagination.New(base, opts...)},
