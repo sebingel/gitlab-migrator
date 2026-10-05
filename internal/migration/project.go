@@ -45,7 +45,7 @@ type project struct {
 	state         *MigrationState // nil when -state-dir not set
 }
 
-func (m *Migrator) newProject(slugs []string) (*project, error) {
+func (m *Migrator) newProject(ctx context.Context, slugs []string) (*project, error) {
 	var err error
 	p := &project{m: m}
 	p.log = m.logger.Named(slugs[0])
@@ -56,7 +56,7 @@ func (m *Migrator) newProject(slugs []string) (*project, error) {
 	}
 
 	p.log.Info("searching for GitLab project", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
-	p.project, _, err = m.gl.Projects.GetProject(slugs[0], nil)
+	p.project, _, err = m.gl.Projects.GetProject(slugs[0], nil, gogitlab.WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("retrieving project: %w", err)
 	}
@@ -534,7 +534,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) []MergeRequestResult
 
 	p.log.Debug("retrieving GitLab merge requests", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID)
 	for {
-		result, resp, err := p.m.gl.MergeRequests.ListProjectMergeRequests(p.project.ID, opts)
+		result, resp, err := p.m.gl.MergeRequests.ListProjectMergeRequests(p.project.ID, opts, gogitlab.WithContext(ctx))
 		if err != nil {
 			p.log.Error("retrieving gitlab merge requests", "error", err)
 			return []MergeRequestResult{}
@@ -739,7 +739,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		mergeRequest.TargetBranch = targetBranchForClosedMergeRequest
 
 		p.log.Trace("retrieving commits for merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
-		mergeRequestCommits, err := p.listMergeRequestCommits(mergeRequest.IID)
+		mergeRequestCommits, err := p.listMergeRequestCommits(ctx, mergeRequest.IID)
 		if err != nil {
 			return result, fmt.Errorf("retrieving merge request commits: %w", err)
 		}
@@ -883,7 +883,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	githubAuthorName := "Unknown Author"
 	if mergeRequest.Author != nil {
-		author, err := p.m.glClient.GetUser(mergeRequest.Author.Username)
+		author, err := p.m.glClient.GetUser(ctx, mergeRequest.Author.Username)
 		if err != nil {
 			return result, fmt.Errorf("retrieving gitlab user: %w", err)
 		}
@@ -897,13 +897,13 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	p.log.Debug("determining merge request approvers", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
 	approvers := make([]string, 0)
-	awards, err := p.listMergeRequestAwardEmoji(mergeRequest.IID)
+	awards, err := p.listMergeRequestAwardEmoji(ctx, mergeRequest.IID)
 	if err != nil {
 		p.log.Error("listing merge request awards", "error", err)
 	} else {
 		for _, award := range awards {
 			if award.Name == "thumbsup" {
-				approverUser, err := p.m.glClient.GetUser(award.User.Username)
+				approverUser, err := p.m.glClient.GetUser(ctx, award.User.Username)
 				if err != nil {
 					p.log.Error("retrieving gitlab user for approver", "username", award.User.Username, "error", err)
 					continue
@@ -1065,7 +1065,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	p.log.Debug("retrieving GitLab merge request comments", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID)
 	for {
-		notes, resp, err := p.m.gl.Notes.ListMergeRequestNotes(p.project.ID, mergeRequest.IID, noteOpts)
+		notes, resp, err := p.m.gl.Notes.ListMergeRequestNotes(p.project.ID, mergeRequest.IID, noteOpts, gogitlab.WithContext(ctx))
 		if err != nil {
 			return result, fmt.Errorf("listing merge request notes: %w", err)
 		}
@@ -1104,7 +1104,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				CreatedAt:      *comment.CreatedAt,
 			}
 
-			commentAuthor, err := p.m.glClient.GetUser(comment.Author.Username)
+			commentAuthor, err := p.m.glClient.GetUser(ctx, comment.Author.Username)
 			if err != nil {
 				commentResult.Status = StatusFailed
 				commentResult.Error = fmt.Sprintf("retrieving gitlab user: %v", err)
@@ -1197,11 +1197,11 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 // takes the last commit of its list as the first commit of the merge request.
 // A sort by committed date would be wrong for commits with the same date,
 // which is common after a rebase, and for commits with a wrong clock.
-func (p *project) listMergeRequestCommits(mrIID int64) ([]*gogitlab.Commit, error) {
+func (p *project) listMergeRequestCommits(ctx context.Context, mrIID int64) ([]*gogitlab.Commit, error) {
 	var commits []*gogitlab.Commit
 	opts := &gogitlab.GetMergeRequestCommitsOptions{ListOptions: gogitlab.ListOptions{PerPage: 100}}
 	for {
-		page, resp, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mrIID, opts)
+		page, resp, err := p.m.gl.MergeRequests.GetMergeRequestCommits(p.project.ID, mrIID, opts, gogitlab.WithContext(ctx))
 		if err != nil {
 			return nil, err
 		}
@@ -1220,11 +1220,11 @@ func (p *project) listMergeRequestCommits(mrIID int64) ([]*gogitlab.Commit, erro
 }
 
 // listMergeRequestAwardEmoji returns all award emoji of the merge request.
-func (p *project) listMergeRequestAwardEmoji(mrIID int64) ([]*gogitlab.AwardEmoji, error) {
+func (p *project) listMergeRequestAwardEmoji(ctx context.Context, mrIID int64) ([]*gogitlab.AwardEmoji, error) {
 	var awards []*gogitlab.AwardEmoji
 	opts := &gogitlab.ListAwardEmojiOptions{ListOptions: gogitlab.ListOptions{PerPage: 100}}
 	for {
-		page, resp, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mrIID, opts)
+		page, resp, err := p.m.gl.AwardEmoji.ListMergeRequestAwardEmoji(p.project.ID, mrIID, opts, gogitlab.WithContext(ctx))
 		if err != nil {
 			return nil, err
 		}

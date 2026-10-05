@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/hashicorp/go-hclog"
@@ -9,7 +10,7 @@ import (
 
 // GitLabClient is the interface for GitLab API operations used by the migrator.
 type GitLabClient interface {
-	GetUser(username string) (*gogitlab.User, error)
+	GetUser(ctx context.Context, username string) (*gogitlab.User, error)
 }
 
 // gitlabClient is the concrete implementation of GitLabClient.
@@ -25,11 +26,11 @@ func NewGitLabClient(gl *gogitlab.Client, logger hclog.Logger) GitLabClient {
 }
 
 // GetUser returns a GitLab user by username, using the cache.
-func (c *gitlabClient) GetUser(username string) (*gogitlab.User, error) {
+func (c *gitlabClient) GetUser(ctx context.Context, username string) (*gogitlab.User, error) {
 	user := c.cache.getGitlabUser(username)
 	if user == nil {
 		c.logger.Debug("retrieving user details", "username", username)
-		users, _, err := c.gl.Users.ListUsers(&gogitlab.ListUsersOptions{Username: &username})
+		users, _, err := c.gl.Users.ListUsers(&gogitlab.ListUsersOptions{Username: &username}, gogitlab.WithContext(ctx))
 		if err != nil {
 			return nil, err
 		}

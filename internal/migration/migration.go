@@ -96,7 +96,7 @@ func (m *Migrator) PerformMigration(ctx context.Context, projects []CSVRow, coll
 					break
 				}
 				slugs := item.slugs
-				proj, err := m.newProject(slugs)
+				proj, err := m.newProject(ctx, slugs)
 				if err != nil {
 					m.logger.Error("initializing project", "project", slugs[0], "error", err)
 					gitlabPath, githubPath, parseErr := ParseProjectSlugs(slugs)
@@ -277,7 +277,7 @@ type Report struct {
 	MergeRequestsCount int
 }
 
-func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, error) {
+func (m *Migrator) reportProject(ctx context.Context, slugs []string) (*Report, error) {
 	gitlabPath, _, err := ParseProjectSlugs(slugs)
 	if err != nil {
 		return nil, fmt.Errorf("parsing project slugs: %w", err)
@@ -285,7 +285,7 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 
 	m.logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
 	searchTerm := gitlabPath[1]
-	projectResult, _, err := m.gl.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm})
+	projectResult, _, err := m.gl.Projects.ListProjects(&gogitlab.ListProjectsOptions{Search: &searchTerm}, gogitlab.WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
 	}
@@ -315,7 +315,7 @@ func (m *Migrator) reportProject(_ context.Context, slugs []string) (*Report, er
 
 	m.logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", proj.ID)
 	for {
-		result, resp, err := m.gl.MergeRequests.ListProjectMergeRequests(proj.ID, opts)
+		result, resp, err := m.gl.MergeRequests.ListProjectMergeRequests(proj.ID, opts, gogitlab.WithContext(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("retrieving gitlab merge requests: %w", err)
 		}
