@@ -16,17 +16,6 @@ $env:LOG_LEVEL = "TRACE"
 # $env:GITHUB_TOKEN = "github_pat_..."
 # $env:GITLAB_TOKEN = "glpat-..."
 
-# Verify tokens are set
-if (-not $env:GITHUB_TOKEN) {
-    Write-Error "GITHUB_TOKEN environment variable is not set"
-    exit 1
-}
-
-if (-not $env:GITLAB_TOKEN) {
-    Write-Error "GITLAB_TOKEN environment variable is not set"
-    exit 1
-}
-
 # ============================================================================
 # Command arguments
 # ============================================================================
@@ -247,7 +236,9 @@ if ($LogDirectory) {
 # block. -version also exits before prepare mode starts.
 # As in normal mode, the tool stops with an error when -log-directory is set but -log-output
 # has no "file".
-# Prepare mode needs no tokens, but this script checks them anyway.
+# Prepare mode needs no tokens: the script skips the token check when the arguments
+# contain -prepare. (A -prepare set only in the -config file is not seen: the script
+# then still checks the tokens.)
 #
 # -prepare: Start prepare mode.
 #   Requires: -prepare-clone-url, -prepare-target-url.
@@ -267,6 +258,20 @@ if ($LogDirectory) {
 # )
 # $arguments += "-prepare-large-files", "remove"  # or "lfs"
 # $arguments += "-prepare-batch-count", "10"
+
+# Verify tokens are set (prepare mode needs no tokens)
+$prepareMode = ($arguments -ccontains "-prepare") -or ($arguments -ccontains "--prepare")
+if (-not $prepareMode) {
+    if (-not $env:GITHUB_TOKEN) {
+        Write-Error "GITHUB_TOKEN environment variable is not set"
+        exit 1
+    }
+
+    if (-not $env:GITLAB_TOKEN) {
+        Write-Error "GITLAB_TOKEN environment variable is not set"
+        exit 1
+    }
+}
 
 # Display configuration
 Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
@@ -299,16 +304,19 @@ Write-Host ""
 & .\gitlab-migrator.exe @arguments
 
 # Check exit code
+$exitCode = $LASTEXITCODE
 # -version prints the version and exits with 0 before any migration: no success message then
 $showVersion = ($arguments -ccontains "-version") -or ($arguments -ccontains "--version")
-if ($LASTEXITCODE -eq 0) {
+if ($exitCode -eq 0) {
     if (-not $showVersion) {
         Write-Host ""
         Write-Host "Migration completed successfully!" -ForegroundColor Green
     }
 } else {
     Write-Host ""
-    Write-Host "Migration completed with errors (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+    Write-Host "Migration completed with errors (exit code: $exitCode)" -ForegroundColor Yellow
     Write-Host "Check log files for details" -ForegroundColor Yellow
 }
 
+# Pass on the exit code of the tool, so a caller or scheduler sees a failed migration
+exit $exitCode

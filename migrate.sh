@@ -17,17 +17,6 @@ export LOG_LEVEL="TRACE"
 # export GITHUB_TOKEN="github_pat_..."
 # export GITLAB_TOKEN="glpat-..."
 
-# Verify tokens are set
-if [ -z "$GITHUB_TOKEN" ]; then
-    echo "Error: GITHUB_TOKEN environment variable is not set" >&2
-    exit 1
-fi
-
-if [ -z "$GITLAB_TOKEN" ]; then
-    echo "Error: GITLAB_TOKEN environment variable is not set" >&2
-    exit 1
-fi
-
 # ============================================================================
 # Command arguments
 # ============================================================================
@@ -248,7 +237,9 @@ fi
 # block. -version also exits before prepare mode starts.
 # As in normal mode, the tool stops with an error when -log-directory is set but -log-output
 # has no "file".
-# Prepare mode needs no tokens, but this script checks them anyway.
+# Prepare mode needs no tokens: the script skips the token check when the arguments
+# contain -prepare. (A -prepare set only in the -config file is not seen: the script
+# then still checks the tokens.)
 #
 # -prepare: Start prepare mode.
 #   Requires: -prepare-clone-url, -prepare-target-url.
@@ -268,6 +259,25 @@ fi
 # )
 # arguments+=("-prepare-large-files" "remove")  # or "lfs"
 # arguments+=("-prepare-batch-count" "10")
+
+# Verify tokens are set (prepare mode needs no tokens)
+prepare_mode=false
+for arg in "${arguments[@]}"; do
+    if [[ "$arg" == "-prepare" || "$arg" == "--prepare" ]]; then
+        prepare_mode=true
+    fi
+done
+if [ "$prepare_mode" = false ]; then
+    if [ -z "$GITHUB_TOKEN" ]; then
+        echo "Error: GITHUB_TOKEN environment variable is not set" >&2
+        exit 1
+    fi
+
+    if [ -z "$GITLAB_TOKEN" ]; then
+        echo "Error: GITLAB_TOKEN environment variable is not set" >&2
+        exit 1
+    fi
+fi
 
 # Display configuration
 echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
@@ -318,3 +328,6 @@ else
     echo -e "\033[33mMigration completed with errors (exit code: $exit_code)\033[0m"
     echo -e "\033[33mCheck log files for details\033[0m"
 fi
+
+# Pass on the exit code of the tool, so a caller or scheduler sees a failed migration
+exit $exit_code
