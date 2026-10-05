@@ -285,7 +285,7 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 			return p.result, fmt.Errorf("GitHub repository %s/%s not found (-pull-requests-only requires the repository to already exist on GitHub)", p.githubPath[0], p.githubPath[1])
 		}
 		p.log.Info("pull-requests-only mode: skipping repository clone and push", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
-	} else if mirrorErr := p.mirrorRepository(ctx, err == nil); mirrorErr != nil {
+	} else if mirrorErr := p.mirrorRepository(ctx, err == nil, githubRepo.GetDefaultBranch()); mirrorErr != nil {
 		return p.result, mirrorErr
 	}
 
@@ -354,8 +354,9 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 
 // mirrorRepository creates or updates the GitHub repository and mirror-pushes
 // all branches and tags from GitLab. It leaves the local clone in p.repo for
-// the merge request migration.
-func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
+// the merge request migration. githubDefaultBranch is the default branch of the
+// GitHub repository before the run, empty when it does not exist yet.
+func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubDefaultBranch string) error {
 	var err error
 
 	cloneUrl, parseErr := url.Parse(p.project.HTTPURLToRepo)
@@ -448,14 +449,16 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 		return fmt.Errorf("adding github remote: %w", err)
 	}
 
-	return p.pushToGitHub(ctx, githubUrl)
+	return p.pushToGitHub(ctx, githubUrl, githubDefaultBranch)
 }
 
 // pushToGitHub pushes the branches and tags of p.repo to its remote "github",
 // then sets the default branch of the GitHub repository and, with
 // -trim-branches-on-github, deletes the GitHub branches that GitLab does not
-// have. githubUrl is the repository URL without credentials, for the log.
-func (p *project) pushToGitHub(ctx context.Context, githubUrl string) error {
+// have (see updateGithubBranches). githubUrl is the repository URL without
+// credentials, for the log. githubDefaultBranch is the default branch of the
+// GitHub repository before the run, empty when it did not exist yet.
+func (p *project) pushToGitHub(ctx context.Context, githubUrl, githubDefaultBranch string) error {
 	p.log.Debug("determining branches to push", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
 	branches, err := p.repo.Branches()
 	if err != nil {
@@ -513,50 +516,65 @@ func (p *project) pushToGitHub(ctx context.Context, githubUrl string) error {
 		}
 	}
 
+	return p.updateGithubBranches(ctx, githubUrl, githubDefaultBranch)
+}
+
+// updateGithubBranches is called after the branches and tags are pushed to GitHub. It
+// makes the GitHub trunk the default branch of the GitHub repository and, with
+// -trim-branches-on-github, deletes the branches on GitHub that are not in the
+// GitLab repository. The default branch comes first: after a trunk rename the
+// trim deletes the old trunk, which an earlier run without the rename made the
+// default branch, and GitHub refuses to delete the default branch.
+func (p *project) updateGithubBranches(ctx context.Context, githubUrl, githubDefaultBranch string) error {
 	p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
 	updateRepoDefault := gogithub.Repository{
 		DefaultBranch: &p.defaultBranch,
 	}
-	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
+	if _, _, err := p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepoDefault); err != nil {
 		return fmt.Errorf("setting default branch: %w", err)
 	}
 
-	// The trim comes after the default branch is set: GitHub refuses to
-	// delete its default branch, and after a trunk rename the old trunk is
-	// the default until then.
-	if p.m.cfg.TrimGithubBranches {
-		p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
-		refSpecsToDelete := make([]gitconfig.RefSpec, 0)
-		githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+	if !p.m.cfg.TrimGithubBranches {
+		return nil
+	}
+
+	p.log.Debug("determining old branches to trim on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl)
+	refSpecsToDelete := make([]gitconfig.RefSpec, 0)
+	branchesToDelete := make([]string, 0)
+	githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+	if err != nil {
+		return fmt.Errorf("listing branches from GitHub: %w", err)
+	}
+	for _, githubBranch := range githubBranches {
+		// Dereference Name on purpose: a branch without a name must fail loudly,
+		// not become the refspec ":refs/heads/" in the delete batch.
+		if !slices.Contains(p.result.BranchesMigrated, *githubBranch.Name) {
+			branchesToDelete = append(branchesToDelete, *githubBranch.Name)
+			refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", *githubBranch.Name)))
+		}
+	}
+
+	if err := p.retargetPullRequestsBeforeTrim(ctx, branchesToDelete, githubDefaultBranch); err != nil {
+		return err
+	}
+
+	batches := ChunkRefSpecs(refSpecsToDelete, p.m.cfg.PushBatchSize)
+	p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
+
+	for batchNum, batch := range batches {
+		p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
+
+		trimOpts := &git.PushOptions{
+			RemoteName: "github",
+			Force:      true,
+			RefSpecs:   batch,
+		}
+		sideband, err := p.pushWithSideband(ctx, trimOpts)
 		if err != nil {
-			return fmt.Errorf("listing branches from GitHub: %w", err)
-		}
-		for _, githubBranch := range githubBranches {
-			// Dereference Name on purpose: a branch without a name must fail loudly,
-			// not become the refspec ":refs/heads/" in the delete batch.
-			if !slices.Contains(p.result.BranchesMigrated, *githubBranch.Name) {
-				refSpecsToDelete = append(refSpecsToDelete, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", *githubBranch.Name)))
-			}
-		}
-
-		batches := ChunkRefSpecs(refSpecsToDelete, p.m.cfg.PushBatchSize)
-		p.log.Debug("trimming old branches on GitHub repository", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "url", githubUrl, "total_branches", len(refSpecsToDelete), "batches", len(batches))
-
-		for batchNum, batch := range batches {
-			p.log.Debug("trimming branch batch", "name", p.gitlabPath[1], "batch", batchNum+1, "total_batches", len(batches), "branches_in_batch", len(batch))
-
-			trimOpts := &git.PushOptions{
-				RemoteName: "github",
-				Force:      true,
-				RefSpecs:   batch,
-			}
-			sideband, err := p.pushWithSideband(ctx, trimOpts)
-			if err != nil {
-				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					p.log.Debug("batch already up-to-date", "batch", batchNum+1)
-				} else {
-					return formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
-				}
+			if errors.Is(err, git.NoErrAlreadyUpToDate) {
+				p.log.Debug("batch already up-to-date", "batch", batchNum+1)
+			} else {
+				return formatPushError(fmt.Sprintf("trimming branch batch %d/%d", batchNum+1, len(batches)), "", err, sideband)
 			}
 		}
 	}
@@ -633,14 +651,22 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 				if prev.Status == MRStateSkipped {
 					status = StatusSkipped
 				}
-				results = append(results, MergeRequestResult{
+				mrResult := MergeRequestResult{
 					GitLabMRID:     mergeRequest.IID,
 					GitLabMRTitle:  mergeRequest.Title,
 					GitLabState:    mergeRequest.State,
 					GitHubPRNumber: prev.GitHubPRNum,
 					Status:         status,
 					SkipReason:     prev.SkipReason,
-				})
+				}
+				// The state file is not changed for a failure here: it keeps
+				// the saved result, so the next run tries the base again.
+				if err := p.retargetSavedPullRequest(ctx, mergeRequest, prev.GitHubPRNum); err != nil {
+					p.log.Error("changing base branch of migrated pull request", "merge_request_id", mergeRequest.IID, "error", err)
+					mrResult.Status = StatusFailed
+					mrResult.Error = err.Error()
+				}
+				results = append(results, mrResult)
 				continue
 			}
 		}
@@ -1123,16 +1149,36 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			}
 		}
 
+		// The base branch follows the target branch of the merge request, for
+		// example the new trunk after -rename-master-to-main or
+		// -rename-trunk-branch. GitHub refuses to change the base branch of a
+		// closed pull request, so only an open pull request gets a new base. It
+		// is checked after the state change above, so a pull request that was
+		// just reopened gets it too. A closed pull request keeps its base: for a
+		// closed or merged merge request that is the temporary target branch
+		// from the time it was migrated.
+		var newBase *string
+		if pullRequest.GetState() == "open" && pullRequest.GetBase().GetRef() != mergeRequest.TargetBranch {
+			newBase = &mergeRequest.TargetBranch
+		}
+
 		if (newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState)) ||
 			(pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
 			(pullRequest.Body == nil || *pullRequest.Body != body) ||
-			(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
+			(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) ||
+			newBase != nil {
 			p.log.Info("updating pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber())
 
 			pullRequest.Title = &mergeRequest.Title
 			pullRequest.Body = &body
 			pullRequest.Draft = &mergeRequest.Draft
 			pullRequest.MaintainerCanModify = nil
+			if newBase != nil {
+				p.log.Info("changing base branch of pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "old_base", pullRequest.GetBase().GetRef(), "new_base", *newBase)
+				// A new branch value instead of a change in place: the cache
+				// of pull requests holds shallow copies that share the old one.
+				pullRequest.Base = &gogithub.PullRequestBranch{Ref: newBase}
+			}
 
 			pullRequest, err = p.editPullRequest(ctx, "updating pull request", pullRequest.GetNumber(), pullRequest)
 			if err != nil {
@@ -1365,6 +1411,95 @@ func (p *project) editPullRequest(ctx context.Context, desc string, number int, 
 		return editErr
 	})
 	return pr, err
+}
+
+// retargetPullRequestsBeforeTrim gives the open pull requests on an old trunk
+// the GitHub trunk as base branch, when the trim is about to delete that old
+// trunk on GitHub. GitHub closes the open pull requests whose base branch is
+// deleted, and a closed pull request cannot get a new base, so the change in
+// migrateMergeRequest would come too late. An old trunk is the GitLab trunk
+// when it is renamed, or githubDefaultBranch, the default branch of the GitHub
+// repository before the run, when this run has another trunk (for example an
+// earlier run had a rename that this run does not have). branchesToDelete are
+// the branches the trim deletes.
+func (p *project) retargetPullRequestsBeforeTrim(ctx context.Context, branchesToDelete []string, githubDefaultBranch string) error {
+	oldTrunks := []string{p.project.DefaultBranch}
+	if githubDefaultBranch != p.project.DefaultBranch {
+		oldTrunks = append(oldTrunks, githubDefaultBranch)
+	}
+	for _, oldTrunk := range oldTrunks {
+		if oldTrunk == "" || oldTrunk == p.defaultBranch || !slices.Contains(branchesToDelete, oldTrunk) {
+			continue
+		}
+		if err := p.retargetOpenPullRequests(ctx, oldTrunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retargetOpenPullRequests gives the open pull requests on oldTrunk the GitHub
+// trunk as base branch.
+func (p *project) retargetOpenPullRequests(ctx context.Context, oldTrunk string) error {
+	// All pages first: each edit takes a pull request out of the filtered list,
+	// which would shift the later pages.
+	opts := &gogithub.PullRequestListOptions{
+		State:       "open",
+		Base:        oldTrunk,
+		ListOptions: gogithub.ListOptions{PerPage: 100},
+	}
+	var pullRequests []*gogithub.PullRequest
+	for {
+		prs, resp, err := p.m.gh.PullRequests.List(ctx, p.githubPath[0], p.githubPath[1], opts)
+		if err != nil {
+			return fmt.Errorf("listing open pull requests on old trunk %s: %w", oldTrunk, err)
+		}
+		pullRequests = append(pullRequests, prs...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	for _, pr := range pullRequests {
+		p.log.Info("changing base branch of pull request before trimming the old trunk", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pr.GetNumber(), "old_base", oldTrunk, "new_base", p.defaultBranch)
+		edit := &gogithub.PullRequest{Base: &gogithub.PullRequestBranch{Ref: Pointer(p.defaultBranch)}}
+		if _, err := p.editPullRequest(ctx, "changing base branch of pull request", pr.GetNumber(), edit); err != nil {
+			return fmt.Errorf("changing base branch of pull request %d to %s: %w", pr.GetNumber(), p.defaultBranch, err)
+		}
+	}
+	return nil
+}
+
+// retargetSavedPullRequest gives pull request prNumber the GitHub trunk as
+// base branch. It is for a merge request that -state-dir records as migrated,
+// so migrateMergeRequest does not run for it. It does something only when the
+// GitLab trunk is renamed and the merge request is open and targets the GitLab
+// trunk; the pull request of a closed or merged merge request targets its
+// temporary branch. With -skip-open-merge-requests it does nothing, like the
+// run without -state-dir, which skips open merge requests. GitHub refuses a new
+// base for a closed pull request, so a closed one keeps its base. Only the base
+// changes: title, body and state stay as the saved result left them.
+func (p *project) retargetSavedPullRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest, prNumber *int) error {
+	if prNumber == nil || p.m.cfg.SkipOpenMergeRequests || p.defaultBranch == p.project.DefaultBranch ||
+		!strings.EqualFold(mergeRequest.State, "opened") || mergeRequest.TargetBranch != p.project.DefaultBranch {
+		return nil
+	}
+
+	pr, err := p.m.ghClient.GetPullRequest(ctx, p.githubPath[0], p.githubPath[1], *prNumber)
+	if err != nil {
+		return fmt.Errorf("retrieving pull request %d: %w", *prNumber, err)
+	}
+	if pr.GetState() != "open" || pr.GetBase().GetRef() == p.defaultBranch {
+		return nil
+	}
+
+	p.log.Info("changing base branch of migrated pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", *prNumber, "old_base", pr.GetBase().GetRef(), "new_base", p.defaultBranch)
+	edit := &gogithub.PullRequest{Base: &gogithub.PullRequestBranch{Ref: Pointer(p.defaultBranch)}}
+	if _, err := p.editPullRequest(ctx, "changing base branch of pull request", *prNumber, edit); err != nil {
+		return fmt.Errorf("changing base branch of pull request %d to %s: %w", *prNumber, p.defaultBranch, err)
+	}
+	return nil
 }
 
 func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (bool, error) {

@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/sebingel/gitlab-migrator/internal/clients"
 	"github.com/sebingel/gitlab-migrator/internal/config"
+	gogitlab "gitlab.com/gitlab-org/api/client-go/v2"
 )
 
 func TestPushErrHint(t *testing.T) {
@@ -122,6 +123,7 @@ func TestPushToGitHub_SetsDefaultBranchBeforeTrim(t *testing.T) {
 			logger: hclog.NewNullLogger(),
 		},
 		log:           hclog.NewNullLogger(),
+		project:       &gogitlab.Project{DefaultBranch: "master"},
 		repo:          repo,
 		defaultBranch: "main",
 		gitlabPath:    []string{"group", "project"},
@@ -163,14 +165,23 @@ func TestPushToGitHub_SetsDefaultBranchBeforeTrim(t *testing.T) {
 			t.Errorf("writing the branches: %v", err)
 		}
 	})
+	// The trim deletes the old trunk, so its open pull requests get the new
+	// trunk as base first. There are none here.
+	ghMux.HandleFunc("GET /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
+		events = append(events, "list open pull requests on "+r.URL.Query().Get("base"))
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `[]`); err != nil {
+			t.Errorf("writing the pull requests: %v", err)
+		}
+	})
 	useGitHubMux(t, p, ghMux)
 	p.m.ghClient = clients.NewGitHubClient(p.m.gh, hclog.NewNullLogger())
 
-	if err := p.pushToGitHub(context.Background(), "https://github.com/owner/repo"); err != nil {
+	if err := p.pushToGitHub(context.Background(), "https://github.com/owner/repo", "master"); err != nil {
 		t.Fatalf("pushToGitHub: %v", err)
 	}
 
-	if want := []string{"set default branch main", "list branches"}; !slices.Equal(events, want) {
+	if want := []string{"set default branch main", "list branches", "list open pull requests on master"}; !slices.Equal(events, want) {
 		t.Fatalf("GitHub calls = %v, want %v", events, want)
 	}
 	if want := []string{"main", "master"}; !slices.Equal(branchesAtDefault, want) {

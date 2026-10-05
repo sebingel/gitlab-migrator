@@ -158,6 +158,8 @@ _Example migrated pull request (closed)_
 
 As a bonus, this tool can transparently rename the trunk branch on your GitHub repository - enable with the `-rename-trunk-branch` argument. This will also work for any open merge requests as they are translated to pull requests.
 
+Pull requests that exist on GitHub from an earlier run also get the new trunk as their base branch, as long as they are open. GitHub does not allow to change the base branch of a closed pull request, so closed pull requests keep their base branch. A pull request that is reopened because its merge request is open again gets the new base branch after it is reopened. With `-skip-open-merge-requests`, open merge requests are skipped, so their existing pull requests keep the old base branch, unless the trim below changes it. With `-trim-branches-on-github`, the old trunk is deleted on GitHub during the push, and GitHub closes the open pull requests whose base branch is deleted. So before the old trunk is deleted, all open pull requests on it get the new trunk as their base branch. This is also true when the trim deletes the branch that was the default branch on GitHub before the run, for example when an earlier run used a rename and this run does not. The new trunk also becomes the default branch of the GitHub repository before the old trunk is deleted, because GitHub does not allow to delete the default branch.
+
 ## Concurrency
 
 By default, 4 workers will be spawned to migrate up to 4 projects in parallel. You can increase or decrease this with the `-max-concurrency` argument. Note that due to GitHub API rate-limiting, you may not experience any significant speed-up. See [GitHub API docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) for details.
@@ -242,6 +244,8 @@ Values in the file override any matching command-line flags. Field names are `sn
 ## Resuming interrupted migrations
 
 Pass `-state-dir` with a directory path to have the tool persist per-merge-request migration state to a JSON file as it works. If a migration is interrupted, re-running with the same `-state-dir` will skip merge requests that already completed successfully, so you can safely resume large or long-running migrations without redoing completed work.
+
+With `-rename-master-to-main` or `-rename-trunk-branch`, a merge request that the state file records as migrated, and that is open and targets the GitLab trunk, still gets the new trunk as the base branch of its pull request, if the pull request is open. Nothing else of the pull request is updated. If GitHub refuses the new base branch, the merge request counts as failed in this run, and the state file keeps it as successful, so the next run tries the base branch again. With `-skip-open-merge-requests` this step does not happen. But with `-trim-branches-on-github`, the open pull requests on the old trunk still get the new trunk as base branch before the trim deletes the old trunk (see [Renaming the default/trunk branch](#renaming-the-defaulttrunk-branch)), also with `-skip-open-merge-requests`. If GitHub refuses one of these base changes before the trim, the migration of the whole project fails: the old trunk is not deleted and no merge request is migrated in this run.
 
 ## Archived repositories
 
