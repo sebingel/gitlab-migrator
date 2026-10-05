@@ -19,12 +19,9 @@ import (
 	"testing/iotest"
 	"time"
 
-	"github.com/gofri/go-github-pagination/githubpagination"
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
-
-	"github.com/sebingel/gitlab-migrator/internal/clients"
 )
 
 const secondaryRateLimitBody = `{"message":"You have exceeded a secondary rate limit and have been temporarily blocked from content creation.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`
@@ -1101,7 +1098,7 @@ func TestRetryClient_NotFoundKeepsBody(t *testing.T) {
 }
 
 // NewApp puts the retry client under SearchModder, the pagination client and
-// go-github. For a 404 that CheckRetry does not retry, go-github must still get
+// go-github (newGitHubHTTPClient). For a 404 that CheckRetry does not retry, go-github must still get
 // the error message from the body that CheckRetry read before.
 func TestRetryClient_GoGitHubGetsNotFoundMessage(t *testing.T) {
 	const docURL = "https://docs.github.com/rest/repos/repos#get-a-repository"
@@ -1110,10 +1107,9 @@ func TestRetryClient_GoGitHubGetsNotFoundMessage(t *testing.T) {
 	)
 	h := newRetryHarness(t, rand.Float64)
 
-	// The transport chain of NewApp for github.com. Instead of the GitHub URL
-	// (or WithEnterpriseURLs for GitHub Enterprise), BaseURL points to the test server.
-	transport := &clients.SearchModder{Base: h.transport}
-	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100))).WithAuthToken("test-token")
+	// The HTTP client of NewApp for github.com. Instead of the GitHub URL (or
+	// WithEnterpriseURLs for GitHub Enterprise), BaseURL points to the test server.
+	gh := gogithub.NewClient(newGitHubHTTPClient(h.client)).WithAuthToken("test-token")
 	baseURL, err := url.Parse(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("parsing server URL: %v", err)
@@ -1144,8 +1140,7 @@ func TestRetryClient_GoGitHubGetsForbiddenStatusForHTMLBody(t *testing.T) {
 	)
 	h := newRetryHarness(t, rand.Float64)
 
-	transport := &clients.SearchModder{Base: h.transport}
-	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100))).WithAuthToken("test-token")
+	gh := gogithub.NewClient(newGitHubHTTPClient(h.client)).WithAuthToken("test-token")
 	baseURL, err := url.Parse(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("parsing server URL: %v", err)
@@ -1165,6 +1160,44 @@ func TestRetryClient_GoGitHubGetsForbiddenStatusForHTMLBody(t *testing.T) {
 	assertWaits(t, h.waits, nil)
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[WARN]  cannot parse the error body of the response, going on without its message: method=GET url=SERVER/repos/o/r?per_page=100 status=403 error="unmarshaling response body: invalid character '<' looking for beginning of value"`,
+	})
+}
+
+// The HTTP client of NewApp (newGitHubHTTPClient) counts the secondary rate
+// limits of a go-github request in a row: after a 502 the first secondary rate
+// limit waits 120 s, not 120 s * 2^1, and Backoff logs no "cannot count" line
+// (issue #86).
+func TestRetryClient_GoGitHubCountsSecondaryRateLimits(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+		respond(http.StatusForbidden, http.Header{"Content-Type": {"application/json"}}, secondaryRateLimitBody),
+		respond(http.StatusOK, http.Header{"Content-Type": {"application/json"}}, `{"id":1,"name":"r"}`),
+	)
+	h := newRetryHarness(t, fixedRand(0))
+
+	gh := gogithub.NewClient(newGitHubHTTPClient(h.client)).WithAuthToken("test-token")
+	baseURL, err := url.Parse(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+
+	repo, _, err := gh.Repositories.Get(context.Background(), "o", "r")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.GetName() != "r" {
+		t.Errorf("got repository name %q, want r", repo.GetName())
+	}
+
+	assertCalls(t, calls, 3)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second, 120 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=502 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=502 sleep=30s attempt=0 max_attempts=15`,
+		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
+		`[INFO]  waiting for secondary rate limit recovery: wait_duration=2m0s attempt=1 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=403 sleep=2m0s attempt=1 max_attempts=15`,
 	})
 }
 

@@ -41,12 +41,7 @@ type App struct {
 
 // NewApp constructs an App by creating and wiring all runtime dependencies from the given config.
 func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
-	retryClient := buildRetryClient(logger)
-
-	transport := &clients.SearchModder{
-		Base: newRetryTransport(retryClient),
-	}
-	paginatedClient := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
+	paginatedClient := newGitHubHTTPClient(buildRetryClient(logger))
 
 	var gh *gogithub.Client
 	if cfg.GithubDomain == config.DefaultGithubDomain {
@@ -75,6 +70,16 @@ func NewApp(cfg *config.Config, logger hclog.Logger) (*App, error) {
 	migrator := migration.NewMigrator(cfg, gh, gl, ghClient, glClient, logger)
 
 	return &App{migrator: migrator}, nil
+}
+
+// newGitHubHTTPClient returns the HTTP client for go-github that NewApp uses:
+// the pagination client over SearchModder over newRetryTransport. The tests of
+// go-github requests use it too, so they check the same transport chain.
+func newGitHubHTTPClient(retryClient *retryablehttp.Client) *http.Client {
+	transport := &clients.SearchModder{
+		Base: newRetryTransport(retryClient),
+	}
+	return githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
 }
 
 // Run performs the migration for the given projects.
