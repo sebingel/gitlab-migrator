@@ -1241,16 +1241,16 @@ func TestMigrateMergeRequest_BaseChangesAfterTheStateChange(t *testing.T) {
 	})
 }
 
-// serveOpenPullRequestsOnMaster adds to ghMux the open pull requests 5 and 6
-// on master, listed on two pages. Each edit of a pull request calls onEdit with
-// the JSON object of the request and the number of the pull request under
-// "number". GitHub answers the edit with editStatus.
-func serveOpenPullRequestsOnMaster(t *testing.T, ghMux *http.ServeMux, editStatus int, onEdit func(edit map[string]any)) {
+// serveOpenPullRequests adds to ghMux the open pull requests 5 and 6 on base,
+// listed on two pages. Each edit of a pull request calls onEdit with the JSON
+// object of the request and the number of the pull request under "number".
+// GitHub answers the edit with editStatus.
+func serveOpenPullRequests(t *testing.T, ghMux *http.ServeMux, base string, editStatus int, onEdit func(edit map[string]any)) {
 	t.Helper()
 	ghMux.HandleFunc("GET /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		if query.Get("state") != "open" || query.Get("base") != "master" {
-			t.Errorf("listed pull requests with %v, want the open ones on master", query)
+		if query.Get("state") != "open" || query.Get("base") != base {
+			t.Errorf("listed pull requests with %v, want the open ones on %s", query, base)
 		}
 		prs := []*gogithub.PullRequest{{Number: Pointer(5)}}
 		if query.Get("page") == "2" {
@@ -1286,12 +1286,13 @@ func serveOpenPullRequestsOnMaster(t *testing.T, ghMux *http.ServeMux, editStatu
 }
 
 // retargetBeforeTrim calls retargetPullRequestsBeforeTrim for the GitLab trunk
-// master and the GitHub trunk githubTrunk, with branchesToDelete as the
+// master and the GitHub trunk githubTrunk, with githubDefault as the default
+// branch of the GitHub repository before the run and branchesToDelete as the
 // branches the trim deletes. The test server lists the open pull requests 5
-// and 6 on master, on two pages. It returns the edits in the order they were
-// sent, each with the number of the pull request and the JSON object of the
-// request.
-func retargetBeforeTrim(t *testing.T, githubTrunk string, branchesToDelete []string) ([]map[string]any, error) {
+// and 6 on githubDefault, on two pages. It returns the edits in the order they
+// were sent, each with the number of the pull request and the JSON object of
+// the request.
+func retargetBeforeTrim(t *testing.T, githubTrunk, githubDefault string, branchesToDelete []string) ([]map[string]any, error) {
 	t.Helper()
 	p := newGitLabTestProject(t, http.NewServeMux())
 	p.project.DefaultBranch = "master"
@@ -1299,12 +1300,12 @@ func retargetBeforeTrim(t *testing.T, githubTrunk string, branchesToDelete []str
 
 	var edits []map[string]any
 	ghMux := http.NewServeMux()
-	serveOpenPullRequestsOnMaster(t, ghMux, http.StatusOK, func(edit map[string]any) {
+	serveOpenPullRequests(t, ghMux, githubDefault, http.StatusOK, func(edit map[string]any) {
 		edits = append(edits, edit)
 	})
 	useGitHubMux(t, p, ghMux)
 
-	err := p.retargetPullRequestsBeforeTrim(context.Background(), branchesToDelete)
+	err := p.retargetPullRequestsBeforeTrim(context.Background(), branchesToDelete, githubDefault)
 	return edits, err
 }
 
@@ -1312,7 +1313,7 @@ func TestRetargetPullRequestsBeforeTrim_OldTrunkIsTrimmed(t *testing.T) {
 	// The trim deletes master, which closes the open pull requests on it. So
 	// they get the new trunk main as base first, and the edit changes nothing
 	// else.
-	edits, err := retargetBeforeTrim(t, "main", []string{"stale", "master"})
+	edits, err := retargetBeforeTrim(t, "main", "master", []string{"stale", "master"})
 	if err != nil {
 		t.Fatalf("retargetPullRequestsBeforeTrim: %v", err)
 	}
@@ -1322,15 +1323,30 @@ func TestRetargetPullRequestsBeforeTrim_OldTrunkIsTrimmed(t *testing.T) {
 	}
 }
 
+func TestRetargetPullRequestsBeforeTrim_OldDefaultBranchIsTrimmed(t *testing.T) {
+	// An earlier run with -rename-master-to-main made main the default branch
+	// on GitHub. This run has no rename, so master becomes the default branch
+	// again and the trim deletes main, which closes the open pull requests on
+	// it. So they get master as base first.
+	edits, err := retargetBeforeTrim(t, "master", "main", []string{"stale", "main"})
+	if err != nil {
+		t.Fatalf("retargetPullRequestsBeforeTrim: %v", err)
+	}
+	want := []map[string]any{{"number": "5", "base": "master"}, {"number": "6", "base": "master"}}
+	if fmt.Sprint(edits) != fmt.Sprint(want) {
+		t.Fatalf("edits = %v, want %v", edits, want)
+	}
+}
+
 func TestRetargetPullRequestsBeforeTrim_NothingToDo(t *testing.T) {
 	t.Run("old trunk is not trimmed", func(t *testing.T) {
-		edits, err := retargetBeforeTrim(t, "main", []string{"stale"})
+		edits, err := retargetBeforeTrim(t, "main", "master", []string{"stale"})
 		if err != nil || len(edits) != 0 {
 			t.Fatalf("edits = %v, err = %v, want no edits and no error", edits, err)
 		}
 	})
 	t.Run("trunk is not renamed", func(t *testing.T) {
-		edits, err := retargetBeforeTrim(t, "master", []string{"stale", "master"})
+		edits, err := retargetBeforeTrim(t, "master", "master", []string{"stale", "master"})
 		if err != nil || len(edits) != 0 {
 			t.Fatalf("edits = %v, err = %v, want no edits and no error", edits, err)
 		}
@@ -1410,12 +1426,12 @@ func updateBranchesAfterRename(t *testing.T, editStatus int) ([]string, []string
 			t.Errorf("writing the edited repository: %v", err)
 		}
 	})
-	serveOpenPullRequestsOnMaster(t, ghMux, editStatus, func(edit map[string]any) {
+	serveOpenPullRequests(t, ghMux, "master", editStatus, func(edit map[string]any) {
 		calls = append(calls, fmt.Sprintf("base of pull request %v %v, remote branches %v", edit["number"], edit["base"], remoteBranches(t, remoteDir)))
 	})
 	useGitHubMux(t, p, ghMux)
 
-	err = p.updateGithubBranches(context.Background(), "https://github.com/owner/repo")
+	err = p.updateGithubBranches(context.Background(), "https://github.com/owner/repo", "master")
 	return calls, remoteBranches(t, remoteDir), err
 }
 

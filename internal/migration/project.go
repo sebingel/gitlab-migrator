@@ -274,7 +274,7 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 			return p.result, fmt.Errorf("GitHub repository %s/%s not found (-pull-requests-only requires the repository to already exist on GitHub)", p.githubPath[0], p.githubPath[1])
 		}
 		p.log.Info("pull-requests-only mode: skipping repository clone and push", "name", p.gitlabPath[1], "group", p.gitlabPath[0])
-	} else if mirrorErr := p.mirrorRepository(ctx, err == nil); mirrorErr != nil {
+	} else if mirrorErr := p.mirrorRepository(ctx, err == nil, githubRepo.GetDefaultBranch()); mirrorErr != nil {
 		return p.result, mirrorErr
 	}
 
@@ -343,8 +343,9 @@ func (p *project) migrate(ctx context.Context) (result ProjectResult, err error)
 
 // mirrorRepository creates or updates the GitHub repository and mirror-pushes
 // all branches and tags from GitLab. It leaves the local clone in p.repo for
-// the merge request migration.
-func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
+// the merge request migration. githubDefaultBranch is the default branch of the
+// GitHub repository before the run, empty when it does not exist yet.
+func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubDefaultBranch string) error {
 	var err error
 
 	cloneUrl, parseErr := url.Parse(p.project.HTTPURLToRepo)
@@ -479,7 +480,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 		}
 	}
 
-	if err := p.updateGithubBranches(ctx, githubUrl); err != nil {
+	if err := p.updateGithubBranches(ctx, githubUrl, githubDefaultBranch); err != nil {
 		return err
 	}
 
@@ -506,7 +507,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool) error {
 // GitLab repository. The default branch comes first: after a trunk rename the
 // trim deletes the old trunk, which an earlier run without the rename made the
 // default branch, and GitHub refuses to delete the default branch.
-func (p *project) updateGithubBranches(ctx context.Context, githubUrl string) error {
+func (p *project) updateGithubBranches(ctx context.Context, githubUrl, githubDefaultBranch string) error {
 	p.log.Debug("setting default repository branch", "owner", p.githubPath[0], "repo", p.githubPath[1], "branch_name", p.defaultBranch)
 	updateRepoDefault := gogithub.Repository{
 		DefaultBranch: &p.defaultBranch,
@@ -535,7 +536,7 @@ func (p *project) updateGithubBranches(ctx context.Context, githubUrl string) er
 		}
 	}
 
-	if err := p.retargetPullRequestsBeforeTrim(ctx, branchesToDelete); err != nil {
+	if err := p.retargetPullRequestsBeforeTrim(ctx, branchesToDelete, githubDefaultBranch); err != nil {
 		return err
 	}
 
@@ -1386,18 +1387,34 @@ func (p *project) editPullRequest(ctx context.Context, desc string, number int, 
 	return pr, err
 }
 
-// retargetPullRequestsBeforeTrim gives the open pull requests on the old trunk
-// the new trunk as base branch, when the trunk is renamed and the trim is about
-// to delete the old trunk on GitHub. GitHub closes the open pull requests whose
-// base branch is deleted, and a closed pull request cannot get a new base, so
-// the change in migrateMergeRequest would come too late. branchesToDelete are
+// retargetPullRequestsBeforeTrim gives the open pull requests on an old trunk
+// the GitHub trunk as base branch, when the trim is about to delete that old
+// trunk on GitHub. GitHub closes the open pull requests whose base branch is
+// deleted, and a closed pull request cannot get a new base, so the change in
+// migrateMergeRequest would come too late. An old trunk is the GitLab trunk
+// when it is renamed, or githubDefaultBranch, the default branch of the GitHub
+// repository before the run, when this run has another trunk (for example an
+// earlier run had a rename that this run does not have). branchesToDelete are
 // the branches the trim deletes.
-func (p *project) retargetPullRequestsBeforeTrim(ctx context.Context, branchesToDelete []string) error {
-	oldTrunk := p.project.DefaultBranch
-	if p.defaultBranch == oldTrunk || !slices.Contains(branchesToDelete, oldTrunk) {
-		return nil
+func (p *project) retargetPullRequestsBeforeTrim(ctx context.Context, branchesToDelete []string, githubDefaultBranch string) error {
+	oldTrunks := []string{p.project.DefaultBranch}
+	if githubDefaultBranch != p.project.DefaultBranch {
+		oldTrunks = append(oldTrunks, githubDefaultBranch)
 	}
+	for _, oldTrunk := range oldTrunks {
+		if oldTrunk == "" || oldTrunk == p.defaultBranch || !slices.Contains(branchesToDelete, oldTrunk) {
+			continue
+		}
+		if err := p.retargetOpenPullRequests(ctx, oldTrunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+// retargetOpenPullRequests gives the open pull requests on oldTrunk the GitHub
+// trunk as base branch.
+func (p *project) retargetOpenPullRequests(ctx context.Context, oldTrunk string) error {
 	// All pages first: each edit takes a pull request out of the filtered list,
 	// which would shift the later pages.
 	opts := &gogithub.PullRequestListOptions{
