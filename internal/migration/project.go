@@ -980,10 +980,7 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", mergeRequest.MergedAt.Format(config.DateFormat))
 	}
 
-	mergeRequestTitle := mergeRequest.Title
-	if len(mergeRequestTitle) > 40 {
-		mergeRequestTitle = mergeRequestTitle[:40] + "..."
-	}
+	mergeRequestTitle := shortenTitle(mergeRequest.Title)
 
 	body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab

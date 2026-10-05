@@ -58,3 +58,25 @@ func ChunkRefSpecs(items []gitconfig.RefSpec, chunkSize int) [][]gitconfig.RefSp
 	}
 	return slices.Collect(slices.Chunk(items, chunkSize))
 }
+
+// maxTitleRunes is the number of characters of a merge request title that are
+// kept in the metadata header of a migrated pull request.
+const maxTitleRunes = 40
+
+// shortenTitle cuts title to maxTitleRunes characters and appends "..." when it
+// is longer. It cuts by runes, not bytes, so a multi-byte character is never
+// split and the result is always valid UTF-8.
+func shortenTitle(title string) string {
+	// A rune takes at least one byte, so this many bytes or fewer is short enough.
+	if len(title) <= maxTitleRunes {
+		return title
+	}
+	runes := 0
+	for i := range title {
+		if runes == maxTitleRunes {
+			return title[:i] + "..."
+		}
+		runes++
+	}
+	return title
+}
