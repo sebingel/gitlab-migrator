@@ -88,8 +88,9 @@ func (a *App) Run(ctx context.Context, projects []migration.CSVRow, collector *m
 }
 
 // RunReport prints a migration report for the given projects without migrating.
-func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) {
-	a.migrator.PrintReport(ctx, projects)
+// It returns an error when at least one project could not be reported.
+func (a *App) RunReport(ctx context.Context, projects []migration.CSVRow) error {
+	return a.migrator.PrintReport(ctx, projects)
 }
 
 // errNoResponseNoError is the error of CheckRetry for a call with neither a
