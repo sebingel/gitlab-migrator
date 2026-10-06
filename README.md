@@ -168,6 +168,8 @@ Specify `-loop` to continue migrating projects until canceled. This is useful fo
 
 With `-loop` and `-detailed-report`, the detailed report is written each time a pass over all projects is complete, and once more when the loop ends. Each write replaces the report files of the session in `reports/` with all results collected so far, so the results of complete passes are on disk while the tool runs.
 
+Press Ctrl+C to stop the migration, also with `-loop`. The tool then starts no new project, lets the running projects stop, and prints the summary (and writes the reports with `-detailed-report`). If this takes too long, press Ctrl+C a second time: the tool then stops at once with exit code 130, without the summary, the reports and other cleanup.
+
 ## Logging
 
 This tool is entirely noninteractive and outputs different levels of logs depending on your interest. You can set the `LOG_LEVEL` environment to one of `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE` to get more or less verbosity. The default is `INFO`.
@@ -249,7 +251,7 @@ With `-rename-master-to-main` or `-rename-trunk-branch`, a merge request that th
 
 ## Archived repositories
 
-By default, attempting to migrate into an archived GitHub repository fails. Pass `-unarchive-archived-repos` to have the tool temporarily unarchive the target repository before migrating, then re-archive it afterwards. The tool also re-archives the repository when you stop the migration with Ctrl+C; after Ctrl+C it tries this for up to two minutes. If the re-archive fails, the log says that you must archive the repository by hand.
+By default, attempting to migrate into an archived GitHub repository fails. Pass `-unarchive-archived-repos` to have the tool temporarily unarchive the target repository before migrating, then re-archive it afterwards. The tool also re-archives the repository when you stop the migration with Ctrl+C; after Ctrl+C it tries this for up to two minutes. A second Ctrl+C stops the tool at once, also during this time, so the repository can stay unarchived. If the re-archive fails, the log says that you must archive the repository by hand.
 
 ## Reporting
 

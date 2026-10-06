@@ -19,22 +19,20 @@ import (
 	"testing/iotest"
 	"time"
 
-	"github.com/gofri/go-github-pagination/githubpagination"
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
-
-	"github.com/sebingel/gitlab-migrator/internal/clients"
 )
 
 const secondaryRateLimitBody = `{"message":"You have exceeded a secondary rate limit and have been temporarily blocked from content creation.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`
 
-// retryHarness runs requests through the retry client from newRetryClient (the
-// client of buildRetryClient and NewApp), so CheckRetry and Backoff run in the
-// order that retryablehttp uses.
+// retryHarness runs requests through the transport of NewApp (newRetryTransport)
+// over the retry client from newRetryClient (the client of buildRetryClient and
+// NewApp), so CheckRetry and Backoff run in the order that retryablehttp uses.
 type retryHarness struct {
-	client *retryablehttp.Client
-	logs   *bytes.Buffer
+	client    *retryablehttp.Client
+	transport http.RoundTripper
+	logs      *bytes.Buffer
 	// waits holds every wait that Backoff computed, in call order.
 	waits []time.Duration
 }
@@ -45,14 +43,22 @@ type retryHarness struct {
 // not sleep. The Backoff log lines still show the computed wait.
 func newRetryHarness(t *testing.T, randFloat func() float64) *retryHarness {
 	t.Helper()
+	return newRetryHarnessAtLevel(t, randFloat, hclog.Trace)
+}
+
+// newRetryHarnessAtLevel is newRetryHarness with the log level as a parameter,
+// for tests of what the default level INFO shows.
+func newRetryHarnessAtLevel(t *testing.T, randFloat func() float64, level hclog.Level) *retryHarness {
+	t.Helper()
 
 	h := &retryHarness{logs: &bytes.Buffer{}}
 	logger := hclog.New(&hclog.LoggerOptions{
-		Level:       hclog.Trace,
+		Level:       level,
 		Output:      h.logs,
 		DisableTime: true,
 	})
 	h.client = newRetryClient(logger, randFloat)
+	h.transport = newRetryTransport(h.client)
 
 	backoff := h.client.Backoff
 	h.client.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
@@ -73,11 +79,21 @@ func (h *retryHarness) logLines(serverURL string) []string {
 	return strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 }
 
-// expectResponse sends a GET through the retry client, expects a response with
+// send sends a request through the transport and returns what it returns.
+func (h *retryHarness) send(t *testing.T, method, target string, body io.Reader) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest(method, target, body)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	return h.transport.RoundTrip(req)
+}
+
+// expectResponse sends a GET through the transport, expects a response with
 // the given status and returns its body.
 func (h *retryHarness) expectResponse(t *testing.T, target string, status int) string {
 	t.Helper()
-	resp, err := h.client.Get(target)
+	resp, err := h.send(t, http.MethodGet, target, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,7 +115,7 @@ func (h *retryHarness) expectOK(t *testing.T, target string) {
 // expectGiveUp expects no response and exactly the error want.
 func (h *retryHarness) expectGiveUp(t *testing.T, target, want string) {
 	t.Helper()
-	resp, err := h.client.Get(target)
+	resp, err := h.send(t, http.MethodGet, target, nil)
 	if resp != nil {
 		_ = resp.Body.Close()
 		t.Errorf("got response with status %d, want nil", resp.StatusCode)
@@ -193,8 +209,9 @@ func fixedRand(v float64) func() float64 {
 }
 
 // A secondary rate limit without rate limit headers gets the extended backoff:
-// 120 s for attempt 0, plus 0.25 * 0.4 = 10 % jitter. retryablehttp drains the
-// body before Backoff runs, so CheckRetry hands the parsed message to Backoff.
+// 120 s for the first one, plus 0.25 * 0.4 = 10 % jitter. retryablehttp drains
+// the body before Backoff runs, so CheckRetry hands the parsed message to
+// Backoff.
 func TestRetryClient_SecondaryRateLimit403(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
@@ -207,15 +224,15 @@ func TestRetryClient_SecondaryRateLimit403(t *testing.T) {
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{132 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[INFO]  waiting for secondary rate limit recovery: wait_duration=2m12s attempt=0 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m12s wait_reason="extended backoff" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m12s attempt=0 max_attempts=15`,
 	})
 }
 
 // GitHub answers a secondary rate limit with 403 or 429. A 429 with a secondary
-// rate limit message gets the TRACE line (the WARN line is only for 403) and the
-// extended backoff: 120 s plus 0.5 * 0.4 = 20 % jitter.
+// rate limit message gets the same lines as a 403 and the extended backoff:
+// 120 s plus 0.5 * 0.4 = 20 % jitter.
 func TestRetryClient_SecondaryRateLimit429(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusTooManyRequests, nil, secondaryRateLimitBody),
@@ -228,12 +245,14 @@ func TestRetryClient_SecondaryRateLimit429(t *testing.T) {
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{144 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/issues status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation."`,
-		`[INFO]  waiting for secondary rate limit recovery: wait_duration=2m24s attempt=0 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
+		`[TRACE] secondary rate limit exceeded: status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m24s wait_reason="extended backoff" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/issues status=429 sleep=2m24s attempt=0 max_attempts=15`,
 	})
 }
 
+// Retry-After decides the wait of a secondary rate limit, not the extended
+// backoff, and the WARN line says so (issue #87).
 func TestRetryClient_SecondaryRateLimitWithRetryAfter(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, http.Header{"Retry-After": {"45"}}, secondaryRateLimitBody),
@@ -246,19 +265,53 @@ func TestRetryClient_SecondaryRateLimitWithRetryAfter(t *testing.T) {
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{45 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=45s wait_reason="Retry-After header" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=45s attempt=0 max_attempts=15`,
 	})
 }
 
-// The extended backoff uses the attempt number of the request, also after other
-// errors: a secondary rate limit at attempt 2 waits 120 s * 2^2 = 480 s. A 429
-// secondary rate limit with Retry-After waits as the header says, without the
-// INFO line.
+// A 429 secondary rate limit with X-Ratelimit-Remaining 0 waits until 30 s
+// after X-Ratelimit-Reset. With the default log level INFO one WARN line says
+// why the worker waits and for how long (issue #88).
+func TestRetryClient_SecondaryRateLimit429WithRateLimitResetAtInfo(t *testing.T) {
+	resetEpoch := time.Now().Unix() + 120
+	reset := strconv.FormatInt(resetEpoch, 10)
+	srv, calls := sequenceServer(t,
+		respond(http.StatusTooManyRequests, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {reset}}, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarnessAtLevel(t, fixedRand(0.5), hclog.Info)
+
+	before := time.Now()
+	h.expectOK(t, srv.URL+"/repos/o/r/issues")
+	after := time.Now()
+
+	assertCalls(t, calls, 2)
+	if len(h.waits) != 1 {
+		t.Fatalf("got waits %v, want one", h.waits)
+	}
+	// Backoff waits until 30 s after the reset time, rounded up to seconds. It
+	// runs between before and after, and it rounds up by less than one second, so
+	// its wait lies between these two bounds.
+	recovery := time.Unix(resetEpoch+30, 0)
+	lo, hi := recovery.Sub(after), recovery.Sub(before)+time.Second
+	if wait := h.waits[0]; wait < lo || wait > hi {
+		t.Errorf("got wait %v, want between %v and %v", wait, lo, hi)
+	}
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=` + h.waits[0].String() + ` wait_reason="X-Ratelimit-Reset header" attempt=0 status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/issues`,
+	})
+}
+
+// The extended backoff counts only the secondary rate limits of the request,
+// not the other retries before them: after three 502 the first secondary rate
+// limit (attempt 3) waits 120 s, not 120 s * 2^3 (issue #86).
 func TestRetryClient_SecondaryRateLimitAfterOtherRetries(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
-		respond(http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, secondaryRateLimitBody),
+		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
 		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
 		respond(http.StatusOK, nil, "ok"),
 	)
@@ -266,16 +319,60 @@ func TestRetryClient_SecondaryRateLimitAfterOtherRetries(t *testing.T) {
 
 	h.expectOK(t, srv.URL+"/repos/o/r/pulls")
 
-	assertCalls(t, calls, 4)
-	assertWaits(t, h.waits, []time.Duration{30 * time.Second, 7 * time.Second, 480 * time.Second})
+	assertCalls(t, calls, 5)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 120 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=30s attempt=0 max_attempts=15`,
-		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation."`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=1m0s attempt=1 max_attempts=15`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=2m0s attempt=2 max_attempts=15`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=3 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=3 max_attempts=15`,
+	})
+}
+
+// The extended backoff grows with the secondary rate limits of the request in a
+// row. A 429 secondary rate limit with Retry-After waits as the header says, and
+// its WARN line names the header, but it counts: the 403 after it is the third in a row and
+// waits 120 s * 2^2 = 480 s. Another response (502) sets the count back, so the
+// next secondary rate limit waits 120 s again.
+func TestRetryClient_SecondaryRateLimitsInARow(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
+		respond(http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, secondaryRateLimitBody),
+		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
+		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, fixedRand(0))
+
+	h.expectOK(t, srv.URL+"/repos/o/r/pulls")
+
+	assertCalls(t, calls, 6)
+	assertWaits(t, h.waits, []time.Duration{120 * time.Second, 7 * time.Second, 480 * time.Second, 240 * time.Second, 120 * time.Second})
+	const message = "You have exceeded a secondary rate limit and have been temporarily blocked from content creation."
+	trace := func(status int) string {
+		return fmt.Sprintf(`[TRACE] secondary rate limit exceeded: status=%d message="%s" method=GET url=SERVER/repos/o/r/pulls`, status, message)
+	}
+	assertLines(t, h.logLines(srv.URL), []string{
+		trace(403),
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=0 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=0 max_attempts=15`,
+		trace(429),
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=7s wait_reason="Retry-After header" attempt=1 status=429 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 sleep=7s attempt=1 max_attempts=15`,
-		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[INFO]  waiting for secondary rate limit recovery: wait_duration=8m0s attempt=2 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		trace(403),
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=8m0s wait_reason="extended backoff" attempt=2 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=8m0s attempt=2 max_attempts=15`,
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=4m0s attempt=3 max_attempts=15`,
+		trace(403),
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=4 status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=4 max_attempts=15`,
 	})
 }
 
@@ -295,17 +392,19 @@ func TestRetryClient_SecondaryRateLimitMarkDoesNotCarryOver(t *testing.T) {
 	assertCalls(t, calls, 3)
 	assertWaits(t, h.waits, []time.Duration{120 * time.Second, 60 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
-		`[INFO]  waiting for secondary rate limit recovery: wait_duration=2m0s attempt=0 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=2m0s attempt=0 max_attempts=15`,
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 message="API rate limit exceeded for user ID 1."`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=429 sleep=1m0s attempt=1 max_attempts=15`,
 	})
 }
 
-// The extended backoff doubles from 120 s per attempt and stops at RetryWaitMax
-// (900 s); the jitter is 0 here. After the 16th attempt retryablehttp gives up
-// without calling Backoff and returns no response.
+// The extended backoff doubles from 120 s with each secondary rate limit in a
+// row and stops at RetryWaitMax (900 s); the jitter is 0 here. After the 16th
+// attempt retryablehttp gives up without calling Backoff and returns no
+// response. So the last secondary rate limit gets only the TRACE line of
+// CheckRetry, and no line says that a retry follows (issue #87).
 func TestRetryClient_SecondaryRateLimitGivesUpAfterRetryMax(t *testing.T) {
 	handlers := make([]http.HandlerFunc, 16)
 	for i := range handlers {
@@ -324,16 +423,16 @@ func TestRetryClient_SecondaryRateLimitGivesUpAfterRetryMax(t *testing.T) {
 	assertWaits(t, h.waits, wantWaits)
 
 	const message = "You have exceeded a secondary rate limit and have been temporarily blocked from content creation."
-	warn := `[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`
+	trace := `[TRACE] secondary rate limit exceeded: status=403 message="` + message + `" method=GET url=SERVER/repos/o/r/pulls`
 	var wantLines []string
 	for i, wait := range wantWaits {
 		wantLines = append(wantLines,
-			warn,
-			fmt.Sprintf(`[INFO]  waiting for secondary rate limit recovery: wait_duration=%s attempt=%d message="%s" method=GET url=SERVER/repos/o/r/pulls`, wait, i, message),
+			trace,
+			fmt.Sprintf(`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=%s wait_reason="extended backoff" attempt=%d status=403 message="%s" method=GET url=SERVER/repos/o/r/pulls`, wait, i, message),
 			fmt.Sprintf(`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=%s attempt=%d max_attempts=15`, wait, i),
 		)
 	}
-	wantLines = append(wantLines, warn)
+	wantLines = append(wantLines, trace)
 	assertLines(t, h.logLines(srv.URL), wantLines)
 }
 
@@ -355,16 +454,49 @@ func TestRetryClient_SecondaryRateLimitWithoutRequest(t *testing.T) {
 
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
 	assertLines(t, h.logLines("unused"), []string{
-		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=unknown url=unknown`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=unknown url=unknown`,
 		`[WARN]  cannot hand the secondary rate limit to Backoff because the response has no request, using the default backoff instead: status=403`,
 		`[TRACE] waiting before retrying failed API request: method=unknown url=unknown status=403 sleep=30s attempt=0 max_attempts=15`,
 	})
 }
 
+// NewApp sends every request through secondaryRateLimitCounting. A request sent
+// to the retry client directly has no counter, so Backoff cannot count the
+// secondary rate limits in a row. It says so in a WARN line and uses the attempt
+// number: the secondary rate limit at attempt 1 waits 120 s * 2^1 = 240 s.
+func TestRetryClient_SecondaryRateLimitWithoutCounter(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+		respond(http.StatusForbidden, nil, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, fixedRand(0))
+
+	resp, err := h.client.Get(srv.URL + "/repos/o/r/pulls")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "ok" {
+		t.Fatalf("got status %d with body %q, want 200 with ok", resp.StatusCode, got)
+	}
+
+	assertCalls(t, calls, 3)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second, 240 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=502 sleep=30s attempt=0 max_attempts=15`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  cannot count the secondary rate limits of the request because it was not sent through secondaryRateLimitCounting, using the attempt number instead: attempt=1 method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=4m0s wait_reason="extended backoff" attempt=1 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=4m0s attempt=1 max_attempts=15`,
+	})
+}
+
 // The rate limit headers come before the extended backoff, as GitHub advises:
-// with X-Ratelimit-Remaining 0 and no X-Ratelimit-Reset Backoff waits 60 s and
-// logs no INFO line. (The path with X-Ratelimit-Reset is the same code as in
-// TestRetryClient_PrimaryRateLimitHeaders.)
+// with X-Ratelimit-Remaining 0 and no X-Ratelimit-Reset Backoff waits 60 s, and
+// the WARN line says so instead of the extended backoff (issue #87). The path
+// with X-Ratelimit-Reset is in
+// TestRetryClient_SecondaryRateLimit429WithRateLimitResetAtInfo.
 func TestRetryClient_SecondaryRateLimitWithRateLimitHeaders(t *testing.T) {
 	srv, calls := sequenceServer(t,
 		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}, secondaryRateLimitBody),
@@ -377,7 +509,29 @@ func TestRetryClient_SecondaryRateLimitWithRateLimitHeaders(t *testing.T) {
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{60 * time.Second})
 	assertLines(t, h.logLines(srv.URL), []string{
-		`[WARN]  secondary rate limit exceeded - will retry with extended backoff: message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=1m0s wait_reason="X-Ratelimit-Remaining 0 without a valid X-Ratelimit-Reset" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=1m0s attempt=0 max_attempts=15`,
+	})
+}
+
+// TestRetryClient_SecondaryRateLimitWithUnparsableRateLimitReset checks that an
+// X-Ratelimit-Reset that is not a number gets the same 60 s wait as a missing
+// one, and that the WARN line does not say the header is missing.
+func TestRetryClient_SecondaryRateLimitWithUnparsableRateLimitReset(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {"soon"}}, secondaryRateLimitBody),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, fixedRand(0.5))
+
+	h.expectOK(t, srv.URL+"/repos/o/r/pulls")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{60 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=1m0s wait_reason="X-Ratelimit-Remaining 0 without a valid X-Ratelimit-Reset" attempt=0 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r/pulls`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r/pulls status=403 sleep=1m0s attempt=0 max_attempts=15`,
 	})
 }
@@ -407,25 +561,25 @@ func sequenceRand(t *testing.T, vals ...float64) func() float64 {
 func TestSecondaryRateLimitWait(t *testing.T) {
 	const maxWait = 900 * time.Second
 	tests := []struct {
-		name    string
-		attempt int
-		rand    []float64
-		want    time.Duration
+		name   string
+		before int
+		rand   []float64
+		want   time.Duration
 	}{
-		{name: "attempt 0 without jitter", attempt: 0, rand: []float64{0, 0}, want: 120 * time.Second},
-		{name: "attempt 1 without jitter", attempt: 1, rand: []float64{0, 0}, want: 240 * time.Second},
-		{name: "attempt 2 with 20 % jitter", attempt: 2, rand: []float64{0.5, 0}, want: 576 * time.Second},
-		{name: "attempt 2 with almost 40 % jitter", attempt: 2, rand: []float64{0.99, 0}, want: 480*time.Second + 190080*time.Millisecond},
-		{name: "attempt 3 is capped at max", attempt: 3, rand: []float64{0, 0}, want: maxWait},
-		{name: "jitter above the jittered cap", attempt: 3, rand: []float64{0.5, 0.25}, want: 990 * time.Second},
-		{name: "jitter below the jittered cap", attempt: 3, rand: []float64{0.25, 0.5}, want: 990 * time.Second},
-		{name: "attempt 14 is capped at max", attempt: 14, rand: []float64{0, 0}, want: maxWait},
-		{name: "huge attempt does not overflow", attempt: 1000, rand: []float64{0, 0}, want: maxWait},
+		{name: "first secondary rate limit without jitter", before: 0, rand: []float64{0, 0}, want: 120 * time.Second},
+		{name: "1 before without jitter", before: 1, rand: []float64{0, 0}, want: 240 * time.Second},
+		{name: "2 before with 20 % jitter", before: 2, rand: []float64{0.5, 0}, want: 576 * time.Second},
+		{name: "2 before with almost 40 % jitter", before: 2, rand: []float64{0.99, 0}, want: 480*time.Second + 190080*time.Millisecond},
+		{name: "3 before is capped at max", before: 3, rand: []float64{0, 0}, want: maxWait},
+		{name: "jitter above the jittered cap", before: 3, rand: []float64{0.5, 0.25}, want: 990 * time.Second},
+		{name: "jitter below the jittered cap", before: 3, rand: []float64{0.25, 0.5}, want: 990 * time.Second},
+		{name: "14 before is capped at max", before: 14, rand: []float64{0, 0}, want: maxWait},
+		{name: "huge count does not overflow", before: 1000, rand: []float64{0, 0}, want: maxWait},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := secondaryRateLimitWait(maxWait, tt.attempt, sequenceRand(t, tt.rand...)); got != tt.want {
+			if got := secondaryRateLimitWait(maxWait, tt.before, sequenceRand(t, tt.rand...)); got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
@@ -523,6 +677,99 @@ func TestRetryClient_ServerErrors(t *testing.T) {
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=500 message=""`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=500 sleep=2m0s attempt=2 max_attempts=15`,
 	})
+}
+
+// sendWithBody sends a request with the given method and a JSON body through the
+// transport and returns the response.
+func (h *retryHarness) sendWithBody(t *testing.T, method, target string) *http.Response {
+	t.Helper()
+	resp, err := h.send(t, method, target, strings.NewReader(`{"title":"t"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return resp
+}
+
+// GitHub can create a pull request or a comment and still answer with a 5xx. A
+// retry of the POST or PATCH would then create a duplicate, so CheckRetry does
+// not retry these methods after a 5xx. The caller gets the response with its
+// status and body, and a WARN line says why it was not retried.
+func TestRetryClient_ServerErrorsNonIdempotentNotRetried(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		for _, status := range []int{
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		} {
+			t.Run(fmt.Sprintf("%s %d", method, status), func(t *testing.T) {
+				const body = "<html>error</html>"
+				srv, calls := sequenceServer(t,
+					respond(status, nil, body),
+				)
+				h := newRetryHarness(t, rand.Float64)
+
+				resp := h.sendWithBody(t, method, srv.URL+"/repos/o/r/pulls")
+				if got := readBody(t, resp); got != body {
+					t.Errorf("got body %q, want %q", got, body)
+				}
+				if resp.StatusCode != status {
+					t.Errorf("got status %d, want %d", resp.StatusCode, status)
+				}
+
+				assertCalls(t, calls, 1)
+				assertWaits(t, h.waits, nil)
+				assertLines(t, h.logLines(srv.URL), []string{
+					fmt.Sprintf(`[WARN]  server error for a non-idempotent request - will not retry, because GitHub may have processed it already and a retry could create a duplicate: method=%s url=SERVER/repos/o/r/pulls status=%d`, method, status),
+				})
+			})
+		}
+	}
+}
+
+// GitHub did not process a request that hit a rate limit, so POST and PATCH are
+// still retried after a 403 or 429 with rate limit signals.
+func TestRetryClient_RateLimitsNonIdempotentRetried(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusForbidden, nil, secondaryRateLimitBody),
+				respond(http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+				respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, fixedRand(0))
+
+			resp := h.sendWithBody(t, method, srv.URL+"/repos/o/r/pulls")
+			if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "ok" {
+				t.Fatalf("got status %d with body %q, want 200 with ok", resp.StatusCode, got)
+			}
+
+			assertCalls(t, calls, 4)
+			assertWaits(t, h.waits, []time.Duration{120 * time.Second, 7 * time.Second, 60 * time.Second})
+		})
+	}
+}
+
+// GET, PUT and DELETE are idempotent, so they are still retried after a 5xx.
+func TestRetryClient_ServerErrorsIdempotentRetried(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, rand.Float64)
+
+			resp := h.sendWithBody(t, method, srv.URL+"/repos/o/r/topics")
+			if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "ok" {
+				t.Fatalf("got status %d with body %q, want 200 with ok", resp.StatusCode, got)
+			}
+
+			assertCalls(t, calls, 2)
+			assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+		})
+	}
 }
 
 // 408 and 424 are the other 4xx statuses in retryableStatuses. CheckRetry parses
@@ -625,10 +872,11 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 	if len(h.waits) != 2 {
 		t.Fatalf("got waits %v, want 2 waits", h.waits)
 	}
-	// Backoff waits until 30 s after the reset time, rounded to seconds. It runs
-	// between before and after, so its wait lies between these two bounds.
+	// Backoff waits until 30 s after the reset time, rounded up to seconds. It
+	// runs between before and after, and it rounds up by less than one second, so
+	// its wait lies between these two bounds.
 	recovery := time.Unix(resetEpoch+30, 0)
-	lo, hi := recovery.Sub(after).Round(time.Second), recovery.Sub(before).Round(time.Second)
+	lo, hi := recovery.Sub(after), recovery.Sub(before)+time.Second
 	if h.waits[0] < lo || h.waits[0] > hi {
 		t.Errorf("wait 0: got %v, want between %v and %v", h.waits[0], lo, hi)
 	}
@@ -641,6 +889,67 @@ func TestRetryClient_PrimaryRateLimitHeaders(t *testing.T) {
 		`[TRACE] retrying failed API request: method=GET url=SERVER/user status=403 message="API rate limit exceeded for user ID 1."`,
 		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/user status=403 sleep=1m0s attempt=1 max_attempts=15`,
 	})
+}
+
+// The wait until 30 s after X-Ratelimit-Reset is capped at RetryWaitMax (900 s).
+// A reset time in the past (for example when the clock of this machine is ahead
+// of GitHub's) waits RetryWaitMin (30 s), the wait for a reset time of now.
+func TestRetryClient_RateLimitResetIsBounded(t *testing.T) {
+	tests := []struct {
+		name  string
+		reset int64
+		want  time.Duration
+	}{
+		{name: "one hour ahead", reset: time.Now().Unix() + 3600, want: 900 * time.Second},
+		{name: "ten minutes ago", reset: time.Now().Unix() - 600, want: 30 * time.Second},
+		{name: "epoch 0", reset: 0, want: 30 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusForbidden, http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {strconv.FormatInt(tt.reset, 10)}}, `{"message":"API rate limit exceeded for user ID 1."}`),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, rand.Float64)
+
+			h.expectOK(t, srv.URL+"/user")
+
+			assertCalls(t, calls, 2)
+			assertWaits(t, h.waits, []time.Duration{tt.want})
+		})
+	}
+}
+
+func TestRateLimitResetWait(t *testing.T) {
+	const minWait, maxWait = 30 * time.Second, 900 * time.Second
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		reset time.Time
+		now   time.Time
+		want  time.Duration
+	}{
+		{name: "reset now waits the 30 s margin", reset: now, now: now, want: minWait},
+		{name: "reset one second ago", reset: now.Add(-time.Second), now: now, want: minWait},
+		{name: "reset one day ago", reset: now.Add(-24 * time.Hour), now: now, want: minWait},
+		{name: "reset in 100 s", reset: now.Add(100 * time.Second), now: now, want: 130 * time.Second},
+		{name: "rounded up to seconds", reset: now.Add(100 * time.Second), now: now.Add(-400 * time.Millisecond), want: 131 * time.Second},
+		{name: "reset at the cap", reset: now.Add(870 * time.Second), now: now, want: maxWait},
+		{name: "reset above the cap", reset: now.Add(871 * time.Second), now: now, want: maxWait},
+		{name: "reset in one hour", reset: now.Add(time.Hour), now: now, want: maxWait},
+		{name: "reset far in the past", reset: time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC), now: now, want: minWait},
+		{name: "reset far in the future", reset: time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), now: now, want: maxWait},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rateLimitResetWait(tt.reset.Unix(), minWait, maxWait, tt.now); got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRetryClient_RetryAfterWinsOverRateLimitHeaders(t *testing.T) {
@@ -661,11 +970,40 @@ func TestRetryClient_RetryAfterWinsOverRateLimitHeaders(t *testing.T) {
 	})
 }
 
-// Backoff reads Retry-After only in seconds. An HTTP date gives the default backoff.
-func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
-	date := time.Now().Add(10 * time.Minute).UTC().Format(http.TimeFormat)
+// A Retry-After in seconds above RetryWaitMax (900 s) is capped at 900 s, so one
+// response cannot block a worker for longer. A value too large for a
+// time.Duration does not overflow.
+func TestRetryClient_RetryAfterSecondsIsCapped(t *testing.T) {
+	tests := []struct {
+		name       string
+		retryAfter string
+	}{
+		{name: "one second above the cap", retryAfter: "901"},
+		{name: "one day", retryAfter: "86400"},
+		{name: "too large for a duration", retryAfter: "9223372036854775807"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, calls := sequenceServer(t,
+				respond(http.StatusTooManyRequests, http.Header{"Retry-After": {tt.retryAfter}}, ""),
+				respond(http.StatusOK, nil, "ok"),
+			)
+			h := newRetryHarness(t, rand.Float64)
+
+			h.expectOK(t, srv.URL+"/repos/o/r")
+
+			assertCalls(t, calls, 2)
+			assertWaits(t, h.waits, []time.Duration{900 * time.Second})
+		})
+	}
+}
+
+// RFC 9110 allows only digits in Retry-After seconds. A negative value is no
+// valid value, so Backoff uses the default backoff instead of a negative wait.
+func TestRetryClient_NegativeRetryAfterIsIgnored(t *testing.T) {
 	srv, calls := sequenceServer(t,
-		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date}}, ""),
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {"-5"}}, ""),
 		respond(http.StatusOK, nil, "ok"),
 	)
 	h := newRetryHarness(t, rand.Float64)
@@ -674,10 +1012,93 @@ func TestRetryClient_RetryAfterHTTPDateIsIgnored(t *testing.T) {
 
 	assertCalls(t, calls, 2)
 	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+}
+
+// A Retry-After HTTP date in the past (for example when the clock of this
+// machine is ahead of the server's) waits RetryWaitMin (30 s), not 0, so the
+// retries do not all run at once.
+func TestRetryClient_RetryAfterHTTPDateInThePast(t *testing.T) {
+	date := time.Now().Add(-2 * time.Minute).UTC()
+	srv, calls := sequenceServer(t,
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date.Format(http.TimeFormat)}}, ""),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	h.expectOK(t, srv.URL+"/repos/o/r")
+
+	assertCalls(t, calls, 2)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second})
+}
+
+// Backoff waits until the HTTP date of Retry-After, rounded up to seconds.
+func TestRetryClient_RetryAfterHTTPDate(t *testing.T) {
+	date := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	srv, calls := sequenceServer(t,
+		respond(http.StatusServiceUnavailable, http.Header{"Retry-After": {date.Format(http.TimeFormat)}}, ""),
+		respond(http.StatusOK, nil, "ok"),
+	)
+	h := newRetryHarness(t, rand.Float64)
+
+	before := time.Now()
+	h.expectOK(t, srv.URL+"/repos/o/r")
+	after := time.Now()
+
+	assertCalls(t, calls, 2)
+	if len(h.waits) != 1 {
+		t.Fatalf("got waits %v, want 1 wait", h.waits)
+	}
+	// Backoff runs between before and after, and it rounds up by less than one
+	// second, so its wait lies between these two bounds.
+	lo, hi := date.Sub(after), date.Sub(before)+time.Second
+	if h.waits[0] < lo || h.waits[0] > hi {
+		t.Errorf("got wait %v, want between %v and %v", h.waits[0], lo, hi)
+	}
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r status=503 message=""`,
-		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=503 sleep=30s attempt=0 max_attempts=15`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r status=503 sleep=` + h.waits[0].String() + ` attempt=0 max_attempts=15`,
 	})
+}
+
+func TestRetryAfterWait(t *testing.T) {
+	const minWait, maxWait = 30 * time.Second, 900 * time.Second
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	date := func(d time.Duration) string { return now.Add(d).Format(http.TimeFormat) }
+
+	tests := []struct {
+		name   string
+		value  string
+		now    time.Time
+		want   time.Duration
+		wantOK bool
+	}{
+		{name: "zero seconds", value: "0", now: now, want: 0, wantOK: true},
+		{name: "seconds below the cap", value: "45", now: now, want: 45 * time.Second, wantOK: true},
+		{name: "seconds at the cap", value: "900", now: now, want: maxWait, wantOK: true},
+		{name: "seconds above the cap", value: "901", now: now, want: maxWait, wantOK: true},
+		{name: "seconds too large for a duration", value: "9223372036854775807", now: now, want: maxWait, wantOK: true},
+		{name: "negative seconds", value: "-5", now: now},
+		{name: "no number and no date", value: "soon", now: now},
+		{name: "empty", value: "", now: now},
+		{name: "date in ten minutes", value: date(10 * time.Minute), now: now, want: 600 * time.Second, wantOK: true},
+		{name: "date rounded up to seconds", value: date(100 * time.Second), now: now.Add(-400 * time.Millisecond), want: 101 * time.Second, wantOK: true},
+		{name: "date below the lower bound", value: date(10 * time.Second), now: now, want: minWait, wantOK: true},
+		{name: "date above the cap", value: date(24 * time.Hour), now: now, want: maxWait, wantOK: true},
+		{name: "date far in the future", value: "Fri, 31 Dec 9999 23:59:59 GMT", now: now, want: maxWait, wantOK: true},
+		{name: "date now", value: date(0), now: now, want: minWait, wantOK: true},
+		{name: "date in the past", value: date(-time.Minute), now: now, want: minWait, wantOK: true},
+		{name: "date far in the past", value: "Mon, 01 Jan 0001 00:00:00 GMT", now: now, want: minWait, wantOK: true},
+		{name: "date in RFC 850 form", value: now.Add(time.Minute).Format(time.RFC850), now: now, want: time.Minute, wantOK: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := retryAfterWait(tt.value, minWait, maxWait, tt.now)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("retryAfterWait(%q) = (%v, %v), want (%v, %v)", tt.value, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
 }
 
 // The 5xx case never parses the body. The 429 case parses it on every attempt,
@@ -747,7 +1168,7 @@ func TestRetryClient_NotFoundKeepsBody(t *testing.T) {
 }
 
 // NewApp puts the retry client under SearchModder, the pagination client and
-// go-github. For a 404 that CheckRetry does not retry, go-github must still get
+// go-github (newGitHubHTTPClient). For a 404 that CheckRetry does not retry, go-github must still get
 // the error message from the body that CheckRetry read before.
 func TestRetryClient_GoGitHubGetsNotFoundMessage(t *testing.T) {
 	const docURL = "https://docs.github.com/rest/repos/repos#get-a-repository"
@@ -756,10 +1177,9 @@ func TestRetryClient_GoGitHubGetsNotFoundMessage(t *testing.T) {
 	)
 	h := newRetryHarness(t, rand.Float64)
 
-	// The transport chain of NewApp for github.com. Instead of the GitHub URL
-	// (or WithEnterpriseURLs for GitHub Enterprise), BaseURL points to the test server.
-	transport := &clients.SearchModder{Base: &retryablehttp.RoundTripper{Client: h.client}}
-	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100))).WithAuthToken("test-token")
+	// The HTTP client of NewApp for github.com. Instead of the GitHub URL (or
+	// WithEnterpriseURLs for GitHub Enterprise), BaseURL points to the test server.
+	gh := gogithub.NewClient(newGitHubHTTPClient(h.client)).WithAuthToken("test-token")
 	baseURL, err := url.Parse(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("parsing server URL: %v", err)
@@ -790,8 +1210,7 @@ func TestRetryClient_GoGitHubGetsForbiddenStatusForHTMLBody(t *testing.T) {
 	)
 	h := newRetryHarness(t, rand.Float64)
 
-	transport := &clients.SearchModder{Base: &retryablehttp.RoundTripper{Client: h.client}}
-	gh := gogithub.NewClient(githubpagination.NewClient(transport, githubpagination.WithPerPage(100))).WithAuthToken("test-token")
+	gh := gogithub.NewClient(newGitHubHTTPClient(h.client)).WithAuthToken("test-token")
 	baseURL, err := url.Parse(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("parsing server URL: %v", err)
@@ -811,6 +1230,44 @@ func TestRetryClient_GoGitHubGetsForbiddenStatusForHTMLBody(t *testing.T) {
 	assertWaits(t, h.waits, nil)
 	assertLines(t, h.logLines(srv.URL), []string{
 		`[WARN]  cannot parse the error body of the response, going on without its message: method=GET url=SERVER/repos/o/r?per_page=100 status=403 error="unmarshaling response body: invalid character '<' looking for beginning of value"`,
+	})
+}
+
+// The HTTP client of NewApp (newGitHubHTTPClient) counts the secondary rate
+// limits of a go-github request in a row: after a 502 the first secondary rate
+// limit waits 120 s, not 120 s * 2^1, and Backoff logs no "cannot count" line
+// (issue #86).
+func TestRetryClient_GoGitHubCountsSecondaryRateLimits(t *testing.T) {
+	srv, calls := sequenceServer(t,
+		respond(http.StatusBadGateway, nil, "<html>bad gateway</html>"),
+		respond(http.StatusForbidden, http.Header{"Content-Type": {"application/json"}}, secondaryRateLimitBody),
+		respond(http.StatusOK, http.Header{"Content-Type": {"application/json"}}, `{"id":1,"name":"r"}`),
+	)
+	h := newRetryHarness(t, fixedRand(0))
+
+	gh := gogithub.NewClient(newGitHubHTTPClient(h.client)).WithAuthToken("test-token")
+	baseURL, err := url.Parse(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+
+	repo, _, err := gh.Repositories.Get(context.Background(), "o", "r")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.GetName() != "r" {
+		t.Errorf("got repository name %q, want r", repo.GetName())
+	}
+
+	assertCalls(t, calls, 3)
+	assertWaits(t, h.waits, []time.Duration{30 * time.Second, 120 * time.Second})
+	assertLines(t, h.logLines(srv.URL), []string{
+		`[TRACE] retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=502 message=""`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=502 sleep=30s attempt=0 max_attempts=15`,
+		`[TRACE] secondary rate limit exceeded: status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
+		`[WARN]  secondary rate limit exceeded, waiting before the retry: wait_duration=2m0s wait_reason="extended backoff" attempt=1 status=403 message="You have exceeded a secondary rate limit and have been temporarily blocked from content creation." method=GET url=SERVER/repos/o/r?per_page=100`,
+		`[TRACE] waiting before retrying failed API request: method=GET url=SERVER/repos/o/r?per_page=100 status=403 sleep=2m0s attempt=1 max_attempts=15`,
 	})
 }
 
@@ -926,6 +1383,25 @@ func TestParseGitHubError_WrapsErrors(t *testing.T) {
 	}
 }
 
+// net/http never returns no response and no error, so this state cannot happen
+// in the client. If it did, a retry would hide the defect, and retryablehttp
+// would call drainBody on a nil response and panic. CheckRetry stops and
+// returns an error that names the state.
+func TestRetryClient_CheckRetryNoResponseNoError(t *testing.T) {
+	h := newRetryHarness(t, rand.Float64)
+
+	retry, err := h.client.CheckRetry(context.Background(), nil, nil)
+	if retry {
+		t.Errorf("got retry true, want false")
+	}
+	if !errors.Is(err, errNoResponseNoError) {
+		t.Fatalf("got error %v, want %v", err, errNoResponseNoError)
+	}
+	if !strings.Contains(err.Error(), "neither a response nor an error") {
+		t.Errorf("got error %q, want it to name the state", err)
+	}
+}
+
 // Without a response, retryablehttp calls CheckRetry with the error and then
 // Backoff with resp == nil. No body is involved, so the test calls both directly.
 func TestRetryClient_NetworkErrors(t *testing.T) {
@@ -950,13 +1426,6 @@ func TestRetryClient_NetworkErrors(t *testing.T) {
 		t.Errorf("cancelled context: got (%v, %v), want (false, %v)", retry, err, dropped)
 	}
 
-	// net/http never returns no response and no error, so this case cannot
-	// happen in the client. If it did, retryablehttp would call drainBody on a
-	// nil response and panic. The test only pins the current result.
-	if retry, err := h.client.CheckRetry(ctx, nil, nil); !retry || err != nil {
-		t.Errorf("no response and no error: got (%v, %v), want (true, nil)", retry, err)
-	}
-
 	h.client.Backoff(h.client.RetryWaitMin, h.client.RetryWaitMax, 0, nil)
 	if len(h.waits) != 1 {
 		t.Fatalf("got waits %v, want 1 wait", h.waits)
@@ -970,4 +1439,21 @@ func TestRetryClient_NetworkErrors(t *testing.T) {
 		`[WARN]  transient network error - will retry: error="Get \"https://api.github.com/user\": unexpected EOF"`,
 		`[TRACE] waiting before retrying after network error: sleep=` + h.waits[0].String() + ` attempt=0 max_attempts=15`,
 	})
+}
+
+// A network error between two secondary rate limits is no secondary rate limit,
+// so CheckRetry sets the count of secondaryRateLimitCounting back to 0, as for
+// any other response.
+func TestRetryClient_NetworkErrorResetsSecondaryRateLimitCount(t *testing.T) {
+	h := newRetryHarness(t, rand.Float64)
+	count := 2
+	ctx := context.WithValue(context.Background(), secondaryRateLimitCountKey{}, &count)
+
+	dropped := &url.Error{Op: "Get", URL: "https://api.github.com/user", Err: io.ErrUnexpectedEOF}
+	if retry, err := h.client.CheckRetry(ctx, nil, dropped); !retry || err != nil {
+		t.Fatalf("got (%v, %v), want (true, nil)", retry, err)
+	}
+	if count != 0 {
+		t.Errorf("got count %d, want 0", count)
+	}
 }
