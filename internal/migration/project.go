@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	plumbingcache "github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/go-git/go-git/v5/storage/memory"
@@ -938,8 +940,18 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
 			fetchErr := p.fetchMissingCommits(ctx, mergeRequest.IID, endHash, startHash)
 			if fetchErr != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(fetchErr, ctxErr) {
-					return result, fmt.Errorf("fetching the commits of the merge request from GitLab: %w", fetchErr)
+				// go-git does not always wrap the stop in its error, for
+				// example not for the download of the pack, so ctx decides.
+				// A stop is no reason to skip the merge request.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return result, fmt.Errorf("fetching the commits of the merge request from GitLab: %w: %w", ctxErr, fetchErr)
+				}
+				// A network error or a server error can be gone in the next
+				// run, so it fails the merge request even with
+				// -skip-invalid-merge-requests: with -state-dir a skip is
+				// never migrated again.
+				if isTransientFetchError(fetchErr) {
+					return result, fmt.Errorf("fetching the commits of the merge request from GitLab failed, a later run can try again: %w", fetchErr)
 				}
 				p.log.Warn("could not fetch the commits of the merge request that the clone does not have", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "error", fetchErr)
 			}
@@ -1471,10 +1483,54 @@ func (p *project) fetchMissingCommits(ctx context.Context, mergeRequestIID int64
 			Tags:       git.NoTags,
 		})
 		if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-			return err
+			// The URL of the remote holds the GitLab token, and go-git puts
+			// the URL into the text of an HTTP error.
+			return &redactedError{err: err, secret: p.m.cfg.GitlabToken}
 		}
 	}
 	return nil
+}
+
+// redactedError hides secret in the text of err. errors.Is and errors.As
+// still see err.
+type redactedError struct {
+	err    error
+	secret string
+}
+
+func (e *redactedError) Error() string {
+	text := e.err.Error()
+	if e.secret == "" {
+		return text
+	}
+	// A URL can hold the secret escaped.
+	for _, form := range []string{e.secret, url.PathEscape(e.secret), strings.TrimPrefix(url.UserPassword("", e.secret).String(), ":")} {
+		text = strings.ReplaceAll(text, form, "REDACTED")
+	}
+	return text
+}
+
+func (e *redactedError) Unwrap() error {
+	return e.err
+}
+
+// isTransientFetchError reports whether err of fetchMissingCommits can be gone
+// in a later run: a network error, a timeout, or an HTTP status 429 or 5xx.
+// A server that does not serve the commit gives another error.
+func isTransientFetchError(err error) bool {
+	// go-git wraps HTTP errors in a plumbing.UnexpectedError, which has no
+	// Unwrap method.
+	var unexpected *plumbing.UnexpectedError
+	if errors.As(err, &unexpected) {
+		err = unexpected.Err
+	}
+	var httpErr *githttp.Err
+	if errors.As(err, &httpErr) {
+		status := httpErr.StatusCode()
+		return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // missingCommitHint explains a failed lookup of a commit of a closed or merged

@@ -3,6 +3,11 @@ package migration
 import (
 	"context"
 	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
+	"net/url"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -125,12 +130,31 @@ type hiddenCommitsRun struct {
 	err    error
 }
 
+// hiddenCommitsSetup configures migrateWithHiddenMergeRequestCommits.
+type hiddenCommitsSetup struct {
+	// wantOption is passed to gitlabWithHiddenMergeRequest.
+	wantOption string
+	// skipInvalid sets -skip-invalid-merge-requests.
+	skipInvalid bool
+	// fetchHandler, when it is not nil, returns the HTTP handler that answers
+	// the fetch of the missing commits: after the clone, the remote "gitlab"
+	// points to it, with the GitLab token in the URL like the clone URL of
+	// mirrorRepository. backend serves the GitLab repository with
+	// git http-backend, and cancel stops the migration.
+	fetchHandler func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc
+}
+
+// fetchTestToken is the GitLab token of migrateWithHiddenMergeRequestCommits.
+const fetchTestToken = "glpat-secret-fetch-token"
+
 // migrateWithHiddenMergeRequestCommits clones the repository of
 // gitlabWithHiddenMergeRequest like mirrorRepository does, so the clone lacks
 // the commits of the merged MR !3, and migrates MR !3 in normal mode.
-func migrateWithHiddenMergeRequestCommits(t *testing.T, wantOption string, skipInvalid bool) hiddenCommitsRun {
+func migrateWithHiddenMergeRequestCommits(t *testing.T, setup hiddenCommitsSetup) hiddenCommitsRun {
 	t.Helper()
-	gitlabDir, start, end := gitlabWithHiddenMergeRequest(t, wantOption)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gitlabDir, start, end := gitlabWithHiddenMergeRequest(t, setup.wantOption)
 	repo, err := git.CloneContext(context.Background(), memory.NewStorage(), nil, &git.CloneOptions{
 		URL:        gitlabDir,
 		RemoteName: "gitlab",
@@ -141,6 +165,30 @@ func migrateWithHiddenMergeRequestCommits(t *testing.T, wantOption string, skipI
 	}
 	if _, err := object.GetCommit(repo.Storer, end); err == nil {
 		t.Fatalf("the clone has the end commit %s, want it missing", end)
+	}
+	if setup.fetchHandler != nil {
+		gitPath, err := exec.LookPath("git")
+		if err != nil {
+			t.Skipf("git http-backend serves the fetch, but git is not installed: %v", err)
+		}
+		backend := &cgi.Handler{
+			Path: gitPath,
+			Args: []string{"http-backend"},
+			Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Dir(gitlabDir), "GIT_HTTP_EXPORT_ALL=1"},
+		}
+		srv := httptest.NewServer(setup.fetchHandler(cancel, backend))
+		t.Cleanup(srv.Close)
+		fetchURL, err := url.Parse(srv.URL + "/" + filepath.Base(gitlabDir))
+		if err != nil {
+			t.Fatalf("parsing the fetch URL: %v", err)
+		}
+		fetchURL.User = url.UserPassword("oauth2", fetchTestToken)
+		if err := repo.DeleteRemote("gitlab"); err != nil {
+			t.Fatalf("deleting the GitLab remote: %v", err)
+		}
+		if _, err := repo.CreateRemote(&gitconfig.RemoteConfig{Name: "gitlab", URLs: []string{fetchURL.String()}}); err != nil {
+			t.Fatalf("pointing the GitLab remote to the fetch server: %v", err)
+		}
 	}
 	githubDir := t.TempDir()
 	if _, err := git.PlainInit(githubDir, true); err != nil {
@@ -159,7 +207,8 @@ func migrateWithHiddenMergeRequestCommits(t *testing.T, wantOption string, skipI
 	}, &calls)
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
 	p := newGitLabTestProject(t, mux)
-	p.m.cfg.SkipInvalidMergeRequests = skipInvalid
+	p.m.cfg.SkipInvalidMergeRequests = setup.skipInvalid
+	p.m.cfg.GitlabToken = fetchTestToken
 	var logs strings.Builder
 	p.log = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace})
 	p.repo = repo
@@ -174,7 +223,7 @@ func migrateWithHiddenMergeRequestCommits(t *testing.T, wantOption string, skipI
 	})
 	useGitHubMux(t, p, ghMux)
 
-	run.result, run.err = p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+	run.result, run.err = p.migrateMergeRequest(ctx, &gogitlab.BasicMergeRequest{
 		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
 	})
 	run.logs = logs.String()
@@ -190,7 +239,7 @@ func TestMigrateMergeRequest_FetchesCommitsMissingFromTheClone(t *testing.T) {
 	// ref, which is the end commit, so one fetch must get both commits.
 	for _, option := range []string{"allowAnySHA1InWant", "allowTipSHA1InWant"} {
 		t.Run(option, func(t *testing.T) {
-			run := migrateWithHiddenMergeRequestCommits(t, option, false)
+			run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{wantOption: option})
 			if run.err != nil {
 				t.Fatalf("migrateMergeRequest: %v", run.err)
 			}
@@ -212,7 +261,7 @@ func TestMigrateMergeRequest_UnfetchableMissingCommitNamesTheCause(t *testing.T)
 	// The server does not serve commits that it does not advertise, so the
 	// commits of MR !3 cannot be fetched. The error names the cause, the
 	// failed fetch and -skip-invalid-merge-requests.
-	run := migrateWithHiddenMergeRequestCommits(t, "", false)
+	run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{})
 	if run.err == nil {
 		t.Fatalf("migrateMergeRequest = %+v, want an error", run.result)
 	}
@@ -229,11 +278,73 @@ func TestMigrateMergeRequest_UnfetchableMissingCommitNamesTheCause(t *testing.T)
 func TestMigrateMergeRequest_UnfetchableMissingCommitIsSkipped(t *testing.T) {
 	// With -skip-invalid-merge-requests the merge request whose commits cannot
 	// be fetched is skipped, and the skip reason names the failed fetch.
-	run := migrateWithHiddenMergeRequestCommits(t, "", true)
+	run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{skipInvalid: true})
 	if run.err != nil {
 		t.Fatalf("migrateMergeRequest: %v", run.err)
 	}
 	if run.result.Status != StatusSkipped || !strings.HasPrefix(run.result.SkipReason, "start commit is not in the clone and fetching it from GitLab failed: ") {
 		t.Fatalf("result = %+v, want skipped because the start commit could not be fetched", run.result)
+	}
+}
+
+func TestMigrateMergeRequest_StopDuringFetchOfMissingCommitIsNotSkipped(t *testing.T) {
+	// The run is stopped while the pack with the commits of MR !3 is
+	// downloaded. go-git returns an error for that download that does not
+	// wrap the stop. With -skip-invalid-merge-requests the merge request must
+	// not be skipped: with -state-dir a skip is never migrated again,
+	// although the next run could fetch the commits.
+	run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{
+		wantOption:  "allowAnySHA1InWant",
+		skipInvalid: true,
+		fetchHandler: func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					cancel()
+					w.WriteHeader(http.StatusTeapot)
+					return
+				}
+				backend.ServeHTTP(w, r)
+			}
+		},
+	})
+	if run.err == nil || run.result.Status == StatusSkipped {
+		t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
+	}
+}
+
+func TestMigrateMergeRequest_ServerErrorDuringFetchOfMissingCommit(t *testing.T) {
+	// GitLab answers a request of the fetch of the commits of MR !3 with 502.
+	// That can work in the next run, so with -skip-invalid-merge-requests the
+	// merge request fails and is not skipped: with -state-dir a skip is never
+	// migrated again. go-git puts the URL of the request into the error, and
+	// the URL holds the GitLab token. The error goes to the log, the report
+	// and the state file, so it must not show the token.
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{
+				wantOption:  "allowAnySHA1InWant",
+				skipInvalid: true,
+				fetchHandler: func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc {
+					return func(w http.ResponseWriter, r *http.Request) {
+						if r.Method == method {
+							w.WriteHeader(http.StatusBadGateway)
+							return
+						}
+						backend.ServeHTTP(w, r)
+					}
+				},
+			})
+			if run.err == nil || run.result.Status == StatusSkipped {
+				t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
+			}
+			if !strings.Contains(run.err.Error(), "502") {
+				t.Errorf("error = %q, want it to name the status 502", run.err)
+			}
+			for name, text := range map[string]string{"error": run.err.Error(), "log": run.logs, "skip reason": run.result.SkipReason, "result error": run.result.Error} {
+				if strings.Contains(text, fetchTestToken) {
+					t.Errorf("the %s shows the GitLab token: %q", name, text)
+				}
+			}
+		})
 	}
 }
