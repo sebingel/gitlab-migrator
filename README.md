@@ -4,7 +4,7 @@ This tool can migrate projects from GitLab to repositories on GitHub. It current
 
 * migrating the git repository with full history
 * migrating merge requests and translating them into pull requests, including closed/merged ones
-* renaming the `master` branch to `main` along the way
+* renaming the default branch (for example `master`) to `main` along the way
 
 It does not support migrating issues, wikis or any other primitive at this time. PRs welcome! (Although please don't waste your time suggesting swathing changes by an LLM)
 
@@ -78,7 +78,7 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
   -push-batch-size int
         number of branches to push per batch (default: unlimited, use smaller values like 50-100 for large repos)
   -rename-master-to-main
-        rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)
+        rename the default branch of the GitLab project to main, whatever its name, and update pull requests (incompatible with -rename-trunk-branch)
   -rename-trunk-branch string
         specifies the new trunk branch name (incompatible with -rename-master-to-main)
   -repo-visibility string
@@ -142,6 +142,8 @@ If you have a large number of merge requests, or projects with a long history sp
 
 Similarly, you can specify a maximum age for merge requests to migrate with the `-merge-requests-max-age` argument, which is useful for 'topping off' projects that are already migrated.
 
+The clone of a GitLab repository contains all refs that GitLab shows, also `refs/merge-requests/<iid>/head`. The commits of a closed or merged merge request whose source branch was deleted can still be missing, when GitLab keeps them only under refs that it hides. The tool then fetches the missing commits from GitLab by their SHA. This works only if the GitLab server allows to fetch commits that it does not show. If the fetch fails, the merge request fails with an error that names the cause, or it is skipped with `-skip-invalid-merge-requests`. A network error, a timeout, a refused login (HTTP 401 or 403) or a server error (HTTP 408, 429 or 5xx) during the fetch always fails the merge request, also with `-skip-invalid-merge-requests`, so a later run with `-state-dir` tries it again. Older versions skipped these merge requests with the reason "start commit does not exist" or "end commit does not exist". A run with `-state-dir` migrates merge requests with these saved reasons again. The fetched commits are only used for the temporary branches of the merge request. No other new ref is pushed to GitHub.
+
 Use `-skip-open-merge-requests` to only migrate closed/merged MRs, skipping any that are still open.
 
 If the repository is already on GitHub and you only need to backfill pull requests (e.g. after a prior migration), use `-pull-requests-only`. This skips the git clone/push step entirely (the repo must already exist on GitHub) and only migrates closed/merged merge requests.
@@ -157,6 +159,8 @@ _Example migrated pull request (closed)_
 ## Renaming the default/trunk branch
 
 As a bonus, this tool can transparently rename the trunk branch on your GitHub repository - enable with the `-rename-trunk-branch` argument. This will also work for any open merge requests as they are translated to pull requests.
+
+`-rename-master-to-main` is the short form of `-rename-trunk-branch main`. Despite its name, it does not look for a branch called `master`: it renames the default branch of the GitLab project to `main`, whatever its name. For example, when the default branch of the GitLab project is `develop` and there is also a branch `master`, `develop` is pushed as `main` and becomes the default branch on GitHub, `master` stays `master`, and pull requests that target `develop` get the base branch `main`. When the default branch of the GitLab project is neither `master` nor `main`, the tool logs a warning at the start of the project, for example `-rename-master-to-main: the default branch of the GitLab project is "develop", not "master"; it will be renamed to "main"`. Use `-rename-trunk-branch` to choose another name. The two arguments exclude each other.
 
 Pull requests that exist on GitHub from an earlier run also get the new trunk as their base branch, as long as they are open. GitHub does not allow to change the base branch of a closed pull request, so closed pull requests keep their base branch. A pull request that is reopened because its merge request is open again gets the new base branch after it is reopened. With `-skip-open-merge-requests`, open merge requests are skipped, so their existing pull requests keep the old base branch, unless the trim below changes it. With `-trim-branches-on-github`, the old trunk is deleted on GitHub during the push, and GitHub closes the open pull requests whose base branch is deleted. So before the old trunk is deleted, all open pull requests on it get the new trunk as their base branch. This is also true when the trim deletes the branch that was the default branch on GitHub before the run, for example when an earlier run used a rename and this run does not. The new trunk also becomes the default branch of the GitHub repository before the old trunk is deleted, because GitHub does not allow to delete the default branch.
 
@@ -255,7 +259,7 @@ By default, attempting to migrate into an archived GitHub repository fails. Pass
 
 ## Reporting
 
-Use `-report` to get a summary of what would be migrated without actually performing the migration. For a detailed per-project breakdown written to disk, add `-detailed-report`, which generates both a JSON and a Markdown report in a `reports/` subdirectory next to the executable. With `-loop`, the report is also written after each complete pass (see [Concurrency](#concurrency)).
+Use `-report` to get a summary of what would be migrated without actually performing the migration. The summary shows the number of merge requests of each project and the total. A project that cannot be reported (for example because GitLab does not find it, or because its GitHub repository is not in the form `owner/repo`) is not counted with 0 merge requests: the summary lists it with its error, and the tool exits with code 1. After Ctrl+C, the report starts no new project and prints the summary of the projects done so far; a project that Ctrl+C stopped is listed as one that could not be reported, the total says how many projects were not started, and the tool exits with code 1. For a detailed per-project breakdown written to disk, add `-detailed-report`, which generates both a JSON and a Markdown report in a `reports/` subdirectory next to the executable. With `-loop`, the report is also written after each complete pass (see [Concurrency](#concurrency)).
 
 ## Contributing, reporting bugs etc...
 
