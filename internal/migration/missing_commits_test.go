@@ -129,6 +129,8 @@ type hiddenCommitsRun struct {
 	pushed []string
 	logs   string
 	err    error
+	// end is the end commit of MR !3 in its commit list.
+	end plumbing.Hash
 }
 
 // hiddenCommitsSetup configures migrateWithHiddenMergeRequestCommits.
@@ -223,7 +225,7 @@ func migrateWithHiddenMergeRequestCommits(t *testing.T, setup hiddenCommitsSetup
 	p.repo = repo
 	p.m.ghClient = &searchGitHub{}
 
-	var run hiddenCommitsRun
+	run := hiddenCommitsRun{end: end}
 	ghMux := http.NewServeMux()
 	serveCreatedPullRequest(t, mux, ghMux, &calls)
 	ghMux.HandleFunc("POST /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +276,9 @@ func TestMigrateMergeRequest_UnfetchableMissingCommitNamesTheCause(t *testing.T)
 	if run.err == nil {
 		t.Fatalf("migrateMergeRequest = %+v, want an error", run.result)
 	}
-	for _, want := range []string{"loading start commit", "object not found", "source branch was deleted", "fetching it from GitLab by its SHA failed", "-skip-invalid-merge-requests"} {
+	// Both commits are missing. The end commit is fetched first, and that
+	// fetch fails, so the error must name the end commit as the failed fetch.
+	for _, want := range []string{"loading start commit", "object not found", "source branch was deleted", "fetching the missing commits from GitLab by their SHA failed: fetching commit " + run.end.String() + ": ", "-skip-invalid-merge-requests"} {
 		if !strings.Contains(run.err.Error(), want) {
 			t.Errorf("error = %q, want it to contain %q", run.err, want)
 		}
@@ -314,8 +318,11 @@ func TestMigrateMergeRequest_UnfetchableMissingCommitIsSkipped(t *testing.T) {
 			if run.err != nil {
 				t.Fatalf("migrateMergeRequest: %v", run.err)
 			}
-			if run.result.Status != StatusSkipped || !strings.HasPrefix(run.result.SkipReason, "start commit is not in the clone and fetching it from GitLab failed: ") {
-				t.Fatalf("result = %+v, want skipped because the start commit could not be fetched", run.result)
+			// Both commits are missing. The end commit is fetched first, and
+			// that fetch fails, so the reason must name the end commit as the
+			// failed fetch, not the start commit.
+			if want := "start commit is not in the clone and fetching the missing commits from GitLab failed: fetching commit " + run.end.String() + ": "; run.result.Status != StatusSkipped || !strings.HasPrefix(run.result.SkipReason, want) {
+				t.Fatalf("result = %+v, want skipped with a reason that starts with %q", run.result, want)
 			}
 			if !strings.Contains(run.result.SkipReason, tc.wantReason) {
 				t.Errorf("skip reason = %q, want it to contain %q", run.result.SkipReason, tc.wantReason)

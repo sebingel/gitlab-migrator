@@ -1485,8 +1485,10 @@ func (p *project) fetchMissingCommits(ctx context.Context, mergeRequestIID int64
 		})
 		if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 			// The URL of the remote holds the GitLab token, and go-git puts
-			// the URL into the text of an HTTP error.
-			return &redactedError{err: err, secret: p.m.cfg.GitlabToken}
+			// the URL into the text of an HTTP error. The error names the
+			// hash: the caller reports the missing commit, which can be
+			// another one when this fetch stops the loop.
+			return fmt.Errorf("fetching commit %s: %w", hash, &redactedError{err: err, secret: p.m.cfg.GitlabToken})
 		}
 	}
 	return nil
@@ -1550,7 +1552,7 @@ func missingCommitHint(lookupErr, fetchErr error) string {
 	}
 	fetchResult := "fetching it from GitLab by its SHA did not get it"
 	if fetchErr != nil {
-		fetchResult = fmt.Sprintf("fetching it from GitLab by its SHA failed: %v", fetchErr)
+		fetchResult = fmt.Sprintf("fetching the missing commits from GitLab by their SHA failed: %v", fetchErr)
 	}
 	return fmt.Sprintf(" (no ref that GitLab shows has the commit, for example because the source branch was deleted, and %s; use -skip-invalid-merge-requests to skip such merge requests)", fetchResult)
 }
@@ -1564,7 +1566,7 @@ func missingCommitSkipReason(name string, lookupErr, fetchErr error) string {
 		return name + " cannot be read"
 	}
 	if fetchErr != nil {
-		return fmt.Sprintf("%s is not in the clone and fetching it from GitLab failed: %v", name, fetchErr)
+		return fmt.Sprintf("%s is not in the clone and fetching the missing commits from GitLab failed: %v", name, fetchErr)
 	}
 	return name + " is not in the clone and fetching it from GitLab did not get it"
 }
