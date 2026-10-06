@@ -65,6 +65,12 @@ func (m *Migrator) newProject(ctx context.Context, slugs []string) (*project, er
 		return nil, fmt.Errorf("no matching GitLab project found: %s", slugs[0])
 	}
 
+	// -rename-master-to-main renames the default branch of the GitLab project,
+	// whatever its name. Say so when that is neither "master" nor already "main".
+	if m.cfg.RenameMasterToMain && p.project.DefaultBranch != "" && p.project.DefaultBranch != "master" && p.project.DefaultBranch != "main" {
+		p.log.Warn(fmt.Sprintf("-rename-master-to-main: the default branch of the GitLab project is %q, not \"master\"; it will be renamed to \"main\"", p.project.DefaultBranch))
+	}
+
 	p.defaultBranch = "main"
 	if m.cfg.RenameTrunkBranch != "" {
 		p.defaultBranch = m.cfg.RenameTrunkBranch

@@ -162,7 +162,7 @@ func main() {
 
 	flag.BoolVar(&cfg.DeleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
 	flag.BoolVar(&cfg.EnablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
-	flag.BoolVar(&cfg.RenameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)")
+	flag.BoolVar(&cfg.RenameMasterToMain, "rename-master-to-main", false, "rename the default branch of the GitLab project to main, whatever its name, and update pull requests (incompatible with -rename-trunk-branch)")
 	flag.BoolVar(&cfg.SkipInvalidMergeRequests, "skip-invalid-merge-requests", false, "when true, will log and skip invalid merge requests instead of raising an error")
 	flag.BoolVar(&cfg.SkipOpenMergeRequests, "skip-open-merge-requests", false, "skip open merge requests during migration (only migrate closed/merged MRs)")
 	flag.BoolVar(&cfg.PullRequestsOnly, "pull-requests-only", false, "migrate only closed/merged merge requests as pull requests without cloning/pushing the repository; open MRs are skipped (repo must already exist on GitHub)")

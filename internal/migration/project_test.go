@@ -1,12 +1,67 @@
 package migration
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	gogithub "github.com/google/go-github/v84/github"
+	"github.com/hashicorp/go-hclog"
 )
+
+func TestNewProject_RenameMasterToMainWarnsWhenDefaultBranchIsNotMaster(t *testing.T) {
+	tests := []struct {
+		name          string
+		defaultBranch string
+		renameMaster  bool
+		renameTrunk   string
+		wantWarning   bool
+		wantBranch    string
+	}{
+		{name: "flag and default branch develop", defaultBranch: "develop", renameMaster: true, wantWarning: true, wantBranch: "main"},
+		{name: "flag and default branch master", defaultBranch: "master", renameMaster: true, wantWarning: false, wantBranch: "main"},
+		{name: "flag and default branch main", defaultBranch: "main", renameMaster: true, wantWarning: false, wantBranch: "main"},
+		{name: "flag and no default branch", defaultBranch: "", renameMaster: true, wantWarning: false, wantBranch: "main"},
+		{name: "no flag and default branch develop", defaultBranch: "develop", wantWarning: false, wantBranch: "develop"},
+		{name: "trunk branch and default branch develop", defaultBranch: "develop", renameTrunk: "trunk", wantWarning: false, wantBranch: "trunk"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			warning := fmt.Sprintf(`-rename-master-to-main: the default branch of the GitLab project is %q, not "master"; it will be renamed to "main"`, tt.defaultBranch)
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/v4/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := fmt.Fprintf(w, `{"id":1,"default_branch":%q}`, tt.defaultBranch); err != nil {
+					t.Errorf("writing the GitLab project: %v", err)
+				}
+			})
+			base := newGitLabTestProject(t, mux)
+
+			var logs bytes.Buffer
+			base.m.logger = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Debug})
+			base.m.cfg.RenameMasterToMain = tt.renameMaster
+			base.m.cfg.RenameTrunkBranch = tt.renameTrunk
+
+			p, err := base.m.newProject(context.Background(), []string{"group/project", "owner/repo"})
+			if err != nil {
+				t.Fatalf("newProject: %v", err)
+			}
+			if p.defaultBranch != tt.wantBranch {
+				t.Errorf("defaultBranch = %q, want %q", p.defaultBranch, tt.wantBranch)
+			}
+			if got := strings.Contains(logs.String(), warning); got != tt.wantWarning {
+				t.Errorf("warning logged = %v, want %v; log:\n%s", got, tt.wantWarning, logs.String())
+			}
+			if tt.wantWarning && !strings.Contains(logs.String(), "[WARN]") {
+				t.Errorf("the message is not logged at WARN level; log:\n%s", logs.String())
+			}
+		})
+	}
+}
 
 func makeGitHubError(statusCode int, message string, errors []gogithub.Error) error {
 	return &gogithub.ErrorResponse{

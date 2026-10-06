@@ -4,7 +4,7 @@ This tool can migrate projects from GitLab to repositories on GitHub. It current
 
 * migrating the git repository with full history
 * migrating merge requests and translating them into pull requests, including closed/merged ones
-* renaming the `master` branch to `main` along the way
+* renaming the default branch (for example `master`) to `main` along the way
 
 It does not support migrating issues, wikis or any other primitive at this time. PRs welcome! (Although please don't waste your time suggesting swathing changes by an LLM)
 
@@ -78,7 +78,7 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
   -push-batch-size int
         number of branches to push per batch (default: unlimited, use smaller values like 50-100 for large repos)
   -rename-master-to-main
-        rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)
+        rename the default branch of the GitLab project to main, whatever its name, and update pull requests (incompatible with -rename-trunk-branch)
   -rename-trunk-branch string
         specifies the new trunk branch name (incompatible with -rename-master-to-main)
   -repo-visibility string
@@ -157,6 +157,8 @@ _Example migrated pull request (closed)_
 ## Renaming the default/trunk branch
 
 As a bonus, this tool can transparently rename the trunk branch on your GitHub repository - enable with the `-rename-trunk-branch` argument. This will also work for any open merge requests as they are translated to pull requests.
+
+`-rename-master-to-main` is the short form of `-rename-trunk-branch main`. Despite its name, it does not look for a branch called `master`: it renames the default branch of the GitLab project to `main`, whatever its name. For example, when the default branch of the GitLab project is `develop` and there is also a branch `master`, `develop` is pushed as `main` and becomes the default branch on GitHub, `master` stays `master`, and pull requests that target `develop` get the base branch `main`. When the default branch of the GitLab project is neither `master` nor `main`, the tool logs a warning at the start of the project, for example `-rename-master-to-main: the default branch of the GitLab project is "develop", not "master"; it will be renamed to "main"`. Use `-rename-trunk-branch` to choose another name. The two arguments exclude each other.
 
 Pull requests that exist on GitHub from an earlier run also get the new trunk as their base branch, as long as they are open. GitHub does not allow to change the base branch of a closed pull request, so closed pull requests keep their base branch. A pull request that is reopened because its merge request is open again gets the new base branch after it is reopened. With `-skip-open-merge-requests`, open merge requests are skipped, so their existing pull requests keep the old base branch, unless the trim below changes it. With `-trim-branches-on-github`, the old trunk is deleted on GitHub during the push, and GitHub closes the open pull requests whose base branch is deleted. So before the old trunk is deleted, all open pull requests on it get the new trunk as their base branch. This is also true when the trim deletes the branch that was the default branch on GitHub before the run, for example when an earlier run used a rename and this run does not. The new trunk also becomes the default branch of the GitHub repository before the old trunk is deleted, because GitHub does not allow to delete the default branch.
 
