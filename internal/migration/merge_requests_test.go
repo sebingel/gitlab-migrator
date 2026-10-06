@@ -1135,10 +1135,13 @@ func remoteBranches(t *testing.T, dir string) []string {
 	return names
 }
 
-func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *testing.T) {
-	// MR !3 gets its temporary branches by a git push to the remote "github".
-	// GitHub then refuses the pull request because the branches have no
-	// commits between them, so both temporary branches must be deleted again.
+// migrateWithPushedTempBranches migrates the merged MR !3 in normal mode, so
+// its temporary branches are pushed to the remote "github" of the local clone.
+// GitHub answers the creation of the pull request with createPR. It returns the
+// result, the remote branches when the pull request was created, the remote
+// branches after the migration and the error.
+func migrateWithPushedTempBranches(t *testing.T, createPR http.HandlerFunc) (MergeRequestResult, []string, []string, error) {
+	t.Helper()
 	remoteDir := t.TempDir()
 	if _, err := git.PlainInit(remoteDir, true); err != nil {
 		t.Fatalf("creating the remote repository: %v", err)
@@ -1180,21 +1183,45 @@ func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *t
 
 	ghMux := http.NewServeMux()
 	var pushedBeforeCreate []string
-	ghMux.HandleFunc("POST /repos/owner/repo/pulls", noCommitsBetween(t, func() {
+	ghMux.HandleFunc("POST /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
 		pushedBeforeCreate = remoteBranches(t, remoteDir)
-	}))
+		createPR(w, r)
+	})
 	useGitHubMux(t, p, ghMux)
 
 	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
 		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
 	})
-	wantNoCommitsBetweenSkip(t, result, err)
 
 	if want := []string{"migration-source-3/feature", "migration-target-3/main"}; !slices.Equal(pushedBeforeCreate, want) {
 		t.Fatalf("remote branches when the pull request was created = %v, want %v", pushedBeforeCreate, want)
 	}
-	if got := remoteBranches(t, remoteDir); len(got) != 0 {
-		t.Errorf("remote branches after the migration = %v, want none", got)
+	return result, pushedBeforeCreate, remoteBranches(t, remoteDir), err
+}
+
+func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *testing.T) {
+	// MR !3 gets its temporary branches by a git push to the remote "github".
+	// GitHub then refuses the pull request because the branches have no
+	// commits between them, so both temporary branches must be deleted again.
+	result, _, after, err := migrateWithPushedTempBranches(t, noCommitsBetween(t, nil))
+	wantNoCommitsBetweenSkip(t, result, err)
+
+	if len(after) != 0 {
+		t.Errorf("remote branches after the migration = %v, want none", after)
+	}
+}
+
+func TestMigrateMergeRequest_FailedPullRequestKeepsPushedTemporaryBranches(t *testing.T) {
+	// Any other error of the pull request creation fails the merge request,
+	// and the pushed temporary branches stay as before.
+	result, pushed, after, err := migrateWithPushedTempBranches(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	if err == nil || !strings.Contains(err.Error(), "creating pull request") {
+		t.Fatalf("migrateMergeRequest = %+v, %v, want the failed pull request creation", result, err)
+	}
+	if !slices.Equal(after, pushed) {
+		t.Errorf("remote branches after the migration = %v, want %v", after, pushed)
 	}
 }
 
