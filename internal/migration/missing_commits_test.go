@@ -386,38 +386,41 @@ func TestMigrateMergeRequest_CutPackDuringFetchOfMissingCommitIsNotSkipped(t *te
 }
 
 func TestMigrateMergeRequest_ServerErrorDuringFetchOfMissingCommit(t *testing.T) {
-	// GitLab answers a request of the fetch of the commits of MR !3 with 502.
-	// That can work in the next run, so with -skip-invalid-merge-requests the
-	// merge request fails and is not skipped: with -state-dir a skip is never
-	// migrated again. go-git puts the URL of the request into the error, and
-	// the URL holds the GitLab token. The error goes to the log, the report
-	// and the state file, so it must not show the token.
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		t.Run(method, func(t *testing.T) {
-			run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{
-				wantOption:  "allowAnySHA1InWant",
-				skipInvalid: true,
-				fetchHandler: func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc {
-					return func(w http.ResponseWriter, r *http.Request) {
-						if r.Method == method {
-							w.WriteHeader(http.StatusBadGateway)
-							return
+	// GitLab answers a request of the fetch of the commits of MR !3 with 502,
+	// or a proxy answers it with 408 (request timeout). That can work in the
+	// next run, so with -skip-invalid-merge-requests the merge request fails
+	// and is not skipped: with -state-dir a skip is never migrated again.
+	// go-git puts the URL of the request into the error, and the URL holds the
+	// GitLab token. The error goes to the log, the report and the state file,
+	// so it must not show the token.
+	for _, status := range []int{http.StatusBadGateway, http.StatusRequestTimeout} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			t.Run(strconv.Itoa(status)+"/"+method, func(t *testing.T) {
+				run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{
+					wantOption:  "allowAnySHA1InWant",
+					skipInvalid: true,
+					fetchHandler: func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc {
+						return func(w http.ResponseWriter, r *http.Request) {
+							if r.Method == method {
+								w.WriteHeader(status)
+								return
+							}
+							backend.ServeHTTP(w, r)
 						}
-						backend.ServeHTTP(w, r)
-					}
-				},
-			})
-			if run.err == nil || run.result.Status == StatusSkipped {
-				t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
-			}
-			if !strings.Contains(run.err.Error(), "502") {
-				t.Errorf("error = %q, want it to name the status 502", run.err)
-			}
-			for name, text := range map[string]string{"error": run.err.Error(), "log": run.logs, "skip reason": run.result.SkipReason, "result error": run.result.Error} {
-				if strings.Contains(text, fetchTestToken) {
-					t.Errorf("the %s shows the GitLab token: %q", name, text)
+					},
+				})
+				if run.err == nil || run.result.Status == StatusSkipped {
+					t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
 				}
-			}
-		})
+				if !strings.Contains(run.err.Error(), strconv.Itoa(status)) {
+					t.Errorf("error = %q, want it to name the status %d", run.err, status)
+				}
+				for name, text := range map[string]string{"error": run.err.Error(), "log": run.logs, "skip reason": run.result.SkipReason, "result error": run.result.Error} {
+					if strings.Contains(text, fetchTestToken) {
+						t.Errorf("the %s shows the GitLab token: %q", name, text)
+					}
+				}
+			})
+		}
 	}
 }

@@ -1516,7 +1516,7 @@ func (e *redactedError) Unwrap() error {
 }
 
 // isTransientFetchError reports whether err of fetchMissingCommits can be gone
-// in a later run: a network error, a timeout, an HTTP status 429 or 5xx, or a
+// in a later run: a network error, a timeout, an HTTP status 408, 429 or 5xx, or a
 // response that ends too early, for example because a proxy closed the
 // connection during the download of the pack. A server that does not serve
 // the commit gives another error.
@@ -1535,7 +1535,7 @@ func isTransientFetchError(err error) bool {
 	var httpErr *githttp.Err
 	if errors.As(err, &httpErr) {
 		status := httpErr.StatusCode()
-		return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+		return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded)
