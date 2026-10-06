@@ -79,7 +79,7 @@ func newGitHubHTTPClient(retryClient *retryablehttp.Client) *http.Client {
 	transport := &clients.SearchModder{
 		Base: newRetryTransport(retryClient),
 	}
-	return githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
+	return clients.NewGitHubPaginationClient(transport, githubpagination.WithPerPage(100))
 }
 
 // Run performs the migration for the given projects.
