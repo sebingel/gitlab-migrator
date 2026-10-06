@@ -168,6 +168,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("push-batch-size must be greater than 0")
 	}
 
+	// 0 means no limit. A negative value would be ignored like 0, so it is
+	// most likely a typo and must not list every merge request unnoticed.
+	if c.MergeRequestsAge < 0 {
+		return fmt.Errorf("-merge-requests-max-age must not be negative (0 means no limit), got %d", c.MergeRequestsAge)
+	}
+
 	return nil
 }
 
@@ -196,7 +202,8 @@ func (c *Config) Warnings() []string {
 	if c.StateDir != "" {
 		warnings = append(warnings, "-state-dir"+suffix)
 	}
-	// 0 or less means no limit, so such a value changes nothing anyway.
+	// 0 means no limit, so such a value changes nothing anyway. A negative
+	// value does not get here: Validate rejects it.
 	if c.MergeRequestsAge > 0 && !c.Report {
 		warnings = append(warnings, "-merge-requests-max-age"+suffix)
 	}

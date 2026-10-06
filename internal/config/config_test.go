@@ -53,6 +53,40 @@ func TestValidate_MaxConcurrency(t *testing.T) {
 	}
 }
 
+func TestValidate_MergeRequestsAge(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "negative", value: -5, wantErr: true},
+		{name: "minus one", value: -1, wantErr: true},
+		{name: "zero is no limit", value: 0, wantErr: false},
+		{name: "positive", value: 90, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.MergeRequestsAge = tt.value
+
+			err := cfg.Validate()
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("Validate() returned %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() returned nil for merge-requests-max-age %d, want an error", tt.value)
+			}
+			if !strings.Contains(err.Error(), "-merge-requests-max-age") {
+				t.Errorf("error %q does not name -merge-requests-max-age", err)
+			}
+		})
+	}
+}
+
 // validPrepareConfig returns a configuration that passes ValidatePrepare.
 func validPrepareConfig() *Config {
 	return &Config{
@@ -206,9 +240,9 @@ func TestWarnings_PullRequestFlags(t *testing.T) {
 			hint: "with -report",
 		},
 		{
-			name: "max age of 0 or less is no limit",
+			name: "max age of 0 is no limit",
 			setup: func(c *Config) {
-				c.MergeRequestsAge = -1
+				c.MergeRequestsAge = 0
 			},
 			want: nil,
 		},
