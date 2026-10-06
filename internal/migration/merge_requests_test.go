@@ -1563,9 +1563,13 @@ func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRe
 	p := newGitLabTestProject(t, mux)
 	p.project.DefaultBranch = "master"
 	p.defaultBranch = "main"
+	var logs strings.Builder
+	p.log = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace})
 
-	// The remote "github" gets the deletion of the temporary branches of a
-	// merge request that is not open.
+	// GitHub lists no temporary branch of MR !3 (see the branches below), so
+	// the cleanup of a merge request that is not open pushes no deletion to
+	// the remote "github". The tests of resumeFoundPullRequest check the
+	// deletion.
 	repo, _ := repoWithGitHubRemote(t)
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("feature"), plumbing.NewHash("1111111111111111111111111111111111111111"))); err != nil {
 		t.Fatalf("creating the source branch: %v", err)
@@ -1582,7 +1586,8 @@ func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRe
 			Number:           Pointer(5),
 			PullRequestLinks: &gogithub.PullRequestLinks{URL: Pointer("https://api.github.com/repos/owner/repo/pulls/5")},
 		}},
-		prs: map[int]*gogithub.PullRequest{5: &found},
+		prs:      map[int]*gogithub.PullRequest{5: &found},
+		branches: githubBranches("main"),
 	}
 
 	var edits []map[string]any
@@ -1627,6 +1632,7 @@ func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRe
 	if result.Status != StatusSuccess {
 		t.Fatalf("status = %q, want %q", result.Status, StatusSuccess)
 	}
+	wantNoErrorOrWarning(t, logs.String())
 	return edits, pr
 }
 
