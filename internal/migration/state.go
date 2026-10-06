@@ -32,6 +32,16 @@ const (
 	// state files contain this text, and ShouldSkip checks for it, so do not
 	// change it.
 	skipReasonOpenMergeRequest = "open merge request skipped (-skip-open-merge-requests)"
+
+	// skipReasonOldMissingStartCommit and skipReasonOldMissingEndCommit are the
+	// skip reasons of older versions for a closed or merged merge request
+	// whose commit the clone did not have, for example because its source
+	// branch was deleted (issue #137). This version fetches such commits from
+	// GitLab and gives other reasons, so ShouldSkip lets these merge requests
+	// be migrated again. Older state files contain this text, so do not
+	// change it.
+	skipReasonOldMissingStartCommit = "start commit does not exist"
+	skipReasonOldMissingEndCommit   = "end commit does not exist"
 )
 
 // MRState holds the persisted migration state for a single merge request.
@@ -150,7 +160,8 @@ func LoadOrCreate(filePath, gitlabProject, githubRepo string, logger hclog.Logge
 // successfully or skipped, and does not need reprocessing. A skip because of
 // -skip-open-merge-requests, saved by an older version, is not final: it
 // depends on the flags of the run that saved it, and the MR can be merged or
-// closed later.
+// closed later. A skip of an older version because the clone lacked a commit
+// of the MR is not final either: this version fetches the commit.
 func (s *MigrationState) ShouldSkip(mrIID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -162,7 +173,11 @@ func (s *MigrationState) ShouldSkip(mrIID int64) bool {
 		return false
 	}
 	if st.Status == MRStateSkipped {
-		return st.SkipReason != skipReasonOpenMergeRequest
+		switch st.SkipReason {
+		case skipReasonOpenMergeRequest, skipReasonOldMissingStartCommit, skipReasonOldMissingEndCommit:
+			return false
+		}
+		return true
 	}
 	return st.Status == MRStateSuccess
 }

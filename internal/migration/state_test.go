@@ -158,6 +158,13 @@ func TestShouldSkip(t *testing.T) {
 				// in their state files, so it must not follow the constant.
 				"6": {Status: MRStateSkipped, SkipReason: "open merge request skipped (-skip-open-merge-requests)"},
 				"7": {Status: MRStateSkipped, SkipReason: "source branch does not exist"},
+				// Older versions saved these skips when the clone lacked a
+				// commit of a merge request with a deleted source branch
+				// (issue #137). The literal text is what is in their state
+				// files.
+				"8":  {Status: MRStateSkipped, SkipReason: "start commit does not exist"},
+				"9":  {Status: MRStateSkipped, SkipReason: "end commit does not exist"},
+				"10": {Status: MRStateSkipped, SkipReason: "start commit does not exist on GitHub"},
 			},
 		},
 		logger: testLogger(),
@@ -174,6 +181,9 @@ func TestShouldSkip(t *testing.T) {
 		{5, false}, // not found → process
 		{6, false}, // skipped only because of -skip-open-merge-requests → process
 		{7, true},  // skipped for a reason in the merge request → skip
+		{8, false}, // skipped by an older version for a commit that this version fetches → process
+		{9, false},
+		{10, true}, // skipped in -pull-requests-only mode, which fetches nothing → skip
 	}
 
 	for _, tt := range tests {

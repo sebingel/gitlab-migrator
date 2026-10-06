@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +23,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	plumbingcache "github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/go-git/go-git/v5/storage/memory"
@@ -740,7 +744,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 	return results, interrupted
 }
 
-func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (MergeRequestResult, error) {
+func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (finalResult MergeRequestResult, finalErr error) {
 	result := MergeRequestResult{
 		GitLabMRID:    mergeRequest.IID,
 		GitLabMRTitle: mergeRequest.Title,
@@ -759,10 +763,15 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	var pullRequest *gogithub.PullRequest
 
-	// The deferred cleanups below delete the temporary branches of a closed
+	// The deferred cleanup below deletes the temporary branches of a closed
 	// merge request when its pull request exists, or when GitHub refused the
 	// pull request because the branches have no commits between them: then no
 	// pull request will ever use them. After other errors the branches stay.
+	// A pull request that an earlier run created counts too: that run can have
+	// stopped before it deleted the branches (issue #142). With
+	// -pull-requests-only, createTempBranchesViaAPI deletes the branches it
+	// created itself when it fails or skips the merge request, because no pull
+	// request exists then.
 	noCommitsBetween := false
 	keepTempBranches := func() bool {
 		return pullRequest == nil && !noCommitsBetween
@@ -853,6 +862,48 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		}
 	}
 
+	if !strings.EqualFold(mergeRequest.State, "opened") {
+		// A pull request that the search found was created by an earlier run.
+		// Its temporary branches are deleted only when GitHub lists them, so a
+		// rerun sends no deletion for the pull requests whose branches are gone
+		// already, or that were migrated while their merge request was open and
+		// never had temporary branches. The list is read once per repository and
+		// then cached, so it can miss the branches that this run created: a pull
+		// request that this run created does not use it.
+		//
+		// When the run is stopped before the branches are deleted, they stay. A
+		// success or a skip is never migrated again with -state-dir, so a
+		// success becomes partial, and the skip of "no commits between" becomes
+		// a failure (it has no pull request, so it is not counted as migrated):
+		// the next run migrates the merge request again and deletes the branches
+		// then. The defer changes the named result for that, because it runs
+		// after the return statement.
+		foundPullRequest := pullRequest != nil
+		defer func() {
+			if keepTempBranches() {
+				return
+			}
+			stopped := p.deleteTempBranches(ctx, pullRequest.GetNumber(), foundPullRequest, sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
+			if !stopped || finalErr != nil {
+				return
+			}
+			const stoppedError = "the run was stopped before the temporary branches were deleted"
+			switch finalResult.Status {
+			case StatusSuccess, StatusPartial:
+				finalResult.Status = StatusPartial
+				if finalResult.Error == "" {
+					finalResult.Error = stoppedError
+				}
+			case StatusSkipped:
+				// The report shows a skip reason before the error, so the
+				// old reason would hide the stop.
+				finalResult.Status = StatusFailed
+				finalResult.SkipReason = ""
+				finalResult.Error = stoppedError
+			}
+		}()
+	}
+
 	if pullRequest == nil && !strings.EqualFold(mergeRequest.State, "opened") {
 		p.log.Trace("searching for existing branch for closed/merged merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 
@@ -886,24 +937,37 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			if skipped {
 				return result, nil
 			}
-			defer func() {
-				if keepTempBranches() {
-					return
-				}
-				p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-				p.deleteTempBranchesViaAPI(ctx, mergeRequest)
-			}()
 		} else {
+			startHash := plumbing.NewHash(mergeRequestCommits[0].ID)
+			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
+			fetchErr := p.fetchMissingCommits(ctx, mergeRequest.IID, endHash, startHash)
+			if fetchErr != nil {
+				// go-git does not always wrap the stop in its error, for
+				// example not for the download of the pack, so ctx decides.
+				// A stop is no reason to skip the merge request.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return result, fmt.Errorf("fetching the commits of the merge request from GitLab: %w: %w", ctxErr, fetchErr)
+				}
+				// A network error, a server error or a refused login can be
+				// gone in the next run, so it fails the merge request even with
+				// -skip-invalid-merge-requests: with -state-dir a skip is
+				// never migrated again.
+				if isTransientFetchError(fetchErr) {
+					return result, fmt.Errorf("fetching the commits of the merge request from GitLab failed, a later run can try again: %w", fetchErr)
+				}
+				p.log.Warn("could not fetch the commits of the merge request that the clone does not have", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "error", fetchErr)
+			}
+
 			p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
-			startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
+			startCommit, err := object.GetCommit(p.repo.Storer, startHash)
 			if err != nil {
 				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as start commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[0].ShortID, "error", err)
 					result.Status = StatusSkipped
-					result.SkipReason = "start commit does not exist"
+					result.SkipReason = missingCommitSkipReason("start commit", err, fetchErr)
 					return result, nil
 				}
-				return result, fmt.Errorf("loading start commit %s: %w", mergeRequestCommits[0].ShortID, err)
+				return result, fmt.Errorf("loading start commit %s: %w%s", mergeRequestCommits[0].ShortID, err, missingCommitHint(err, fetchErr))
 			}
 
 			if startCommit.NumParents() == 0 {
@@ -937,17 +1001,16 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				}
 			}
 
-			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
 			p.log.Trace("creating source branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
 
 			if _, err = object.GetCommit(p.repo.Storer, endHash); err != nil {
 				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as end commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, "error", err)
 					result.Status = StatusSkipped
-					result.SkipReason = "end commit does not exist"
+					result.SkipReason = missingCommitSkipReason("end commit", err, fetchErr)
 					return result, nil
 				}
-				return result, fmt.Errorf("loading end commit %s: %w", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err)
+				return result, fmt.Errorf("loading end commit %s: %w%s", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err, missingCommitHint(err, fetchErr))
 			}
 
 			if err = p.createLocalBranch(plumbing.NewBranchReferenceName(mergeRequest.SourceBranch), endHash); err != nil {
@@ -971,29 +1034,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					return result, formatPushError("pushing temporary branches to github", p.pushErrHint(err), err, mrSideband)
 				}
 			}
-
-			defer func() {
-				if keepTempBranches() {
-					return
-				}
-				p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-				cleanupOpts := &git.PushOptions{
-					RemoteName: "github",
-					RefSpecs: []gitconfig.RefSpec{
-						gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
-						gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
-					},
-					Force: true,
-				}
-				sideband, err := p.pushWithSideband(ctx, cleanupOpts)
-				if err != nil {
-					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-					} else {
-						p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
-					}
-				}
-			}()
 		}
 	}
 
@@ -1213,6 +1253,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		p.migrateComments(ctx, pullRequest, comments, prComments, &result)
 	}
 
+	// A run that was stopped by now keeps the temporary branches of a closed
+	// merge request: the deferred cleanup makes the result partial then.
 	if result.FailedComments > 0 {
 		result.Status = StatusPartial
 	} else {
@@ -1406,6 +1448,136 @@ func (p *project) createLocalBranch(name plumbing.ReferenceName, hash plumbing.H
 	return p.repo.Storer.SetReference(plumbing.NewHashReference(name, hash))
 }
 
+// fetchedCommitRefPrefix is the namespace of the local references that keep
+// the commits that fetchMissingCommits fetched. pushToGitHub pushes only
+// branches and tags, so these references never reach GitHub.
+const fetchedCommitRefPrefix = "refs/gitlab-migrator/fetched/"
+
+// fetchMissingCommits fetches the commits of hashes that the local clone does
+// not have from the remote "gitlab", by their SHA. The mirror clone has all
+// references that GitLab advertises, also refs/merge-requests/<iid>/head. But
+// the commits of a closed or merged merge request whose source branch was
+// deleted can be reachable only from references that GitLab hides, for
+// example refs/keep-around/..., and then the clone lacks them (issue #137). The
+// fetch works only when the server serves commits that it does not advertise
+// (uploadpack.allowAnySHA1InWant, or allowTipSHA1InWant for hidden refs);
+// otherwise it returns an error, and go-git returns
+// git.ErrExactSHA1NotSupported when the server does not offer it at all.
+//
+// The commits are fetched one by one, in the order of hashes, and a commit
+// that an earlier fetch brought as an ancestor is not fetched again. So the
+// caller passes the end commit first: its fetch brings the start commit too.
+// A server with only allowTipSHA1InWant serves the end commit, the tip of the
+// hidden ref, but would refuse a request that also names the start commit. A
+// fetched commit gets a reference under fetchedCommitRefPrefix.
+func (p *project) fetchMissingCommits(ctx context.Context, mergeRequestIID int64, hashes ...plumbing.Hash) error {
+	for _, hash := range hashes {
+		if _, err := p.repo.Storer.EncodedObject(plumbing.CommitObject, hash); err == nil {
+			continue
+		} else if !errors.Is(err, plumbing.ErrObjectNotFound) {
+			return fmt.Errorf("looking up commit %s: %w", hash, err)
+		}
+
+		p.log.Info("fetching a commit of the merge request that the clone does not have, its source branch was probably deleted", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequestIID, "sha", hash)
+		err := p.repo.FetchContext(ctx, &git.FetchOptions{
+			RemoteName: "gitlab",
+			RefSpecs:   []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+%[1]s:%[2]s%[1]s", hash, fetchedCommitRefPrefix))},
+			Tags:       git.NoTags,
+		})
+		if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+			// The URL of the remote holds the GitLab token, and go-git puts
+			// the URL into the text of an HTTP error. The error names the
+			// hash: the caller reports the missing commit, which can be
+			// another one when this fetch stops the loop.
+			return fmt.Errorf("fetching commit %s: %w", hash, &redactedError{err: err, secret: p.m.cfg.GitlabToken})
+		}
+	}
+	return nil
+}
+
+// redactedError hides secret in the text of err. errors.Is and errors.As
+// still see err.
+type redactedError struct {
+	err    error
+	secret string
+}
+
+func (e *redactedError) Error() string {
+	text := e.err.Error()
+	if e.secret == "" {
+		return text
+	}
+	// A URL can hold the secret escaped.
+	for _, form := range []string{e.secret, url.PathEscape(e.secret), strings.TrimPrefix(url.UserPassword("", e.secret).String(), ":")} {
+		text = strings.ReplaceAll(text, form, "REDACTED")
+	}
+	return text
+}
+
+func (e *redactedError) Unwrap() error {
+	return e.err
+}
+
+// isTransientFetchError reports whether err of fetchMissingCommits can be gone
+// in a later run: a network error, a timeout, an HTTP status 401, 403, 408,
+// 429 or 5xx, or a response that ends too early, for example because a proxy
+// closed the connection during the download of the pack. A server that does
+// not serve the commit gives another error. 401 and 403 can go away with a new
+// token or when GitLab lifts a block of the IP.
+func isTransientFetchError(err error) bool {
+	// go-git returns 401 and 403 as these transport errors, not as a
+	// githttp.Err.
+	if errors.Is(err, transport.ErrAuthenticationRequired) || errors.Is(err, transport.ErrAuthorizationFailed) {
+		return true
+	}
+	// go-git wraps other HTTP errors in a plumbing.UnexpectedError, which has
+	// no Unwrap method.
+	var unexpected *plumbing.UnexpectedError
+	if errors.As(err, &unexpected) {
+		err = unexpected.Err
+	}
+	// go-git wraps the error of a cut pack in packfile.ErrMalformedPackFile
+	// with %w.
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	var httpErr *githttp.Err
+	if errors.As(err, &httpErr) {
+		status := httpErr.StatusCode()
+		return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// missingCommitHint explains a failed lookup of a commit of a closed or merged
+// merge request. lookupErr is the error of the lookup, fetchErr the error of
+// fetchMissingCommits. It returns "" when the commit exists but cannot be read.
+func missingCommitHint(lookupErr, fetchErr error) string {
+	if !errors.Is(lookupErr, plumbing.ErrObjectNotFound) {
+		return ""
+	}
+	fetchResult := "fetching it from GitLab by its SHA did not get it"
+	if fetchErr != nil {
+		fetchResult = fmt.Sprintf("fetching the missing commits from GitLab by their SHA failed: %v", fetchErr)
+	}
+	return fmt.Sprintf(" (no ref that GitLab shows has the commit, for example because the source branch was deleted, and %s; use -skip-invalid-merge-requests to skip such merge requests)", fetchResult)
+}
+
+// missingCommitSkipReason is the skip reason for a commit of a closed or
+// merged merge request that the lookup did not find. name is "start commit"
+// or "end commit"; lookupErr and fetchErr are as for missingCommitHint. The
+// reasons differ from the old ones that ShouldSkip migrates again.
+func missingCommitSkipReason(name string, lookupErr, fetchErr error) string {
+	if !errors.Is(lookupErr, plumbing.ErrObjectNotFound) {
+		return name + " cannot be read"
+	}
+	if fetchErr != nil {
+		return fmt.Sprintf("%s is not in the clone and fetching the missing commits from GitLab failed: %v", name, fetchErr)
+	}
+	return name + " is not in the clone and fetching it from GitLab did not get it"
+}
+
 // editPullRequest edits a pull request and retries on 404. The result goes to a
 // local variable, so req stays unchanged between attempts and may be the
 // caller's own pull request.
@@ -1508,11 +1680,28 @@ func (p *project) retargetSavedPullRequest(ctx context.Context, mergeRequest *go
 	return nil
 }
 
-func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (bool, error) {
+// createTempBranchesViaAPI creates the temporary target and source branches of
+// the closed merge request mr on GitHub. It reports true when it skips the
+// merge request. When it skips the merge request or fails, it deletes the
+// branches that it created itself, because the caller only cleans up after a
+// success. A branch that already existed, for example from an earlier run, is
+// not deleted then: this call did not create it.
+func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (skipped bool, err error) {
 	owner := p.githubPath[0]
 	repo := p.githubPath[1]
 	startShortID := commits[0].ShortID
 	endShortID := commits[len(commits)-1].ShortID
+
+	var created []string
+	defer func() {
+		if !skipped && err == nil {
+			return
+		}
+		for _, branch := range created {
+			p.log.Debug("deleting temporary branch via API as the merge request was not migrated", "owner", owner, "repo", repo, "merge_request_id", mr.IID, "branch", branch)
+			p.deleteTempBranchViaAPI(ctx, branch)
+		}
+	}()
 
 	// No retry on GetCommit: a 404 here means the commit genuinely does not exist on GitHub
 	// (e.g. force-pushed away), not an eventual-consistency delay. The mirror push completes
@@ -1549,7 +1738,9 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 		_, _, createErr := p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA})
 		return createErr
 	})
-	if err != nil {
+	if err == nil {
+		created = append(created, mr.TargetBranch)
+	} else {
 		if isAlreadyExistsError(err) {
 			p.log.Trace("temporary target branch already exists on GitHub", "branch", mr.TargetBranch)
 		} else if isReferenceUpdateFailedError(err) && p.m.cfg.SkipInvalidMergeRequests {
@@ -1583,7 +1774,9 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 		_, _, createErr := p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA})
 		return createErr
 	})
-	if err != nil {
+	if err == nil {
+		created = append(created, mr.SourceBranch)
+	} else {
 		if isAlreadyExistsError(err) {
 			p.log.Trace("temporary source branch already exists on GitHub", "branch", mr.SourceBranch)
 		} else {
@@ -1596,15 +1789,112 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 	return false, nil
 }
 
-func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest) {
-	owner := p.githubPath[0]
-	repo := p.githubPath[1]
-	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.SourceBranch); err != nil {
-		p.log.Warn("failed to delete temporary source branch via API", "branch", mr.SourceBranch, "error", err)
+// deleteTempBranches deletes the temporary branches of a closed merge request
+// on GitHub after its pull request prNumber exists: with -pull-requests-only by
+// API, else by a push to the remote "github" of the local clone. With
+// onlyListed it deletes only the branches that the cached branch list of the
+// GitHub repository has. A branch that does not exist is not an error, for
+// example when a run before deleted it already. A failure is only logged: the
+// branches stay and do no harm. When the run was stopped, nothing more is
+// tried, and the stop is not logged as an error: no request can work with the
+// cancelled ctx. Then deleteTempBranches returns true. The next run that
+// migrates the merge request again finds the pull request and deletes the
+// branches then: a stopped run that still finishes the merge request records
+// it as partial (as failed when it was skipped), so -state-dir does not skip it.
+func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) (stopped bool) {
+	keep := func() bool {
+		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
+		return true
 	}
-	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.TargetBranch); err != nil {
-		p.log.Warn("failed to delete temporary target branch via API", "branch", mr.TargetBranch, "error", err)
+	if ctx.Err() != nil {
+		return keep()
 	}
+
+	if onlyListed {
+		branches = p.listedBranches(ctx, branches)
+		if ctx.Err() != nil {
+			return keep()
+		}
+		if len(branches) == 0 {
+			p.log.Trace("temporary branches for closed pull request are not on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber)
+			return false
+		}
+	}
+
+	if p.m.cfg.PullRequestsOnly {
+		p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
+		for _, branch := range branches {
+			if ctx.Err() != nil || p.deleteTempBranchViaAPI(ctx, branch) {
+				return keep()
+			}
+		}
+		return false
+	}
+
+	p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
+	// A push deletes only the branches that the remote has. When it has none
+	// of them, the push reports NoErrAlreadyUpToDate.
+	refSpecs := make([]gitconfig.RefSpec, 0, len(branches))
+	for _, branch := range branches {
+		refSpecs = append(refSpecs, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", branch)))
+	}
+	cleanupOpts := &git.PushOptions{
+		RemoteName: "github",
+		RefSpecs:   refSpecs,
+		Force:      true,
+	}
+	sideband, err := p.pushWithSideband(ctx, cleanupOpts)
+	switch {
+	case err == nil:
+	case errors.Is(err, git.NoErrAlreadyUpToDate):
+		p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
+	case ctx.Err() != nil:
+		return keep()
+	default:
+		p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
+	}
+	return false
+}
+
+// listedBranches returns the names that the cached branch list of the GitHub
+// repository has. The list can be older than a deletion, for example of the
+// trim of -trim-branches-on-github: such a branch is returned, and its deletion
+// finds nothing. When the list cannot be read, listedBranches logs a warning and
+// returns all names, so their deletion is still tried. When the run was stopped,
+// it logs no warning: the caller checks ctx.
+func (p *project) listedBranches(ctx context.Context, names []string) []string {
+	githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+	if err != nil {
+		if ctx.Err() == nil {
+			p.log.Warn("listing the branches on GitHub failed, trying to delete the temporary branches anyway", "owner", p.githubPath[0], "repo", p.githubPath[1], "branches", names, "error", err)
+		}
+		return names
+	}
+	listed := make([]string, 0, len(names))
+	for _, name := range names {
+		if slices.ContainsFunc(githubBranches, func(b *gogithub.Branch) bool { return b.GetName() == name }) {
+			listed = append(listed, name)
+		}
+	}
+	return listed
+}
+
+// deleteTempBranchViaAPI deletes the temporary branch on GitHub. A branch that
+// does not exist is not an error. Another failure is only logged: the branch
+// stays and does no harm. When the run was stopped, the failure is not logged
+// and deleteTempBranchViaAPI returns true.
+func (p *project) deleteTempBranchViaAPI(ctx context.Context, branch string) (stopped bool) {
+	_, err := p.m.gh.Git.DeleteRef(ctx, p.githubPath[0], p.githubPath[1], "refs/heads/"+branch)
+	switch {
+	case err == nil:
+	case isGitHubNotFound(err) || isReferenceDoesNotExistError(err):
+		p.log.Trace("temporary branch already deleted on GitHub", "branch", branch)
+	case ctx.Err() != nil:
+		return true
+	default:
+		p.log.Warn("failed to delete temporary branch via API", "branch", branch, "error", err)
+	}
+	return false
 }
 
 // githubMention returns fallback when the GitLab user has no website set. Otherwise it
@@ -1720,6 +2010,12 @@ func is422Matching(err error, match func(string) bool) bool {
 
 func isAlreadyExistsError(err error) bool {
 	return is422Matching(err, func(m string) bool { return strings.Contains(m, "Reference already exists") })
+}
+
+// isReferenceDoesNotExistError reports whether GitHub refused to delete a
+// branch because it does not exist.
+func isReferenceDoesNotExistError(err error) bool {
+	return is422Matching(err, func(m string) bool { return strings.Contains(m, "Reference does not exist") })
 }
 
 func isReferenceUpdateFailedError(err error) bool {
