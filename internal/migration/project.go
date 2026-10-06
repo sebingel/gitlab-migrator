@@ -859,11 +859,19 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	}
 
 	if !strings.EqualFold(mergeRequest.State, "opened") {
+		// A pull request that the search found was created by an earlier run.
+		// Its temporary branches are deleted only when GitHub lists them, so a
+		// rerun sends no deletion for the pull requests whose branches are gone
+		// already, or that were migrated while their merge request was open and
+		// never had temporary branches. The list is read once per repository and
+		// then cached, so it can miss the branches that this run created: a pull
+		// request that this run created does not use it.
+		foundPullRequest := pullRequest != nil
 		defer func() {
 			if keepTempBranches() {
 				return
 			}
-			p.deleteTempBranches(ctx, pullRequest.GetNumber(), sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
+			p.deleteTempBranches(ctx, pullRequest.GetNumber(), foundPullRequest, sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
 		}()
 	}
 
@@ -1601,46 +1609,77 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 	return false, nil
 }
 
-// deleteTempBranches deletes the temporary branches sourceBranch and
-// targetBranch of a closed merge request on GitHub after its pull request
-// prNumber exists: with -pull-requests-only by API, else by a push to the
-// remote "github" of the local clone. A branch that does not exist is not an
-// error, for example when a run before deleted it already. A failure is only
-// logged: the branches stay and do no harm. When the run was stopped, nothing
-// is tried: no request can work with the cancelled ctx, and the next run finds
-// the pull request and deletes the branches then.
-func (p *project) deleteTempBranches(ctx context.Context, prNumber int, sourceBranch, targetBranch string) {
+// deleteTempBranches deletes the temporary branches of a closed merge request
+// on GitHub after its pull request prNumber exists: with -pull-requests-only by
+// API, else by a push to the remote "github" of the local clone. With
+// onlyListed it deletes only the branches that the cached branch list of the
+// GitHub repository has. A branch that does not exist is not an error, for
+// example when a run before deleted it already. A failure is only logged: the
+// branches stay and do no harm. When the run was stopped, nothing is tried: no
+// request can work with the cancelled ctx, and the next run finds the pull
+// request and deletes the branches then.
+func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) {
 	if ctx.Err() != nil {
-		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
 		return
+	}
+
+	if onlyListed {
+		branches = p.listedBranches(ctx, branches)
+		if len(branches) == 0 {
+			p.log.Trace("temporary branches for closed pull request are not on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber)
+			return
+		}
 	}
 
 	if p.m.cfg.PullRequestsOnly {
-		p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
-		p.deleteTempBranchViaAPI(ctx, sourceBranch)
-		p.deleteTempBranchViaAPI(ctx, targetBranch)
+		p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
+		for _, branch := range branches {
+			p.deleteTempBranchViaAPI(ctx, branch)
+		}
 		return
 	}
 
-	p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+	p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
 	// A push deletes only the branches that the remote has. When it has none
 	// of them, the push reports NoErrAlreadyUpToDate.
+	refSpecs := make([]gitconfig.RefSpec, 0, len(branches))
+	for _, branch := range branches {
+		refSpecs = append(refSpecs, gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", branch)))
+	}
 	cleanupOpts := &git.PushOptions{
 		RemoteName: "github",
-		RefSpecs: []gitconfig.RefSpec{
-			gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", sourceBranch)),
-			gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", targetBranch)),
-		},
-		Force: true,
+		RefSpecs:   refSpecs,
+		Force:      true,
 	}
 	sideband, err := p.pushWithSideband(ctx, cleanupOpts)
 	if err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+			p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
 		} else {
 			p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
 		}
 	}
+}
+
+// listedBranches returns the names that the cached branch list of the GitHub
+// repository has. The list can be older than a deletion, for example of the
+// trim of -trim-branches-on-github: such a branch is returned, and its deletion
+// finds nothing. When the list cannot be read, listedBranches logs a warning and
+// returns all names, so their deletion is still tried.
+func (p *project) listedBranches(ctx context.Context, names []string) []string {
+	githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
+	if err != nil {
+		p.log.Warn("listing the branches on GitHub failed, trying to delete the temporary branches anyway", "owner", p.githubPath[0], "repo", p.githubPath[1], "branches", names, "error", err)
+		return names
+	}
+	listed := make([]string, 0, len(names))
+	for _, name := range names {
+		if slices.ContainsFunc(githubBranches, func(b *gogithub.Branch) bool { return b.GetName() == name }) {
+			listed = append(listed, name)
+		}
+	}
+	return listed
 }
 
 // deleteTempBranchViaAPI deletes the temporary branch on GitHub. A branch that
