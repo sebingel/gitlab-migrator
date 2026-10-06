@@ -87,6 +87,68 @@ func TestPerformMigration_LoopStartsNextPassAfterPreviousPass(t *testing.T) {
 	}
 }
 
+// TestPerformMigration_LoopReturnsWhenCanceledWithIdleWorkers cancels -loop
+// while one worker waits in the queue for the next project and the other one
+// still runs the slow project of the pass. The idle worker only stops when the
+// queue is closed, so PerformMigration must close it after the loop.
+func TestPerformMigration_LoopReturnsWhenCanceledWithIdleWorkers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fastDone := make(chan struct{})
+	slowStarted := make(chan struct{})
+	release := make(chan struct{})
+	var fastOnce, slowOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.EscapedPath(), "slow") {
+			slowOnce.Do(func() { close(slowStarted) })
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		} else {
+			defer fastOnce.Do(func() { close(fastDone) })
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	gl, err := gogitlab.NewClient("test-token", gogitlab.WithBaseURL(srv.URL))
+	if err != nil {
+		t.Fatalf("creating GitLab client: %v", err)
+	}
+	m := &Migrator{
+		cfg:    &config.Config{Loop: true, MaxConcurrency: 4},
+		gl:     gl,
+		logger: hclog.NewNullLogger(),
+	}
+	projects := []CSVRow{{"group/slow", "owner/slow"}, {"group/fast", "owner/fast"}}
+
+	done := make(chan struct{})
+	go func() {
+		_ = m.PerformMigration(ctx, projects, NewResultCollector(), "test-session")
+		close(done)
+	}()
+
+	for _, ch := range []chan struct{}{slowStarted, fastDone} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the projects of the first pass did not start")
+		}
+	}
+	// Give the worker of the fast project time to go back to the queue.
+	<-time.After(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("PerformMigration did not return after the context was canceled")
+	}
+}
+
 // TestQueueProjects_StopsWhenCanceledWhileTheQueueIsFull cancels the context
 // while the queue is full and nothing receives from it. queueProjects must
 // return without help from a receiver.
