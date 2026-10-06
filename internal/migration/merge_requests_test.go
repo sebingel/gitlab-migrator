@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -829,6 +830,8 @@ func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
 	}
 	gh.BaseURL = baseURL
 	p.m.gh = gh
+	// The local clone gets the deletion of the temporary branches.
+	p.repo, _ = repoWithGitHubRemote(t)
 
 	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
 		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
@@ -1195,6 +1198,197 @@ func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *t
 	}
 }
 
+// repoWithGitHubRemote returns a local repository with one commit whose remote
+// "github" is a new bare repository, and the folder of that bare repository.
+// The commit is pushed to the remote as each of the branches.
+func repoWithGitHubRemote(t *testing.T, branches ...string) (*git.Repository, string) {
+	t.Helper()
+	remoteDir := t.TempDir()
+	if _, err := git.PlainInit(remoteDir, true); err != nil {
+		t.Fatalf("creating the remote repository: %v", err)
+	}
+	repo, err := git.Init(memory.NewStorage(), memfs.New())
+	if err != nil {
+		t.Fatalf("creating the local repository: %v", err)
+	}
+	if _, err := repo.CreateRemote(&gitconfig.RemoteConfig{Name: "github", URLs: []string{remoteDir}}); err != nil {
+		t.Fatalf("adding the remote: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("opening the worktree: %v", err)
+	}
+	hash, err := worktree.Commit("base", &git.CommitOptions{
+		AllowEmptyCommits: true,
+		Author:            &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+	var refSpecs []gitconfig.RefSpec
+	for _, branch := range branches {
+		refSpecs = append(refSpecs, gitconfig.RefSpec(fmt.Sprintf("%s:refs/heads/%s", hash, branch)))
+	}
+	if len(refSpecs) > 0 {
+		if err := repo.Push(&git.PushOptions{RemoteName: "github", RefSpecs: refSpecs}); err != nil {
+			t.Fatalf("pushing the branches %v: %v", branches, err)
+		}
+	}
+	return repo, remoteDir
+}
+
+// resumeFoundPullRequest migrates the merged MR !3 from feature to main. Its
+// pull request 5 exists on GitHub and is still open, as after a run that was
+// stopped after it created the pull request and before it closed it. setup
+// prepares p and the GitHub test server before the migration. It returns the
+// log of the migration.
+func resumeFoundPullRequest(t *testing.T, setup func(p *project, ghMux *http.ServeMux)) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
+	p := newGitLabTestProject(t, mux)
+	var logs strings.Builder
+	p.log = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace})
+	p.m.ghClient = &searchGitHub{
+		issues: []*gogithub.Issue{{
+			Number:           Pointer(5),
+			PullRequestLinks: &gogithub.PullRequestLinks{URL: Pointer("https://api.github.com/repos/owner/repo/pulls/5")},
+		}},
+		prs: map[int]*gogithub.PullRequest{5: {
+			Number: Pointer(5),
+			State:  Pointer("open"),
+			Title:  Pointer("some work"),
+			Body:   Pointer("> | **GitLab MR Number** | 3 |"),
+			Draft:  Pointer(false),
+			Head:   &gogithub.PullRequestBranch{Ref: Pointer("migration-source-3/feature")},
+			Base:   &gogithub.PullRequestBranch{Ref: Pointer("migration-target-3/main")},
+		}},
+	}
+
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("PATCH /repos/owner/repo/pulls/5", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `{"number":5,"state":"closed"}`); err != nil {
+			t.Errorf("writing the edited pull request: %v", err)
+		}
+	})
+	ghMux.HandleFunc("GET /repos/owner/repo/issues/5/comments", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprint(w, `[]`); err != nil {
+			t.Errorf("writing the pull request comments: %v", err)
+		}
+	})
+	setup(p, ghMux)
+	useGitHubMux(t, p, ghMux)
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
+	})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSuccess || result.GitHubPRNumber == nil || *result.GitHubPRNumber != 5 {
+		t.Fatalf("result = %+v, want pull request 5 migrated", result)
+	}
+	return logs.String()
+}
+
+func TestMigrateMergeRequest_FoundPullRequestDeletesPushedTemporaryBranches(t *testing.T) {
+	// An earlier run pushed the temporary branches of MR !3 and created its
+	// pull request, but was stopped before it deleted them. The next run finds
+	// the pull request, so it must delete them now (issue #142).
+	var remoteDir string
+	resumeFoundPullRequest(t, func(p *project, _ *http.ServeMux) {
+		p.repo, remoteDir = repoWithGitHubRemote(t, "main", "migration-source-3/feature", "migration-target-3/main")
+	})
+	if got, want := remoteBranches(t, remoteDir), []string{"main"}; !slices.Equal(got, want) {
+		t.Errorf("remote branches after the migration = %v, want %v", got, want)
+	}
+}
+
+// resumeFoundPullRequestViaAPI runs resumeFoundPullRequest with
+// -pull-requests-only. GitHub answers the deletion of a branch with
+// deleteRef. It returns the log of the migration and the branches whose
+// deletion was requested.
+func resumeFoundPullRequestViaAPI(t *testing.T, deleteRef http.HandlerFunc) (string, []string) {
+	t.Helper()
+	var deleted []string
+	logs := resumeFoundPullRequest(t, func(p *project, ghMux *http.ServeMux) {
+		p.m.cfg.PullRequestsOnly = true
+		ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+			deleted = append(deleted, "refs/"+r.PathValue("ref"))
+			deleteRef(w, r)
+		})
+		ghMux.HandleFunc("POST /repos/owner/repo/git/refs", func(w http.ResponseWriter, r *http.Request) {
+			t.Error("a branch was created, want no new branch for the found pull request")
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+	})
+	slices.Sort(deleted)
+	return logs, deleted
+}
+
+func TestMigrateMergeRequest_FoundPullRequestDeletesTemporaryBranchesViaAPI(t *testing.T) {
+	// With -pull-requests-only, an earlier run created the temporary branches
+	// of MR !3 by API and its pull request, but was stopped before it deleted
+	// the branches. The next run finds the pull request, so it must delete
+	// them now (issue #142).
+	logs, deleted := resumeFoundPullRequestViaAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	wantNoErrorOrWarning(t, logs)
+	if want := []string{"refs/heads/migration-source-3/feature", "refs/heads/migration-target-3/main"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted branches = %v, want %v", deleted, want)
+	}
+}
+
+func TestMigrateMergeRequest_FoundPullRequestWithoutTemporaryBranchesViaAPI(t *testing.T) {
+	// The temporary branches of MR !3 are gone already, so GitHub refuses
+	// their deletion. That is no error and no warning.
+	for name, status := range map[string]int{"422": http.StatusUnprocessableEntity, "404": http.StatusNotFound} {
+		t.Run(name, func(t *testing.T) {
+			logs, deleted := resumeFoundPullRequestViaAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if _, err := fmt.Fprint(w, `{"message":"Reference does not exist"}`); err != nil {
+					t.Errorf("writing the reference error: %v", err)
+				}
+			})
+			wantNoErrorOrWarning(t, logs)
+			if len(deleted) != 2 {
+				t.Errorf("deleted branches = %v, want both temporary branches", deleted)
+			}
+		})
+	}
+}
+
+// wantNoErrorOrWarning checks that the log of a migration has no error and no
+// warning.
+func wantNoErrorOrWarning(t *testing.T, logs string) {
+	t.Helper()
+	if strings.Contains(logs, "[ERROR]") || strings.Contains(logs, "[WARN]") {
+		t.Errorf("log = %q, want no error and no warning", logs)
+	}
+}
+
+func TestMigrateMergeRequest_FoundPullRequestWithoutPushedTemporaryBranches(t *testing.T) {
+	// The temporary branches of MR !3 are gone already, so their deletion is
+	// no error.
+	var remoteDir string
+	logs := resumeFoundPullRequest(t, func(p *project, _ *http.ServeMux) {
+		p.repo, remoteDir = repoWithGitHubRemote(t, "main")
+	})
+	wantNoErrorOrWarning(t, logs)
+	if !strings.Contains(logs, "branches already deleted on GitHub") {
+		t.Errorf("log = %q, want the deletion of the temporary branches", logs)
+	}
+	if got, want := remoteBranches(t, remoteDir), []string{"main"}; !slices.Equal(got, want) {
+		t.Errorf("remote branches after the migration = %v, want %v", got, want)
+	}
+}
+
 // migrateExistingPullRequest migrates MR !3 from feature to master in the
 // GitLab state mrState. Its pull request 5 exists on GitHub as pr. The GitLab
 // trunk is master and the GitHub trunk is main, as with
@@ -1212,10 +1406,9 @@ func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRe
 	p.project.DefaultBranch = "master"
 	p.defaultBranch = "main"
 
-	repo, err := git.Init(memory.NewStorage(), nil)
-	if err != nil {
-		t.Fatalf("creating the local repository: %v", err)
-	}
+	// The remote "github" gets the deletion of the temporary branches of a
+	// merge request that is not open.
+	repo, _ := repoWithGitHubRemote(t)
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("feature"), plumbing.NewHash("1111111111111111111111111111111111111111"))); err != nil {
 		t.Fatalf("creating the source branch: %v", err)
 	}

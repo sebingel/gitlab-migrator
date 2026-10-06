@@ -759,13 +759,15 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 
 	var pullRequest *gogithub.PullRequest
 
-	// The deferred cleanups below delete the temporary branches of a closed
+	// The deferred cleanup below deletes the temporary branches of a closed
 	// merge request when its pull request exists, or when GitHub refused the
 	// pull request because the branches have no commits between them: then no
 	// pull request will ever use them. After other errors the branches stay.
-	// With -pull-requests-only, createTempBranchesViaAPI deletes the branches
-	// it created itself when it fails or skips the merge request, because the
-	// deferred cleanup is not registered then.
+	// A pull request that an earlier run created counts too: that run can have
+	// stopped before it deleted the branches (issue #142). With
+	// -pull-requests-only, createTempBranchesViaAPI deletes the branches it
+	// created itself when it fails or skips the merge request, because no pull
+	// request exists then.
 	noCommitsBetween := false
 	keepTempBranches := func() bool {
 		return pullRequest == nil && !noCommitsBetween
@@ -856,6 +858,15 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		}
 	}
 
+	if !strings.EqualFold(mergeRequest.State, "opened") {
+		defer func() {
+			if keepTempBranches() {
+				return
+			}
+			p.deleteTempBranches(ctx, pullRequest.GetNumber(), sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
+		}()
+	}
+
 	if pullRequest == nil && !strings.EqualFold(mergeRequest.State, "opened") {
 		p.log.Trace("searching for existing branch for closed/merged merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 
@@ -889,13 +900,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 			if skipped {
 				return result, nil
 			}
-			defer func() {
-				if keepTempBranches() {
-					return
-				}
-				p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-				p.deleteTempBranchesViaAPI(ctx, mergeRequest)
-			}()
 		} else {
 			p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
 			startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
@@ -974,29 +978,6 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					return result, formatPushError("pushing temporary branches to github", p.pushErrHint(err), err, mrSideband)
 				}
 			}
-
-			defer func() {
-				if keepTempBranches() {
-					return
-				}
-				p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-				cleanupOpts := &git.PushOptions{
-					RemoteName: "github",
-					RefSpecs: []gitconfig.RefSpec{
-						gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
-						gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
-					},
-					Force: true,
-				}
-				sideband, err := p.pushWithSideband(ctx, cleanupOpts)
-				if err != nil {
-					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-					} else {
-						p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
-					}
-				}
-			}()
 		}
 	}
 
@@ -1620,15 +1601,51 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 	return false, nil
 }
 
-func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest) {
-	p.deleteTempBranchViaAPI(ctx, mr.SourceBranch)
-	p.deleteTempBranchViaAPI(ctx, mr.TargetBranch)
+// deleteTempBranches deletes the temporary branches sourceBranch and
+// targetBranch of a closed merge request on GitHub after its pull request
+// prNumber exists: with -pull-requests-only by API, else by a push to the
+// remote "github" of the local clone. A branch that does not exist is not an
+// error, for example when a run before deleted it already. A failure is only
+// logged: the branches stay and do no harm.
+func (p *project) deleteTempBranches(ctx context.Context, prNumber int, sourceBranch, targetBranch string) {
+	if p.m.cfg.PullRequestsOnly {
+		p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+		p.deleteTempBranchViaAPI(ctx, sourceBranch)
+		p.deleteTempBranchViaAPI(ctx, targetBranch)
+		return
+	}
+
+	p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+	// A push deletes only the branches that the remote has. When it has none
+	// of them, the push reports NoErrAlreadyUpToDate.
+	cleanupOpts := &git.PushOptions{
+		RemoteName: "github",
+		RefSpecs: []gitconfig.RefSpec{
+			gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", sourceBranch)),
+			gitconfig.RefSpec(fmt.Sprintf(":refs/heads/%s", targetBranch)),
+		},
+		Force: true,
+	}
+	sideband, err := p.pushWithSideband(ctx, cleanupOpts)
+	if err != nil {
+		if errors.Is(err, git.NoErrAlreadyUpToDate) {
+			p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+		} else {
+			p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
+		}
+	}
 }
 
-// deleteTempBranchViaAPI deletes the temporary branch on GitHub. A failure is
-// only logged: the branch stays and does no harm.
+// deleteTempBranchViaAPI deletes the temporary branch on GitHub. A branch that
+// does not exist is not an error. Another failure is only logged: the branch
+// stays and does no harm.
 func (p *project) deleteTempBranchViaAPI(ctx context.Context, branch string) {
-	if _, err := p.m.gh.Git.DeleteRef(ctx, p.githubPath[0], p.githubPath[1], "refs/heads/"+branch); err != nil {
+	_, err := p.m.gh.Git.DeleteRef(ctx, p.githubPath[0], p.githubPath[1], "refs/heads/"+branch)
+	switch {
+	case err == nil:
+	case isGitHubNotFound(err) || isReferenceDoesNotExistError(err):
+		p.log.Trace("temporary branch already deleted on GitHub", "branch", branch)
+	default:
 		p.log.Warn("failed to delete temporary branch via API", "branch", branch, "error", err)
 	}
 }
@@ -1746,6 +1763,12 @@ func is422Matching(err error, match func(string) bool) bool {
 
 func isAlreadyExistsError(err error) bool {
 	return is422Matching(err, func(m string) bool { return strings.Contains(m, "Reference already exists") })
+}
+
+// isReferenceDoesNotExistError reports whether GitHub refused to delete a
+// branch because it does not exist.
+func isReferenceDoesNotExistError(err error) bool {
+	return is422Matching(err, func(m string) bool { return strings.Contains(m, "Reference does not exist") })
 }
 
 func isReferenceUpdateFailedError(err error) bool {
