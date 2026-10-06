@@ -135,6 +135,10 @@ type hiddenCommitsRun struct {
 type hiddenCommitsSetup struct {
 	// wantOption is passed to gitlabWithHiddenMergeRequest.
 	wantOption string
+	// unknownCommits makes the commit list of MR !3 name commits that the
+	// GitLab repository does not have, like commits that GitLab removed by
+	// garbage collection.
+	unknownCommits bool
 	// skipInvalid sets -skip-invalid-merge-requests.
 	skipInvalid bool
 	// fetchHandler, when it is not nil, returns the HTTP handler that answers
@@ -199,6 +203,10 @@ func migrateWithHiddenMergeRequestCommits(t *testing.T, setup hiddenCommitsSetup
 		t.Fatalf("adding the GitHub remote: %v", err)
 	}
 
+	if setup.unknownCommits {
+		start = plumbing.NewHash(strings.Repeat("1", 40))
+		end = plumbing.NewHash(strings.Repeat("2", 40))
+	}
 	mux := http.NewServeMux()
 	var calls atomic.Int32
 	// GitLab lists the newest commit first.
@@ -280,18 +288,37 @@ func TestMigrateMergeRequest_UnfetchableMissingCommitIsSkipped(t *testing.T) {
 	// With -skip-invalid-merge-requests the merge request whose commits cannot
 	// be fetched is skipped, and the skip reason names the failed fetch. Over
 	// HTTP, the refusal of the server must not count as an error that a later
-	// run can get past.
-	for name, handler := range map[string]func(context.CancelFunc, http.Handler) http.HandlerFunc{
-		"file": nil,
-		"http": func(_ context.CancelFunc, backend http.Handler) http.HandlerFunc { return backend.ServeHTTP },
+	// run can get past. The refusal is either go-git's own (the server offers
+	// no fetch by SHA) or the server's "not our ref" (the server allows any SHA,
+	// but does not have the commit, for example because GitLab removed it by
+	// garbage collection).
+	httpBackend := func(_ context.CancelFunc, backend http.Handler) http.HandlerFunc { return backend.ServeHTTP }
+	for name, tc := range map[string]struct {
+		setup      hiddenCommitsSetup
+		wantReason string
+	}{
+		"file/no SHA wants": {setup: hiddenCommitsSetup{}},
+		"http/no SHA wants": {setup: hiddenCommitsSetup{fetchHandler: httpBackend}},
+		"file/unknown commit": {
+			setup:      hiddenCommitsSetup{wantOption: "allowAnySHA1InWant", unknownCommits: true},
+			wantReason: "not our ref",
+		},
+		"http/unknown commit": {
+			setup:      hiddenCommitsSetup{wantOption: "allowAnySHA1InWant", unknownCommits: true, fetchHandler: httpBackend},
+			wantReason: "not our ref",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{skipInvalid: true, fetchHandler: handler})
+			tc.setup.skipInvalid = true
+			run := migrateWithHiddenMergeRequestCommits(t, tc.setup)
 			if run.err != nil {
 				t.Fatalf("migrateMergeRequest: %v", run.err)
 			}
 			if run.result.Status != StatusSkipped || !strings.HasPrefix(run.result.SkipReason, "start commit is not in the clone and fetching it from GitLab failed: ") {
 				t.Fatalf("result = %+v, want skipped because the start commit could not be fetched", run.result)
+			}
+			if !strings.Contains(run.result.SkipReason, tc.wantReason) {
+				t.Errorf("skip reason = %q, want it to contain %q", run.result.SkipReason, tc.wantReason)
 			}
 		})
 	}
