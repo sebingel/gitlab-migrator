@@ -662,6 +662,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 				// The state file is not changed for a failure here: it keeps
 				// the saved result, so the next run tries the base again.
 				if err := p.retargetSavedPullRequest(ctx, mergeRequest, prev.GitHubPRNum); err != nil {
+					err = p.addArchivedHint(err)
 					p.log.Error("changing base branch of migrated pull request", "merge_request_id", mergeRequest.IID, "error", err)
 					mrResult.Status = StatusFailed
 					mrResult.Error = err.Error()
@@ -1275,7 +1276,7 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 				existingComment.Body = &commentBody
 				if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], existingComment.GetID(), existingComment); err != nil {
 					commentResult.Status = StatusFailed
-					commentResult.Error = fmt.Sprintf("updating comment: %v", err)
+					commentResult.Error = fmt.Sprintf("updating comment: %v", p.addArchivedHint(err))
 					result.Comments = append(result.Comments, commentResult)
 					result.FailedComments++
 					p.log.Error("updating pull request comment", "comment_id", comment.ID, "error", err)
@@ -1295,7 +1296,7 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 			createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
 			if err != nil {
 				commentResult.Status = StatusFailed
-				commentResult.Error = fmt.Sprintf("creating comment: %v", err)
+				commentResult.Error = fmt.Sprintf("creating comment: %v", p.addArchivedHint(err))
 				result.Comments = append(result.Comments, commentResult)
 				result.FailedComments++
 				p.log.Error("creating pull request comment", "comment_id", comment.ID, "error", err)
