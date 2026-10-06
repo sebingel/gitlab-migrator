@@ -1,11 +1,13 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,5 +243,103 @@ func TestCollectResults_WithoutOnPassDoneAddsAllResults(t *testing.T) {
 	if report.TotalProjects != 3 || report.SuccessProjects != 1 || report.FailedProjects != 1 || report.PartialProjects != 1 {
 		t.Errorf("report counts = total %d, success %d, failed %d, partial %d, want 3, 1, 1, 1",
 			report.TotalProjects, report.SuccessProjects, report.FailedProjects, report.PartialProjects)
+	}
+}
+
+// TestWriteReport_ListsFailedProjectsAndReturnsError reports a project that
+// GitLab has, one that GitLab does not have, and one with an invalid GitHub
+// slug. The two failed projects must not count as projects with 0 merge
+// requests: they are listed with their error, and the report returns an error,
+// so that main exits with code 1 (issue #140).
+func TestWriteReport_ListsFailedProjectsAndReturnsError(t *testing.T) {
+	mux := http.NewServeMux()
+	serveProjects(t, mux, []*gogitlab.Project{{ID: 1, PathWithNamespace: "group/project"}})
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{{IID: 1, State: "merged"}, {IID: 2, State: "closed"}}, &calls)
+	p := newGitLabTestProject(t, mux)
+
+	projects := []CSVRow{
+		{"group/project", "owner/repo"},
+		{"does/not/exist", "owner/other"},
+		{"group/project", "notaslug"},
+	}
+
+	var out bytes.Buffer
+	err := p.m.writeReport(context.Background(), &out, projects)
+	if err == nil {
+		t.Fatal("writeReport returned no error, want one for the 2 failed projects")
+	}
+	if !strings.Contains(err.Error(), "report 2 of 3") {
+		t.Errorf("error = %q, want it to name 2 of 3 projects", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"group/project: 2 merge requests",
+		"does/not/exist,owner/other: retrieving project:",
+		"group/project,notaslug: parsing project slugs: invalid GitHub project: notaslug",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output does not contain %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "does/not/exist: 0 merge requests") {
+		t.Errorf("output counts the failed project with 0 merge requests:\n%s", got)
+	}
+}
+
+func TestWriteReport_ReturnsNoErrorWhenAllProjectsAreReported(t *testing.T) {
+	mux := http.NewServeMux()
+	serveProjects(t, mux, []*gogitlab.Project{{ID: 1, PathWithNamespace: "group/project"}})
+	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{{IID: 1, State: "merged"}}, &calls)
+	p := newGitLabTestProject(t, mux)
+
+	var out bytes.Buffer
+	if err := p.m.writeReport(context.Background(), &out, []CSVRow{{"group/project", "owner/repo"}}); err != nil {
+		t.Fatalf("writeReport: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "Total merge requests: 1\n") {
+		t.Errorf("output does not contain the total of 1:\n%s", got)
+	}
+	if strings.Contains(got, "could not be reported") {
+		t.Errorf("output lists failed projects, want none:\n%s", got)
+	}
+}
+
+// TestWriteReport_StopsWhenCanceledAndCountsTheStoppedProject cancels the
+// report while the first of two projects runs. Like PerformMigration, the
+// report starts no further project, and the project that the cancel stopped
+// counts as failed, so the report still returns an error.
+func TestWriteReport_StopsWhenCanceledAndCountsTheStoppedProject(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var requests atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		cancel()
+		<-r.Context().Done()
+	})
+	p := newGitLabTestProject(t, mux)
+
+	projects := []CSVRow{
+		{"group/first", "owner/first"},
+		{"group/second", "owner/second"},
+	}
+
+	var out bytes.Buffer
+	err := p.m.writeReport(ctx, &out, projects)
+	if err == nil || !strings.Contains(err.Error(), "report 1 of 2") {
+		t.Errorf("error = %v, want one that names 1 of 2 projects", err)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("GitLab got %d project requests, want 1: the second project must not start after the cancel", n)
+	}
+	if got := out.String(); !strings.Contains(got, "group/first,owner/first: retrieving project:") {
+		t.Errorf("output does not list the stopped project:\n%s", got)
 	}
 }

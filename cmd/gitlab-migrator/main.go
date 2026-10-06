@@ -307,7 +307,10 @@ func main() {
 	}
 
 	if cfg.Report {
-		app.RunReport(ctx, projects)
+		if err = app.RunReport(ctx, projects); err != nil {
+			logger.Error(err.Error())
+			os.Exit(1)
+		}
 	} else {
 		if err = app.Run(ctx, projects, collector, sessionID); err != nil {
 			var partialErr *migration.MigrationPartialError

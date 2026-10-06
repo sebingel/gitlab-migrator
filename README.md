@@ -259,7 +259,7 @@ By default, attempting to migrate into an archived GitHub repository fails. Pass
 
 ## Reporting
 
-Use `-report` to get a summary of what would be migrated without actually performing the migration. For a detailed per-project breakdown written to disk, add `-detailed-report`, which generates both a JSON and a Markdown report in a `reports/` subdirectory next to the executable. With `-loop`, the report is also written after each complete pass (see [Concurrency](#concurrency)).
+Use `-report` to get a summary of what would be migrated without actually performing the migration. The summary shows the number of merge requests of each project and the total. A project that cannot be reported (for example because GitLab does not find it, or because its GitHub repository is not in the form `owner/repo`) is not counted with 0 merge requests: the summary lists it with its error, and the tool exits with code 1. After Ctrl+C, the report starts no new project and prints the summary of the projects done so far; a project that Ctrl+C stopped is listed as one that could not be reported. For a detailed per-project breakdown written to disk, add `-detailed-report`, which generates both a JSON and a Markdown report in a `reports/` subdirectory next to the executable. With `-loop`, the report is also written after each complete pass (see [Concurrency](#concurrency)).
 
 ## Contributing, reporting bugs etc...
 

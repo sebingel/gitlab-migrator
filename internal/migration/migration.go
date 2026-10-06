@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,38 +259,75 @@ func (m *Migrator) writeDetailedReport(finalReport *MigrationReport, sessionID s
 	}
 }
 
-// PrintReport logs a human-readable report for the given projects.
-func (m *Migrator) PrintReport(ctx context.Context, projects []CSVRow) {
+// PrintReport prints a human-readable report for the given projects to stdout.
+// It returns an error when at least one project could not be reported.
+func (m *Migrator) PrintReport(ctx context.Context, projects []CSVRow) error {
+	return m.writeReport(ctx, os.Stdout, projects)
+}
+
+// failedReport is a project that could not be reported.
+type failedReport struct {
+	project string
+	err     error
+}
+
+// writeReport writes the report of PrintReport to w. A project that cannot be
+// reported is listed with its error, and is not counted with 0 merge requests.
+// When ctx is canceled, no further project is started, like in
+// PerformMigration: the report then shows the projects done so far, and a
+// project that the cancel stopped counts as failed.
+func (m *Migrator) writeReport(ctx context.Context, w io.Writer, projects []CSVRow) error {
 	m.logger.Debug("building report")
 
-	results := make([]Report, 0)
+	results := make([]Report, 0, len(projects))
+	var failed []failedReport
 
 	for _, proj := range projects {
 		if err := ctx.Err(); err != nil {
-			return
+			break
 		}
 
+		name := strings.Join(proj, ",")
 		result, err := m.reportProject(ctx, proj)
 		if err != nil {
-			m.logger.Error("reporting project", "error", err)
+			m.logger.Error("reporting project", "project", name, "error", err)
+			failed = append(failed, failedReport{project: name, err: err})
+			continue
 		}
 
-		if result != nil {
-			results = append(results, *result)
-		}
+		results = append(results, *result)
 	}
 
-	fmt.Println()
+	var b strings.Builder
+	b.WriteString("\n")
 
 	totalMergeRequests := 0
 	for _, result := range results {
 		totalMergeRequests += result.MergeRequestsCount
-		fmt.Printf("%s/%s: %d merge requests\n", result.GroupName, result.ProjectName, result.MergeRequestsCount)
+		fmt.Fprintf(&b, "%s/%s: %d merge requests\n", result.GroupName, result.ProjectName, result.MergeRequestsCount)
 	}
 
-	fmt.Println()
-	fmt.Printf("Total merge requests: %d\n", totalMergeRequests)
-	fmt.Println()
+	b.WriteString("\n")
+	if len(failed) == 0 {
+		fmt.Fprintf(&b, "Total merge requests: %d\n", totalMergeRequests)
+	} else {
+		fmt.Fprintf(&b, "Total merge requests: %d (without the %d project(s) that could not be reported)\n", totalMergeRequests, len(failed))
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "Projects that could not be reported (%d):\n", len(failed))
+		for _, f := range failed {
+			fmt.Fprintf(&b, "  %s: %v\n", f.project, f.err)
+		}
+	}
+	b.WriteString("\n")
+
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("writing report: %w", err)
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("could not report %d of %d project(s)", len(failed), len(projects))
+	}
+	return nil
 }
 
 // Report holds high-level project report data.

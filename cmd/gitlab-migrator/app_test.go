@@ -22,6 +22,9 @@ import (
 	gogithub "github.com/google/go-github/v84/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
+
+	"github.com/sebingel/gitlab-migrator/internal/config"
+	"github.com/sebingel/gitlab-migrator/internal/migration"
 )
 
 const secondaryRateLimitBody = `{"message":"You have exceeded a secondary rate limit and have been temporarily blocked from content creation.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`
@@ -1455,5 +1458,17 @@ func TestRetryClient_NetworkErrorResetsSecondaryRateLimitCount(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("got count %d, want 0", count)
+	}
+}
+
+// TestRunReport_ReturnsErrorForAProjectThatCannotBeReported checks that
+// RunReport hands the error of the report to main, which then exits with code
+// 1 (issue #140). The invalid GitHub slug fails before any API request.
+func TestRunReport_ReturnsErrorForAProjectThatCannotBeReported(t *testing.T) {
+	app := &App{migrator: migration.NewMigrator(&config.Config{}, nil, nil, nil, nil, hclog.NewNullLogger())}
+
+	err := app.RunReport(context.Background(), []migration.CSVRow{{"group/project", "notaslug"}})
+	if err == nil {
+		t.Fatal("RunReport returned no error for a project with an invalid GitHub slug")
 	}
 }
