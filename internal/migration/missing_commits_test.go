@@ -431,3 +431,31 @@ func TestMigrateMergeRequest_ServerErrorDuringFetchOfMissingCommit(t *testing.T)
 		}
 	}
 }
+
+func TestMigrateMergeRequest_AuthErrorDuringFetchOfMissingCommit(t *testing.T) {
+	// GitLab answers the fetch of the commits of MR !3 with 401 or 403, for
+	// example because the token expired during the run or GitLab blocked the
+	// IP for a while. A new token or a later run can fix that, so with
+	// -skip-invalid-merge-requests the merge request fails and is not skipped:
+	// with -state-dir a skip is never migrated again. go-git returns these
+	// statuses as transport errors, not as an HTTP error with a status code.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{
+				wantOption:  "allowAnySHA1InWant",
+				skipInvalid: true,
+				fetchHandler: func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc {
+					return func(w http.ResponseWriter, r *http.Request) {
+						w.WriteHeader(status)
+					}
+				},
+			})
+			if run.err == nil || run.result.Status == StatusSkipped {
+				t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
+			}
+			if !strings.Contains(run.err.Error(), "a later run can try again") {
+				t.Errorf("error = %q, want it to say that a later run can try again", run.err)
+			}
+		})
+	}
+}

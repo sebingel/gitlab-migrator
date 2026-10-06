@@ -23,6 +23,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	plumbingcache "github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -947,8 +948,8 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return result, fmt.Errorf("fetching the commits of the merge request from GitLab: %w: %w", ctxErr, fetchErr)
 				}
-				// A network error or a server error can be gone in the next
-				// run, so it fails the merge request even with
+				// A network error, a server error or a refused login can be
+				// gone in the next run, so it fails the merge request even with
 				// -skip-invalid-merge-requests: with -state-dir a skip is
 				// never migrated again.
 				if isTransientFetchError(fetchErr) {
@@ -1518,13 +1519,19 @@ func (e *redactedError) Unwrap() error {
 }
 
 // isTransientFetchError reports whether err of fetchMissingCommits can be gone
-// in a later run: a network error, a timeout, an HTTP status 408, 429 or 5xx, or a
-// response that ends too early, for example because a proxy closed the
-// connection during the download of the pack. A server that does not serve
-// the commit gives another error.
+// in a later run: a network error, a timeout, an HTTP status 401, 403, 408,
+// 429 or 5xx, or a response that ends too early, for example because a proxy
+// closed the connection during the download of the pack. A server that does
+// not serve the commit gives another error. 401 and 403 can go away with a new
+// token or when GitLab lifts a block of the IP.
 func isTransientFetchError(err error) bool {
-	// go-git wraps HTTP errors in a plumbing.UnexpectedError, which has no
-	// Unwrap method.
+	// go-git returns 401 and 403 as these transport errors, not as a
+	// githttp.Err.
+	if errors.Is(err, transport.ErrAuthenticationRequired) || errors.Is(err, transport.ErrAuthorizationFailed) {
+		return true
+	}
+	// go-git wraps other HTTP errors in a plumbing.UnexpectedError, which has
+	// no Unwrap method.
 	var unexpected *plumbing.UnexpectedError
 	if errors.As(err, &unexpected) {
 		err = unexpected.Err
