@@ -1549,10 +1549,11 @@ func missingCommitHint(lookupErr, fetchErr error) string {
 
 // missingCommitSkipReason is the skip reason for a commit of a closed or
 // merged merge request that the lookup did not find. name is "start commit"
-// or "end commit"; lookupErr and fetchErr are as for missingCommitHint.
+// or "end commit"; lookupErr and fetchErr are as for missingCommitHint. The
+// reasons differ from the old ones that ShouldSkip migrates again.
 func missingCommitSkipReason(name string, lookupErr, fetchErr error) string {
 	if !errors.Is(lookupErr, plumbing.ErrObjectNotFound) {
-		return name + " does not exist"
+		return name + " cannot be read"
 	}
 	if fetchErr != nil {
 		return fmt.Sprintf("%s is not in the clone and fetching it from GitLab failed: %v", name, fetchErr)
