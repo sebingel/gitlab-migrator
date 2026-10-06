@@ -396,6 +396,9 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubD
 		AllowUpdateBranch: Pointer(true),
 	}
 	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
+		if isArchivedRepoError(err) && !p.m.cfg.UnarchiveArchivedRepos {
+			return fmt.Errorf("updating github repo: %w (%s)", err, archivedRepoHint)
+		}
 		return fmt.Errorf("updating github repo: %w", err)
 	}
 
@@ -1735,6 +1738,20 @@ func containsSearchSyntaxHint(msg string) bool {
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "search is invalid") ||
 		(strings.Contains(lower, "search query") && strings.Contains(lower, "invalid syntax"))
+}
+
+// archivedRepoHint is added to the error of a write to an archived GitHub
+// repository when -unarchive-archived-repos is not set.
+const archivedRepoHint = "the repository is archived; use -unarchive-archived-repos to unarchive it for the migration"
+
+// isArchivedRepoError reports whether err is the 403 that GitHub answers to a
+// write to an archived repository ("Repository was archived so is read-only").
+func isArchivedRepoError(err error) bool {
+	var ghErr *gogithub.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr == nil || ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	return strings.Contains(strings.ToLower(ghErr.Message), "archived")
 }
 
 func isGitHubNotFound(err error) bool {

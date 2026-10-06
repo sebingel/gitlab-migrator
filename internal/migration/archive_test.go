@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -213,5 +214,87 @@ func TestMigrate_ReArchiveAfterInterruptStopsAfterGracePeriod(t *testing.T) {
 	}
 	if got := gh.recordedEdits(); len(got) != 2 || got[0] || !got[1] {
 		t.Fatalf("archived edits = %v, want [false true]", got)
+	}
+}
+
+// serveRepoEditError points the GitHub client of p to a server that answers
+// every repository edit with status and message.
+func serveRepoEditError(t *testing.T, p *project, status int, message string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("PATCH /repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if _, err := fmt.Fprintf(w, `{"message":%q}`, message); err != nil {
+			t.Errorf("writing the error response: %v", err)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	gh := gogithub.NewClient(nil)
+	baseURL, err := url.Parse(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("parsing GitHub test server URL: %v", err)
+	}
+	gh.BaseURL = baseURL
+	p.m.gh = gh
+}
+
+const archivedHint = "the repository is archived; use -unarchive-archived-repos to unarchive it for the migration"
+
+func TestMirrorRepository_ArchivedRepoErrorNamesUnarchiveFlag(t *testing.T) {
+	p := newGitLabTestProject(t, http.NewServeMux())
+	serveRepoEditError(t, p, http.StatusForbidden, "Repository was archived so is read-only.")
+
+	err := p.mirrorRepository(context.Background(), true, "main")
+	if err == nil {
+		t.Fatal("mirrorRepository: want an error for the archived repository")
+	}
+	if !strings.Contains(err.Error(), "updating github repo") || !strings.Contains(err.Error(), "403") {
+		t.Errorf("error %q lost the original update error", err)
+	}
+	if !strings.Contains(err.Error(), archivedHint) {
+		t.Errorf("error %q does not contain the hint %q", err, archivedHint)
+	}
+}
+
+func TestMirrorRepository_OtherForbiddenErrorGetsNoArchivedHint(t *testing.T) {
+	p := newGitLabTestProject(t, http.NewServeMux())
+	serveRepoEditError(t, p, http.StatusForbidden, "Resource not accessible by personal access token")
+
+	err := p.mirrorRepository(context.Background(), true, "main")
+	if err == nil {
+		t.Fatal("mirrorRepository: want an error for the forbidden update")
+	}
+	if strings.Contains(err.Error(), "-unarchive-archived-repos") {
+		t.Errorf("error %q names -unarchive-archived-repos for a 403 that is not about an archived repository", err)
+	}
+}
+
+func TestMirrorRepository_ArchivedErrorWithOtherStatusGetsNoArchivedHint(t *testing.T) {
+	p := newGitLabTestProject(t, http.NewServeMux())
+	serveRepoEditError(t, p, http.StatusUnprocessableEntity, "Repository was archived so is read-only.")
+
+	err := p.mirrorRepository(context.Background(), true, "main")
+	if err == nil {
+		t.Fatal("mirrorRepository: want an error")
+	}
+	if strings.Contains(err.Error(), "-unarchive-archived-repos") {
+		t.Errorf("error %q names -unarchive-archived-repos for a status other than 403", err)
+	}
+}
+
+func TestMirrorRepository_ArchivedErrorGetsNoHintWhenFlagIsSet(t *testing.T) {
+	// The flag is set, so the hint to set it would mislead.
+	p := newGitLabTestProject(t, http.NewServeMux())
+	p.m.cfg.UnarchiveArchivedRepos = true
+	serveRepoEditError(t, p, http.StatusForbidden, "Repository was archived so is read-only.")
+
+	err := p.mirrorRepository(context.Background(), true, "main")
+	if err == nil {
+		t.Fatal("mirrorRepository: want an error")
+	}
+	if strings.Contains(err.Error(), "-unarchive-archived-repos") {
+		t.Errorf("error %q names -unarchive-archived-repos although it is set", err)
 	}
 }
