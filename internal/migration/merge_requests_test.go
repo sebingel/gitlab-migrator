@@ -1351,7 +1351,7 @@ func repoWithGitHubRemote(t *testing.T, branches ...string) (*git.Repository, st
 // log of the migration.
 func resumeFoundPullRequest(t *testing.T, setup func(p *project, ghMux *http.ServeMux)) string {
 	t.Helper()
-	logs, result, err := runFoundPullRequest(t, context.Background(), nil, setup)
+	logs, result, err := runFoundPullRequest(t, context.Background(), nil, nil, setup)
 	if err != nil {
 		t.Fatalf("migrateMergeRequest: %v", err)
 	}
@@ -1363,9 +1363,10 @@ func resumeFoundPullRequest(t *testing.T, setup func(p *project, ghMux *http.Ser
 
 // runFoundPullRequest runs the migration of resumeFoundPullRequest with ctx.
 // The GitLab test server calls onNotes, when it is not nil, when the notes of
-// MR !3 are listed. It returns the log, the result and the error of the
-// migration.
-func runFoundPullRequest(t *testing.T, ctx context.Context, onNotes func(), setup func(p *project, ghMux *http.ServeMux)) (string, MergeRequestResult, error) {
+// MR !3 are listed. The GitHub test server calls onComments, when it is not
+// nil, when the comments of pull request 5 are listed. It returns the log, the
+// result and the error of the migration.
+func runFoundPullRequest(t *testing.T, ctx context.Context, onNotes, onComments func(), setup func(p *project, ghMux *http.ServeMux)) (string, MergeRequestResult, error) {
 	t.Helper()
 	mux := http.NewServeMux()
 	var calls atomic.Int32
@@ -1411,6 +1412,9 @@ func runFoundPullRequest(t *testing.T, ctx context.Context, onNotes func(), setu
 		}
 	})
 	ghMux.HandleFunc("GET /repos/owner/repo/issues/5/comments", func(w http.ResponseWriter, r *http.Request) {
+		if onComments != nil {
+			onComments()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := fmt.Fprint(w, `[]`); err != nil {
 			t.Errorf("writing the pull request comments: %v", err)
@@ -1458,7 +1462,7 @@ func TestMigrateMergeRequest_InterruptedFoundPullRequestKeepsTemporaryBranches(t
 			defer cancel()
 			branches := []string{"main", "migration-source-3/feature", "migration-target-3/main"}
 			var remoteDir string
-			logs, _, err := runFoundPullRequest(t, ctx, cancel, func(p *project, ghMux *http.ServeMux) {
+			logs, _, err := runFoundPullRequest(t, ctx, cancel, nil, func(p *project, ghMux *http.ServeMux) {
 				p.m.cfg.PullRequestsOnly = pullRequestsOnly
 				p.repo, remoteDir = repoWithGitHubRemote(t, branches...)
 				ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
@@ -1472,6 +1476,40 @@ func TestMigrateMergeRequest_InterruptedFoundPullRequestKeepsTemporaryBranches(t
 			wantNoErrorOrWarning(t, logs)
 			if !strings.Contains(logs, "keeping temporary branches for closed pull request because the run was stopped") {
 				t.Errorf("log = %q, want the kept temporary branches", logs)
+			}
+			if got := remoteBranches(t, remoteDir); !slices.Equal(got, branches) {
+				t.Errorf("remote branches after the migration = %v, want %v", got, branches)
+			}
+		})
+	}
+}
+
+func TestMigrateMergeRequest_StoppedWhileCommentsAreListedIsPartial(t *testing.T) {
+	// The run is stopped while it lists the comments of pull request 5. The
+	// listing error is only logged, so the merge request has no error, but its
+	// temporary branches stay because of the cancelled context. The result must
+	// not be a success: with -state-dir a success is never migrated again, and
+	// no later run would delete the branches. A partial result is migrated
+	// again by the next run.
+	for _, pullRequestsOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pull requests only %t", pullRequestsOnly), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			branches := []string{"main", "migration-source-3/feature", "migration-target-3/main"}
+			var remoteDir string
+			_, result, err := runFoundPullRequest(t, ctx, nil, cancel, func(p *project, ghMux *http.ServeMux) {
+				p.m.cfg.PullRequestsOnly = pullRequestsOnly
+				p.repo, remoteDir = repoWithGitHubRemote(t, branches...)
+				ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("deletion of %s requested, want none after the run was stopped", r.PathValue("ref"))
+					w.WriteHeader(http.StatusNoContent)
+				})
+			})
+			if err != nil {
+				t.Fatalf("migrateMergeRequest: %v", err)
+			}
+			if result.Status != StatusPartial || result.Error == "" {
+				t.Errorf("result status = %q, error = %q, want %q with an error", result.Status, result.Error, StatusPartial)
 			}
 			if got := remoteBranches(t, remoteDir); !slices.Equal(got, branches) {
 				t.Errorf("remote branches after the migration = %v, want %v", got, branches)

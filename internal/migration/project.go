@@ -1205,9 +1205,17 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		p.migrateComments(ctx, pullRequest, comments, prComments, &result)
 	}
 
-	if result.FailedComments > 0 {
+	switch {
+	case ctx.Err() != nil && !strings.EqualFold(mergeRequest.State, "opened"):
+		// The deferred cleanup keeps the temporary branches because the run
+		// was stopped. A success is never migrated again with -state-dir, so
+		// the result is partial: the next run migrates the merge request again
+		// and deletes the branches then.
 		result.Status = StatusPartial
-	} else {
+		result.Error = "the run was stopped before the temporary branches were deleted"
+	case result.FailedComments > 0:
+		result.Status = StatusPartial
+	default:
 		result.Status = StatusSuccess
 	}
 
@@ -1617,10 +1625,9 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 // example when a run before deleted it already. A failure is only logged: the
 // branches stay and do no harm. When the run was stopped, nothing is tried: no
 // request can work with the cancelled ctx. The next run that migrates the merge
-// request again finds the pull request and deletes the branches then. With
-// -state-dir, a merge request that this run still recorded as a success (for
-// example when only the list of the pull request comments failed) is not
-// migrated again, so its branches stay.
+// request again finds the pull request and deletes the branches then: a
+// stopped run that still finishes the merge request records it as partial, so
+// -state-dir does not skip it.
 func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) {
 	if ctx.Err() != nil {
 		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
