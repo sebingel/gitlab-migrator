@@ -283,8 +283,10 @@ func TestWriteReport_ListsFailedProjectsAndReturnsError(t *testing.T) {
 			t.Errorf("output does not contain %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "does/not/exist: 0 merge requests") {
-		t.Errorf("output counts the failed project with 0 merge requests:\n%s", got)
+	// Only the reported project has a "merge requests" line. A line for a
+	// failed project, with any name, would count it with 0 merge requests.
+	if n := strings.Count(got, " merge requests\n"); n != 1 {
+		t.Errorf("output has %d project lines, want 1 for the reported project only:\n%s", n, got)
 	}
 }
 
