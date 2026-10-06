@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -296,5 +297,32 @@ func TestMirrorRepository_ArchivedErrorGetsNoHintWhenFlagIsSet(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "-unarchive-archived-repos") {
 		t.Errorf("error %q names -unarchive-archived-repos although it is set", err)
+	}
+}
+
+func TestAddArchivedHint(t *testing.T) {
+	archived := &gogithub.ErrorResponse{
+		Response: &http.Response{StatusCode: http.StatusForbidden},
+		Message:  "Repository was archived so is read-only.",
+	}
+	wrapped := fmt.Errorf("creating temporary target branch x on GitHub: %w", archived)
+
+	p := newGitLabTestProject(t, http.NewServeMux())
+	got := p.addArchivedHint(wrapped)
+	if !strings.Contains(got.Error(), archivedHint) || !strings.Contains(got.Error(), "creating temporary target branch") {
+		t.Errorf("addArchivedHint = %q, want the original error and the hint", got)
+	}
+	if !errors.Is(got, archived) {
+		t.Errorf("addArchivedHint lost the wrapped error")
+	}
+
+	other := errors.New("boom")
+	if got := p.addArchivedHint(other); got != other {
+		t.Errorf("addArchivedHint changed an error that is not about an archived repository: %q", got)
+	}
+
+	p.m.cfg.UnarchiveArchivedRepos = true
+	if got := p.addArchivedHint(wrapped); got != wrapped {
+		t.Errorf("addArchivedHint changed the error although -unarchive-archived-repos is set: %q", got)
 	}
 }

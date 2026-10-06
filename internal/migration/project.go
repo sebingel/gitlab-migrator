@@ -396,10 +396,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubD
 		AllowUpdateBranch: Pointer(true),
 	}
 	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
-		if isArchivedRepoError(err) && !p.m.cfg.UnarchiveArchivedRepos {
-			return fmt.Errorf("updating github repo: %w (%s)", err, archivedRepoHint)
-		}
-		return fmt.Errorf("updating github repo: %w", err)
+		return p.addArchivedHint(fmt.Errorf("updating github repo: %w", err))
 	}
 
 	cloneUrl.User = url.UserPassword("oauth2", p.m.cfg.GitlabToken)
@@ -689,6 +686,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 
 		mrResult, err := p.migrateMergeRequest(ctx, mergeRequest)
 		if err != nil {
+			err = p.addArchivedHint(err)
 			p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
 			mrResult.Status = StatusFailed
 			mrResult.Error = err.Error()
@@ -1743,6 +1741,16 @@ func containsSearchSyntaxHint(msg string) bool {
 // archivedRepoHint is added to the error of a write to an archived GitHub
 // repository when -unarchive-archived-repos is not set.
 const archivedRepoHint = "the repository is archived; use -unarchive-archived-repos to unarchive it for the migration"
+
+// addArchivedHint adds archivedRepoHint to err when err comes from a write to
+// an archived repository and -unarchive-archived-repos is not set. Any other
+// err is returned as it is.
+func (p *project) addArchivedHint(err error) error {
+	if isArchivedRepoError(err) && !p.m.cfg.UnarchiveArchivedRepos {
+		return fmt.Errorf("%w (%s)", err, archivedRepoHint)
+	}
+	return err
+}
 
 // isArchivedRepoError reports whether err is the 403 that GitHub answers to a
 // write to an archived repository ("Repository was archived so is read-only").
