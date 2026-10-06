@@ -199,20 +199,6 @@ $arguments += "-state-dir", ".\state"
 $arguments += "-detailed-report"
 
 # ----------------------------------------------------------------------------
-# Logging (the log level is LOG_LEVEL at the top of this script)
-# ----------------------------------------------------------------------------
-
-# -log-output: console (default), file, or console,file.
-$arguments += "-log-output", "console,file"
-
-# -log-directory: Directory for log files (default: the logs folder next to the executable).
-#   Set it with the log directory variable at the top. It is added only if it is not empty.
-#   Requires: -log-output with "file".
-if ($LogDirectory) {
-    $arguments += "-log-directory", $LogDirectory
-}
-
-# ----------------------------------------------------------------------------
 # Other
 # ----------------------------------------------------------------------------
 
@@ -231,8 +217,8 @@ if ($LogDirectory) {
 # ----------------------------------------------------------------------------
 # Uncomment the block below to use it. The two lines after it (large files, batch count) are
 # optional: add only what you need. The block replaces all flags above. Of those, only
-# -log-output, -log-directory and -config still work in prepare mode: add them after the
-# block. -version also exits before prepare mode starts.
+# -config still works in prepare mode: add it after the block. -version also exits before
+# prepare mode starts. The logging flags come after this section, so the block keeps them.
 # As in normal mode, the tool stops with an error when -log-directory is set but -log-output
 # has no "file".
 # Prepare mode needs no tokens: the script skips the token check when the arguments
@@ -258,6 +244,27 @@ if ($LogDirectory) {
 # $arguments += "-prepare-large-files", "remove"  # or "lfs"
 # $arguments += "-prepare-batch-count", "10"
 
+# ----------------------------------------------------------------------------
+# Logging (the log level is LOG_LEVEL at the top of this script)
+# ----------------------------------------------------------------------------
+# These flags come after the prepare mode block, so they are passed in both modes.
+
+# -log-output: console (default), file, or console,file.
+$arguments += "-log-output", "console,file"
+
+# -log-directory: Directory for log files (default: the logs folder next to the executable).
+#   Set it with the log directory variable at the top. It is added only if it is not empty.
+#   Requires: -log-output with "file".
+# Windows PowerShell 5.1 passes a value with a space and a trailing backslash wrongly
+# ("C:\My Logs\" arrives as C:\My Logs" with a quote), so the trailing backslash is removed.
+# A path without a space (also a drive root such as "C:\") is passed as it is.
+if ($LogDirectory -match '\s') {
+    $LogDirectory = $LogDirectory.TrimEnd('\')
+}
+if ($LogDirectory) {
+    $arguments += "-log-directory", $LogDirectory
+}
+
 # Verify tokens are set (prepare mode needs no tokens)
 $prepareMode = ($arguments -ccontains "-prepare") -or ($arguments -ccontains "--prepare")
 if (-not $prepareMode) {
@@ -272,27 +279,78 @@ if (-not $prepareMode) {
     }
 }
 
+# PowerShell does not pass a $null argument to the exe at all (for example a value read from an
+# environment variable that is not set), so the display leaves it out too. Windows PowerShell 5.1
+# (and pwsh before 7.3, or with $PSNativeCommandArgumentPassing set to "Legacy") does the same with
+# an empty argument. The next argument then becomes the value of the flag, as the tool gets it.
+# The banner and the "Arguments:" list both read the arguments from $shownArguments.
+$shownArguments = @($arguments | Where-Object { $null -ne $_ })
+$argumentPassing = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
+if ($argumentPassing -ne "Standard" -and $argumentPassing -ne "Windows") {
+    $shownArguments = @($shownArguments | Where-Object { [string]$_ -ne "" })
+}
+
 # Display configuration
+# Pair each flag with its value, taken from the real arguments, for the "Arguments:" list.
+# A flag of this list takes no value. Any other flag takes the next argument as its value,
+# also when that value starts with a dash. Keep the list in step with the flags above.
+$noValueFlags = @(
+    "-delete-existing-repos", "-unarchive-archived-repos", "-no-force", "-trim-branches-on-github",
+    "-rename-master-to-main", "-migrate-pull-requests", "-pull-requests-only", "-skip-open-merge-requests",
+    "-skip-invalid-merge-requests", "-loop", "-report", "-detailed-report", "-version", "-prepare"
+)
+# An argument that is empty or has a space or a quote in it is printed in single quotes
+function Format-Argument([string]$value) {
+    if ($value -eq "" -or $value -match '[\s''"]') {
+        return "'" + ($value -replace "'", "''") + "'"
+    }
+    return $value
+}
+# The same pairing finds the value of -projects-csv for the banner (the last one counts, as in the tool)
+$argumentLines = @()
+$projectsCsvPassed = $false
+$projectsCsvValue = ""
+$i = 0
+while ($i -lt $shownArguments.Count) {
+    $arg = [string]$shownArguments[$i]
+    $line = Format-Argument $arg
+    $i++
+    # -flag and --flag are the same flag, and -flag=value already holds its value
+    $name = "-" + ($arg -replace "^--?", "")
+    if ($arg -match "^-." -and $arg -ne "--" -and $name.StartsWith("-projects-csv=", [StringComparison]::Ordinal)) {
+        $projectsCsvPassed = $true
+        $projectsCsvValue = $name.Substring("-projects-csv=".Length)
+    }
+    if ($arg -match "^-." -and $arg -ne "--" -and $arg -notmatch "=" -and
+        $noValueFlags -cnotcontains $name -and $i -lt $shownArguments.Count) {
+        if ($name -ceq "-projects-csv") {
+            $projectsCsvPassed = $true
+            $projectsCsvValue = [string]$shownArguments[$i]
+        }
+        $line += " " + (Format-Argument ([string]$shownArguments[$i]))
+        $i++
+    }
+    $argumentLines += $line
+}
+
 Write-Host "Starting GitLab to GitHub Migration" -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
-Write-Host "GitHub User:    $GitHubUser"
-Write-Host "GitLab Domain:  $GitLabDomain"
-Write-Host "GitHub Domain:  $GitHubDomain"
-Write-Host "Projects CSV:   $ProjectsCsv"
+# The prepare mode block does not pass these values, so they are not shown then
+if (-not $prepareMode) {
+    Write-Host "GitHub User:    $GitHubUser"
+    Write-Host "GitLab Domain:  $GitLabDomain"
+    Write-Host "GitHub Domain:  $GitHubDomain"
+    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
+    # when -projects-csv is passed, with the value that is passed
+    if ($projectsCsvPassed) {
+        Write-Host "Projects CSV:   $projectsCsvValue"
+    }
+}
 Write-Host "Log Directory:  $(if ($LogDirectory) { $LogDirectory } else { '(default: ./logs)' })"
 Write-Host "Log Level:      $($env:LOG_LEVEL)"
 Write-Host ""
-# Print each flag with its value on one line, taken from the real arguments
 Write-Host "Arguments:"
-$line = ""
-foreach ($arg in $arguments) {
-    if ($arg -cmatch "^-[a-z]" -and $line) {
-        Write-Host "  $line"
-        $line = ""
-    }
-    $line = "$line $arg".Trim()
-}
-if ($line) {
+foreach ($line in $argumentLines) {
     Write-Host "  $line"
 }
 Write-Host ""

@@ -200,20 +200,6 @@ arguments+=("-state-dir" "./state")
 arguments+=("-detailed-report")
 
 # ----------------------------------------------------------------------------
-# Logging (the log level is LOG_LEVEL at the top of this script)
-# ----------------------------------------------------------------------------
-
-# -log-output: console (default), file, or console,file.
-arguments+=("-log-output" "console,file")
-
-# -log-directory: Directory for log files (default: the logs folder next to the executable).
-#   Set it with the log directory variable at the top. It is added only if it is not empty.
-#   Requires: -log-output with "file".
-if [ -n "$LOG_DIRECTORY" ]; then
-    arguments+=("-log-directory" "$LOG_DIRECTORY")
-fi
-
-# ----------------------------------------------------------------------------
 # Other
 # ----------------------------------------------------------------------------
 
@@ -232,8 +218,8 @@ fi
 # ----------------------------------------------------------------------------
 # Uncomment the block below to use it. The two lines after it (large files, batch count) are
 # optional: add only what you need. The block replaces all flags above. Of those, only
-# -log-output, -log-directory and -config still work in prepare mode: add them after the
-# block. -version also exits before prepare mode starts.
+# -config still works in prepare mode: add it after the block. -version also exits before
+# prepare mode starts. The logging flags come after this section, so the block keeps them.
 # As in normal mode, the tool stops with an error when -log-directory is set but -log-output
 # has no "file".
 # Prepare mode needs no tokens: the script skips the token check when the arguments
@@ -259,6 +245,21 @@ fi
 # arguments+=("-prepare-large-files" "remove")  # or "lfs"
 # arguments+=("-prepare-batch-count" "10")
 
+# ----------------------------------------------------------------------------
+# Logging (the log level is LOG_LEVEL at the top of this script)
+# ----------------------------------------------------------------------------
+# These flags come after the prepare mode block, so they are passed in both modes.
+
+# -log-output: console (default), file, or console,file.
+arguments+=("-log-output" "console,file")
+
+# -log-directory: Directory for log files (default: the logs folder next to the executable).
+#   Set it with the log directory variable at the top. It is added only if it is not empty.
+#   Requires: -log-output with "file".
+if [ -n "$LOG_DIRECTORY" ]; then
+    arguments+=("-log-directory" "$LOG_DIRECTORY")
+fi
+
 # Verify tokens are set (prepare mode needs no tokens)
 prepare_mode=false
 for arg in "${arguments[@]}"; do
@@ -279,28 +280,72 @@ if [ "$prepare_mode" = false ]; then
 fi
 
 # Display configuration
+# Pair each flag with its value, taken from the real arguments, for the "Arguments:" list.
+# A flag of this list takes no value. Any other flag takes the next argument as its value,
+# also when that value starts with a dash. Keep the list in step with the flags above.
+no_value_flags=" -delete-existing-repos -unarchive-archived-repos -no-force -trim-branches-on-github \
+-rename-master-to-main -migrate-pull-requests -pull-requests-only -skip-open-merge-requests \
+-skip-invalid-merge-requests -loop -report -detailed-report -version -prepare "
+# An argument that is empty or has a space or a quote in it is printed in single quotes
+needs_quotes="[[:space:]'\"]"
+# A single quote in such a value is printed as '\''. The text is in a variable because bash before 4.3
+# (also /bin/bash 3.2 on macOS) does not remove the quotes and backslashes of a replacement text.
+quote_in_quotes="'\\''"
+show_arg() {
+    if [[ -z "$1" || "$1" =~ $needs_quotes ]]; then
+        printf "'%s'" "${1//\'/$quote_in_quotes}"
+    else
+        printf '%s' "$1"
+    fi
+}
+# The same pairing finds the value of -projects-csv for the banner (the last one counts, as in the tool)
+argument_lines=()
+projects_csv_passed=false
+projects_csv_value=""
+i=0
+while [ "$i" -lt "${#arguments[@]}" ]; do
+    arg="${arguments[$i]}"
+    line=$(show_arg "$arg")
+    i=$((i + 1))
+    # -flag and --flag are the same flag, and -flag=value already holds its value
+    name="${arg#-}"
+    name="-${name#-}"
+    if [[ "$arg" == -?* && "$arg" != "--" && "$name" == "-projects-csv="* ]]; then
+        projects_csv_passed=true
+        projects_csv_value="${name#-projects-csv=}"
+    fi
+    if [[ "$arg" == -?* && "$arg" != "--" && "$arg" != *=* && "$no_value_flags" != *" $name "* \
+          && "$i" -lt "${#arguments[@]}" ]]; then
+        if [ "$name" = "-projects-csv" ]; then
+            projects_csv_passed=true
+            projects_csv_value="${arguments[$i]}"
+        fi
+        line="$line $(show_arg "${arguments[$i]}")"
+        i=$((i + 1))
+    fi
+    argument_lines+=("$line")
+done
+
 echo -e "\033[36mStarting GitLab to GitHub Migration\033[0m"
 echo -e "\033[36m=====================================\033[0m"
-echo "GitHub User:    $GITHUB_USER"
-echo "GitLab Domain:  $GITLAB_DOMAIN"
-echo "GitHub Domain:  $GITHUB_DOMAIN"
-echo "Projects CSV:   $PROJECTS_CSV"
+# The prepare mode block does not pass these values, so they are not shown then
+if [ "$prepare_mode" = false ]; then
+    echo "GitHub User:    $GITHUB_USER"
+    echo "GitLab Domain:  $GITLAB_DOMAIN"
+    echo "GitHub Domain:  $GITHUB_DOMAIN"
+    # -gitlab-project with -github-repo can replace -projects-csv, so the CSV file is shown only
+    # when -projects-csv is passed, with the value that is passed
+    if [ "$projects_csv_passed" = true ]; then
+        echo "Projects CSV:   $projects_csv_value"
+    fi
+fi
 echo "Log Directory:  ${LOG_DIRECTORY:-(default: ./logs)}"
 echo "Log Level:      $LOG_LEVEL"
 echo ""
-# Print each flag with its value on one line, taken from the real arguments
 echo "Arguments:"
-line=""
-for arg in "${arguments[@]}"; do
-    if [[ "$arg" == -[[:lower:]]* && -n "$line" ]]; then
-        echo "  $line"
-        line=""
-    fi
-    line="${line:+$line }$arg"
-done
-if [ -n "$line" ]; then
+for line in "${argument_lines[@]}"; do
     echo "  $line"
-fi
+done
 echo ""
 echo -e "\033[33mPress Ctrl+C to cancel...\033[0m"
 echo ""
