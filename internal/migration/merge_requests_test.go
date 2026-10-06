@@ -730,11 +730,16 @@ type searchGitHub struct {
 	prs       map[int]*gogithub.PullRequest
 	branches  []*gogithub.Branch
 	requested []int
+	// onBranches, when it is not nil, is called when the branches are listed.
+	onBranches func()
 }
 
 func (f *searchGitHub) GetBranches(context.Context, string, string) ([]*gogithub.Branch, error) {
 	if f.branches == nil {
 		return nil, errors.New("GetBranches is not expected in this test")
+	}
+	if f.onBranches != nil {
+		f.onBranches()
 	}
 	return f.branches, nil
 }
@@ -1516,6 +1521,69 @@ func TestMigrateMergeRequest_StoppedWhileCommentsAreListedIsPartial(t *testing.T
 			}
 		})
 	}
+}
+
+func TestMigrateMergeRequest_StoppedWhileTemporaryBranchesAreDeletedIsPartial(t *testing.T) {
+	// The run is stopped while the deferred cleanup lists the branches on
+	// GitHub, after the pull request and its comments are done. The temporary
+	// branches stay, so the result must not be a success: with -state-dir a
+	// success is never migrated again, and no later run would delete them. The
+	// stop is no error, so nothing is logged as an error or a warning.
+	for _, pullRequestsOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pull requests only %t", pullRequestsOnly), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			branches := []string{"main", "migration-source-3/feature", "migration-target-3/main"}
+			var remoteDir string
+			logs, result, err := runFoundPullRequest(t, ctx, nil, nil, func(p *project, ghMux *http.ServeMux) {
+				p.m.cfg.PullRequestsOnly = pullRequestsOnly
+				p.repo, remoteDir = repoWithGitHubRemote(t, branches...)
+				p.m.ghClient.(*searchGitHub).onBranches = cancel
+				ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("deletion of %s requested, want none after the run was stopped", r.PathValue("ref"))
+					w.WriteHeader(http.StatusNoContent)
+				})
+			})
+			if err != nil {
+				t.Fatalf("migrateMergeRequest: %v", err)
+			}
+			if result.Status != StatusPartial || result.Error == "" {
+				t.Errorf("result status = %q, error = %q, want %q with an error", result.Status, result.Error, StatusPartial)
+			}
+			wantNoErrorOrWarning(t, logs)
+			if got := remoteBranches(t, remoteDir); !slices.Equal(got, branches) {
+				t.Errorf("remote branches after the migration = %v, want %v", got, branches)
+			}
+		})
+	}
+}
+
+func TestMigrateMergeRequest_StoppedWhileTemporaryBranchIsDeletedViaAPIIsPartial(t *testing.T) {
+	// With -pull-requests-only the run is stopped during the DeleteRef call of
+	// the first temporary branch. The second one is not tried, the stop logs no
+	// error or warning, and the result is partial, so the next run deletes the
+	// branch that stays.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var deletions atomic.Int32
+	logs, result, err := runFoundPullRequest(t, ctx, nil, nil, func(p *project, ghMux *http.ServeMux) {
+		p.m.cfg.PullRequestsOnly = true
+		ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+			deletions.Add(1)
+			cancel()
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusPartial || result.Error == "" {
+		t.Errorf("result status = %q, error = %q, want %q with an error", result.Status, result.Error, StatusPartial)
+	}
+	if got := deletions.Load(); got != 1 {
+		t.Errorf("DeleteRef calls = %d, want 1: the run was stopped during the first", got)
+	}
+	wantNoErrorOrWarning(t, logs)
 }
 
 func TestMigrateMergeRequest_FoundPullRequestWithoutListedTemporaryBranches(t *testing.T) {

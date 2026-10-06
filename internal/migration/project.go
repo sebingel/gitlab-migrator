@@ -740,7 +740,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 	return results, interrupted
 }
 
-func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (MergeRequestResult, error) {
+func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitlab.BasicMergeRequest) (finalResult MergeRequestResult, finalErr error) {
 	result := MergeRequestResult{
 		GitLabMRID:    mergeRequest.IID,
 		GitLabMRTitle: mergeRequest.Title,
@@ -866,12 +866,24 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		// never had temporary branches. The list is read once per repository and
 		// then cached, so it can miss the branches that this run created: a pull
 		// request that this run created does not use it.
+		//
+		// When the run is stopped before the branches are deleted, they stay. A
+		// success is never migrated again with -state-dir, so a success becomes
+		// partial: the next run migrates the merge request again and deletes the
+		// branches then. The defer changes the named result for that, because it
+		// runs after the return statement.
 		foundPullRequest := pullRequest != nil
 		defer func() {
 			if keepTempBranches() {
 				return
 			}
-			p.deleteTempBranches(ctx, pullRequest.GetNumber(), foundPullRequest, sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
+			stopped := p.deleteTempBranches(ctx, pullRequest.GetNumber(), foundPullRequest, sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
+			if stopped && finalErr == nil && (finalResult.Status == StatusSuccess || finalResult.Status == StatusPartial) {
+				finalResult.Status = StatusPartial
+				if finalResult.Error == "" {
+					finalResult.Error = "the run was stopped before the temporary branches were deleted"
+				}
+			}
 		}()
 	}
 
@@ -1205,17 +1217,11 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		p.migrateComments(ctx, pullRequest, comments, prComments, &result)
 	}
 
-	switch {
-	case ctx.Err() != nil && !strings.EqualFold(mergeRequest.State, "opened"):
-		// The deferred cleanup keeps the temporary branches because the run
-		// was stopped. A success is never migrated again with -state-dir, so
-		// the result is partial: the next run migrates the merge request again
-		// and deletes the branches then.
+	// A run that was stopped by now keeps the temporary branches of a closed
+	// merge request: the deferred cleanup makes the result partial then.
+	if result.FailedComments > 0 {
 		result.Status = StatusPartial
-		result.Error = "the run was stopped before the temporary branches were deleted"
-	case result.FailedComments > 0:
-		result.Status = StatusPartial
-	default:
+	} else {
 		result.Status = StatusSuccess
 	}
 
@@ -1623,31 +1629,40 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 // onlyListed it deletes only the branches that the cached branch list of the
 // GitHub repository has. A branch that does not exist is not an error, for
 // example when a run before deleted it already. A failure is only logged: the
-// branches stay and do no harm. When the run was stopped, nothing is tried: no
-// request can work with the cancelled ctx. The next run that migrates the merge
-// request again finds the pull request and deletes the branches then: a
-// stopped run that still finishes the merge request records it as partial, so
-// -state-dir does not skip it.
-func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) {
-	if ctx.Err() != nil {
+// branches stay and do no harm. When the run was stopped, nothing more is
+// tried, and the stop is not logged as an error: no request can work with the
+// cancelled ctx. Then deleteTempBranches returns true. The next run that
+// migrates the merge request again finds the pull request and deletes the
+// branches then: a stopped run that still finishes the merge request records
+// it as partial, so -state-dir does not skip it.
+func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) (stopped bool) {
+	keep := func() bool {
 		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
-		return
+		return true
+	}
+	if ctx.Err() != nil {
+		return keep()
 	}
 
 	if onlyListed {
 		branches = p.listedBranches(ctx, branches)
+		if ctx.Err() != nil {
+			return keep()
+		}
 		if len(branches) == 0 {
 			p.log.Trace("temporary branches for closed pull request are not on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber)
-			return
+			return false
 		}
 	}
 
 	if p.m.cfg.PullRequestsOnly {
 		p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
 		for _, branch := range branches {
-			p.deleteTempBranchViaAPI(ctx, branch)
+			if ctx.Err() != nil || p.deleteTempBranchViaAPI(ctx, branch) {
+				return keep()
+			}
 		}
-		return
+		return false
 	}
 
 	p.log.Debug("deleting temporary branches for closed pull request", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
@@ -1663,24 +1678,30 @@ func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyList
 		Force:      true,
 	}
 	sideband, err := p.pushWithSideband(ctx, cleanupOpts)
-	if err != nil {
-		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
-		} else {
-			p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
-		}
+	switch {
+	case err == nil:
+	case errors.Is(err, git.NoErrAlreadyUpToDate):
+		p.log.Trace("branches already deleted on GitHub", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
+	case ctx.Err() != nil:
+		return keep()
+	default:
+		p.log.Error(formatPushError("pushing branch deletions to github", "", err, sideband).Error())
 	}
+	return false
 }
 
 // listedBranches returns the names that the cached branch list of the GitHub
 // repository has. The list can be older than a deletion, for example of the
 // trim of -trim-branches-on-github: such a branch is returned, and its deletion
 // finds nothing. When the list cannot be read, listedBranches logs a warning and
-// returns all names, so their deletion is still tried.
+// returns all names, so their deletion is still tried. When the run was stopped,
+// it logs no warning: the caller checks ctx.
 func (p *project) listedBranches(ctx context.Context, names []string) []string {
 	githubBranches, err := p.m.ghClient.GetBranches(ctx, p.githubPath[0], p.githubPath[1])
 	if err != nil {
-		p.log.Warn("listing the branches on GitHub failed, trying to delete the temporary branches anyway", "owner", p.githubPath[0], "repo", p.githubPath[1], "branches", names, "error", err)
+		if ctx.Err() == nil {
+			p.log.Warn("listing the branches on GitHub failed, trying to delete the temporary branches anyway", "owner", p.githubPath[0], "repo", p.githubPath[1], "branches", names, "error", err)
+		}
 		return names
 	}
 	listed := make([]string, 0, len(names))
@@ -1694,16 +1715,20 @@ func (p *project) listedBranches(ctx context.Context, names []string) []string {
 
 // deleteTempBranchViaAPI deletes the temporary branch on GitHub. A branch that
 // does not exist is not an error. Another failure is only logged: the branch
-// stays and does no harm.
-func (p *project) deleteTempBranchViaAPI(ctx context.Context, branch string) {
+// stays and does no harm. When the run was stopped, the failure is not logged
+// and deleteTempBranchViaAPI returns true.
+func (p *project) deleteTempBranchViaAPI(ctx context.Context, branch string) (stopped bool) {
 	_, err := p.m.gh.Git.DeleteRef(ctx, p.githubPath[0], p.githubPath[1], "refs/heads/"+branch)
 	switch {
 	case err == nil:
 	case isGitHubNotFound(err) || isReferenceDoesNotExistError(err):
 		p.log.Trace("temporary branch already deleted on GitHub", "branch", branch)
+	case ctx.Err() != nil:
+		return true
 	default:
 		p.log.Warn("failed to delete temporary branch via API", "branch", branch, "error", err)
 	}
+	return false
 }
 
 // githubMention returns fallback when the GitLab user has no website set. Otherwise it
