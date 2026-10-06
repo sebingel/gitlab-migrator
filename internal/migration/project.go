@@ -891,7 +891,10 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 					finalResult.Error = stoppedError
 				}
 			case StatusSkipped:
+				// The report shows a skip reason before the error, so the
+				// old reason would hide the stop.
 				finalResult.Status = StatusFailed
+				finalResult.SkipReason = ""
 				finalResult.Error = stoppedError
 			}
 		}()

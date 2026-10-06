@@ -1043,6 +1043,11 @@ func TestMigrateMergeRequest_StoppedWhileNoCommitsBetweenBranchesAreDeletedIsNot
 	if result.Status != StatusFailed || result.Error == "" {
 		t.Errorf("result status = %q, error = %q, want %q with an error", result.Status, result.Error, StatusFailed)
 	}
+	// The Markdown report shows the skip reason before the error, so the old
+	// "no new commits" reason would hide the stop.
+	if result.SkipReason != "" {
+		t.Errorf("result skip reason = %q, want none: the merge request is no longer skipped", result.SkipReason)
+	}
 	if len(deleted) != 1 {
 		t.Errorf("deleted branches = %v, want one: the run was stopped during the first deletion", deleted)
 	}
