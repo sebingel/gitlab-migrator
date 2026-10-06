@@ -58,3 +58,41 @@ func TestLoadConfig_InvalidMergeRequestsMaxAgeNamesTheFlag(t *testing.T) {
 		t.Errorf("error %q does not name the -merge-requests-max-age flag", err)
 	}
 }
+
+// A negative value is read like any integer by loadConfig, from the flag and
+// from the file; Validate, which main runs next, rejects it.
+func TestLoadConfig_NegativeMergeRequestsMaxAgeFailsValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		raw  string
+	}{
+		{name: "flag", raw: "-5"},
+		{name: "config file", path: writeConfigFile(t, `{"merge_requests_max_age": -5}`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				GithubRepo:     "org/repo",
+				GitlabProject:  "group/project",
+				StorageType:    "memory",
+				RepoVisibility: "private",
+				PushBatchSize:  1,
+				MaxConcurrency: 4,
+			}
+
+			if err := loadConfig(cfg, tt.path, tt.raw); err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate returned no error for a negative -merge-requests-max-age")
+			}
+			if !strings.Contains(err.Error(), "-merge-requests-max-age") {
+				t.Errorf("error %q does not name the -merge-requests-max-age flag", err)
+			}
+		})
+	}
+}

@@ -406,7 +406,7 @@ func (p *project) mirrorRepository(ctx context.Context, repoExists bool, githubD
 		AllowUpdateBranch: Pointer(true),
 	}
 	if _, _, err = p.m.gh.Repositories.Edit(ctx, p.githubPath[0], p.githubPath[1], &updateRepo); err != nil {
-		return fmt.Errorf("updating github repo: %w", err)
+		return p.addArchivedHint(fmt.Errorf("updating github repo: %w", err))
 	}
 
 	cloneUrl.User = url.UserPassword("oauth2", p.m.cfg.GitlabToken)
@@ -672,6 +672,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 				// The state file is not changed for a failure here: it keeps
 				// the saved result, so the next run tries the base again.
 				if err := p.retargetSavedPullRequest(ctx, mergeRequest, prev.GitHubPRNum); err != nil {
+					err = p.addArchivedHint(err)
 					p.log.Error("changing base branch of migrated pull request", "merge_request_id", mergeRequest.IID, "error", err)
 					mrResult.Status = StatusFailed
 					mrResult.Error = err.Error()
@@ -696,6 +697,7 @@ func (p *project) migrateMergeRequests(ctx context.Context) ([]MergeRequestResul
 
 		mrResult, err := p.migrateMergeRequest(ctx, mergeRequest)
 		if err != nil {
+			err = p.addArchivedHint(err)
 			p.log.Error("migrating merge request", "merge_request_id", mergeRequest.IID, "error", err)
 			mrResult.Status = StatusFailed
 			mrResult.Error = err.Error()
@@ -1321,6 +1323,7 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 				p.log.Debug("updating pull request comment", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", existingComment.GetID())
 				existingComment.Body = &commentBody
 				if _, _, err = p.m.gh.Issues.EditComment(ctx, p.githubPath[0], p.githubPath[1], existingComment.GetID(), existingComment); err != nil {
+					err = p.addArchivedHint(err)
 					commentResult.Status = StatusFailed
 					commentResult.Error = fmt.Sprintf("updating comment: %v", err)
 					result.Comments = append(result.Comments, commentResult)
@@ -1341,6 +1344,7 @@ func (p *project) migrateComments(ctx context.Context, pullRequest *gogithub.Pul
 			}
 			createdComment, _, err := p.m.gh.Issues.CreateComment(ctx, p.githubPath[0], p.githubPath[1], pullRequest.GetNumber(), &newComment)
 			if err != nil {
+				err = p.addArchivedHint(err)
 				commentResult.Status = StatusFailed
 				commentResult.Error = fmt.Sprintf("creating comment: %v", err)
 				result.Comments = append(result.Comments, commentResult)
@@ -2037,6 +2041,30 @@ func containsSearchSyntaxHint(msg string) bool {
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "search is invalid") ||
 		(strings.Contains(lower, "search query") && strings.Contains(lower, "invalid syntax"))
+}
+
+// archivedRepoHint is added to the error of a write to an archived GitHub
+// repository when -unarchive-archived-repos is not set.
+const archivedRepoHint = "the repository is archived; use -unarchive-archived-repos to unarchive it for the migration"
+
+// addArchivedHint adds archivedRepoHint to err when err comes from a write to
+// an archived repository and -unarchive-archived-repos is not set. Any other
+// err is returned as it is.
+func (p *project) addArchivedHint(err error) error {
+	if isArchivedRepoError(err) && !p.m.cfg.UnarchiveArchivedRepos {
+		return fmt.Errorf("%w (%s)", err, archivedRepoHint)
+	}
+	return err
+}
+
+// isArchivedRepoError reports whether err is the 403 that GitHub answers to a
+// write to an archived repository ("Repository was archived so is read-only").
+func isArchivedRepoError(err error) bool {
+	var ghErr *gogithub.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr == nil || ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	return strings.Contains(strings.ToLower(ghErr.Message), "archived")
 }
 
 func isGitHubNotFound(err error) bool {

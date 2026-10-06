@@ -35,12 +35,29 @@ type commentServer struct {
 
 	// failEdit makes every edit of a comment answer with an error.
 	failEdit bool
+
+	// archived makes every write answer like GitHub does for an archived
+	// repository: 403 "Repository was archived so is read-only."
+	archived bool
+}
+
+func writeArchivedError(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	if _, err := fmt.Fprint(w, `{"message":"Repository was archived so is read-only."}`); err != nil {
+		t.Errorf("writing the error: %v", err)
+	}
 }
 
 func newCommentProject(t *testing.T, cs *commentServer) *project {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /repos/owner/repo/issues/7/comments", func(w http.ResponseWriter, r *http.Request) {
+		if cs.archived {
+			writeArchivedError(t, w)
+			return
+		}
 		var c gogithub.IssueComment
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 			t.Errorf("decoding the created comment: %v", err)
@@ -63,6 +80,10 @@ func newCommentProject(t *testing.T, cs *commentServer) *project {
 		cs.mu.Lock()
 		cs.edited = append(cs.edited, id)
 		cs.mu.Unlock()
+		if cs.archived {
+			writeArchivedError(t, w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if cs.failEdit {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -159,6 +180,50 @@ func TestMigrateComments_FailedUpdateIsReportedOnce(t *testing.T) {
 	}
 	if len(cs.created) != 0 {
 		t.Errorf("created comments = %d, want none: the comment exists", len(cs.created))
+	}
+}
+
+func TestMigrateComments_ArchivedRepoErrorNamesUnarchiveFlag(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing []*gogithub.IssueComment
+		wantText string
+	}{
+		{"create", nil, "creating comment"},
+		{"update", []*gogithub.IssueComment{migratedComment(500, 12)}, "updating comment"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newCommentProject(t, &commentServer{archived: true})
+			var result MergeRequestResult
+
+			p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+				[]*gogitlab.Note{gitLabNote(12, "new text")}, tc.existing, &result)
+
+			if len(result.Comments) != 1 || result.Comments[0].Status != StatusFailed {
+				t.Fatalf("comment results = %+v, want one failed entry", result.Comments)
+			}
+			got := result.Comments[0].Error
+			if !strings.Contains(got, tc.wantText) || !strings.Contains(got, "403") {
+				t.Errorf("error %q lost the original error", got)
+			}
+			if !strings.Contains(got, archivedHint) {
+				t.Errorf("error %q does not contain the hint %q", got, archivedHint)
+			}
+		})
+	}
+}
+
+func TestMigrateComments_ArchivedRepoErrorGetsNoHintWhenFlagIsSet(t *testing.T) {
+	p := newCommentProject(t, &commentServer{archived: true})
+	p.m.cfg.UnarchiveArchivedRepos = true
+	var result MergeRequestResult
+
+	p.migrateComments(context.Background(), &gogithub.PullRequest{Number: Pointer(7)},
+		[]*gogitlab.Note{gitLabNote(12, "new text")}, nil, &result)
+
+	if len(result.Comments) != 1 || strings.Contains(result.Comments[0].Error, "-unarchive-archived-repos") {
+		t.Errorf("comment results = %+v, want a failed entry without the hint", result.Comments)
 	}
 }
 

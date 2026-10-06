@@ -177,7 +177,7 @@ func main() {
 	flag.StringVar(&cfg.GitlabDomain, "gitlab-domain", config.DefaultGitlabDomain, "specifies the GitLab domain to use")
 	flag.StringVar(&cfg.GitlabProject, "gitlab-project", "", "the GitLab project to migrate")
 	flag.StringVar(&cfg.ProjectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-repo)")
-	flag.StringVar(&mergeRequestsAgeRaw, "merge-requests-max-age", "", "optional maximum age in days of merge requests to migrate")
+	flag.StringVar(&mergeRequestsAgeRaw, "merge-requests-max-age", "", "optional maximum age in days of merge requests to migrate (must not be negative, 0 means no limit)")
 	flag.StringVar(&cfg.RenameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
 	flag.StringVar(&cfg.LogOutput, "log-output", "", "comma-separated log targets: console, file, or console,file (default: console)")
 	flag.StringVar(&cfg.LogDirectory, "log-directory", "", "directory for session log files (defaults to ./logs in executable directory)")
