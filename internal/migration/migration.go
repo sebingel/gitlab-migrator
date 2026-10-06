@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -275,7 +276,9 @@ type failedReport struct {
 // reported is listed with its error, and is not counted with 0 merge requests.
 // When ctx is canceled, no further project is started, like in
 // PerformMigration: the report then shows the projects done so far, and a
-// project that the cancel stopped counts as failed.
+// project that the cancel stopped counts as failed. Unlike PerformMigration,
+// projects that were not started also make the report return an error, because
+// the summary has no project count that would show the gap.
 func (m *Migrator) writeReport(ctx context.Context, w io.Writer, projects []CSVRow) error {
 	m.logger.Debug("building report")
 
@@ -307,11 +310,25 @@ func (m *Migrator) writeReport(ctx context.Context, w io.Writer, projects []CSVR
 		fmt.Fprintf(&b, "%s/%s: %d merge requests\n", result.GroupName, result.ProjectName, result.MergeRequestsCount)
 	}
 
+	// Projects after a cancel are not started, so they are neither reported
+	// nor failed.
+	notStarted := len(projects) - len(results) - len(failed)
+
+	var without []string
+	if len(failed) > 0 {
+		without = append(without, fmt.Sprintf("the %d project(s) that could not be reported", len(failed)))
+	}
+	if notStarted > 0 {
+		without = append(without, fmt.Sprintf("the %d project(s) not started after the cancel", notStarted))
+	}
+
 	b.WriteString("\n")
-	if len(failed) == 0 {
-		fmt.Fprintf(&b, "Total merge requests: %d\n", totalMergeRequests)
-	} else {
-		fmt.Fprintf(&b, "Total merge requests: %d (without the %d project(s) that could not be reported)\n", totalMergeRequests, len(failed))
+	fmt.Fprintf(&b, "Total merge requests: %d", totalMergeRequests)
+	if len(without) > 0 {
+		fmt.Fprintf(&b, " (without %s)", strings.Join(without, " and "))
+	}
+	b.WriteString("\n")
+	if len(failed) > 0 {
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "Projects that could not be reported (%d):\n", len(failed))
 		for _, f := range failed {
@@ -324,8 +341,15 @@ func (m *Migrator) writeReport(ctx context.Context, w io.Writer, projects []CSVR
 		return fmt.Errorf("writing report: %w", err)
 	}
 
+	var problems []string
 	if len(failed) > 0 {
-		return fmt.Errorf("could not report %d of %d project(s)", len(failed), len(projects))
+		problems = append(problems, fmt.Sprintf("could not report %d of %d project(s)", len(failed), len(projects)))
+	}
+	if notStarted > 0 {
+		problems = append(problems, fmt.Sprintf("report canceled, %d of %d project(s) not started", notStarted, len(projects)))
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
 }

@@ -343,3 +343,36 @@ func TestWriteReport_StopsWhenCanceledAndCountsTheStoppedProject(t *testing.T) {
 		t.Errorf("output does not list the stopped project:\n%s", got)
 	}
 }
+
+// TestWriteReport_CancelBeforeAProjectStartsIsNotAFullReport cancels the
+// report before any project starts, so no project fails. The report must
+// still say that projects were not started and return an error: else it
+// looks like a complete report and the tool exits with code 0.
+func TestWriteReport_CancelBeforeAProjectStartsIsNotAFullReport(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var requests atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+	})
+	p := newGitLabTestProject(t, mux)
+
+	projects := []CSVRow{
+		{"group/first", "owner/first"},
+		{"group/second", "owner/second"},
+	}
+
+	var out bytes.Buffer
+	err := p.m.writeReport(ctx, &out, projects)
+	if err == nil || !strings.Contains(err.Error(), "2 of 2 project(s) not started") {
+		t.Errorf("error = %v, want one that names 2 of 2 projects not started", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("GitLab got %d project requests, want 0 after the cancel", n)
+	}
+	if got := out.String(); !strings.Contains(got, "(without the 2 project(s) not started after the cancel)") {
+		t.Errorf("output does not say that projects were not started:\n%s", got)
+	}
+}
