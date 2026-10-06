@@ -1068,8 +1068,32 @@ func TestMigrateMergeRequest_NoCommitsBetweenDeletesPushedTemporaryBranches(t *t
 // pull request after the migration.
 func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRequest) ([]map[string]any, gogithub.PullRequest) {
 	t.Helper()
+	p, edits, current := existingPullRequestProject(t, mrState, pr, 0, "")
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "master",
+	})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSuccess {
+		t.Fatalf("status = %q, want %q", result.Status, StatusSuccess)
+	}
+	return *edits, *current
+}
+
+// existingPullRequestProject sets up the project of migrateExistingPullRequest
+// without running the migration. editStatus is the status the test server
+// answers an edit of pull request 5 with, with editMessage as the message of
+// the error; 0 means that the edit works. It returns the project, the edits
+// (filled while the migration runs) and the pull request (changed by the edits).
+func existingPullRequestProject(t *testing.T, mrState string, pr gogithub.PullRequest, editStatus int, editMessage string) (*project, *[]map[string]any, *gogithub.PullRequest) {
+	t.Helper()
 	mux := http.NewServeMux()
 	var calls atomic.Int32
+	servePages(t, mux, "/api/v4/projects/1/merge_requests", []*gogitlab.BasicMergeRequest{
+		{IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "master"},
+	}, &calls)
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
 	p := newGitLabTestProject(t, mux)
@@ -1106,6 +1130,14 @@ func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRe
 			t.Errorf("decoding the edit of the pull request: %v", err)
 		}
 		edits = append(edits, edit)
+		if editStatus != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(editStatus)
+			if _, err := fmt.Fprintf(w, `{"message":%q}`, editMessage); err != nil {
+				t.Errorf("writing the error of the edit: %v", err)
+			}
+			return
+		}
 		if v, ok := edit["state"].(string); ok {
 			pr.State = Pointer(v)
 		}
@@ -1130,17 +1162,7 @@ func migrateExistingPullRequest(t *testing.T, mrState string, pr gogithub.PullRe
 		}
 	})
 	useGitHubMux(t, p, ghMux)
-
-	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
-		IID: 3, Title: "some work", State: mrState, SourceBranch: "feature", TargetBranch: "master",
-	})
-	if err != nil {
-		t.Fatalf("migrateMergeRequest: %v", err)
-	}
-	if result.Status != StatusSuccess {
-		t.Fatalf("status = %q, want %q", result.Status, StatusSuccess)
-	}
-	return edits, pr
+	return p, &edits, &pr
 }
 
 // openPullRequest returns pull request 5 as open with base branch base, with
@@ -1286,7 +1308,11 @@ func resumeWithSavedSuccess(t *testing.T, mrState, targetBranch, githubTrunk str
 		edits = append(edits, edit)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(editStatus)
-		if _, err := fmt.Fprint(w, `{"number":5}`); err != nil {
+		body := `{"number":5}`
+		if editStatus == http.StatusForbidden {
+			body = `{"message":"Repository was archived so is read-only."}`
+		}
+		if _, err := fmt.Fprint(w, body); err != nil {
 			t.Errorf("writing the edited pull request: %v", err)
 		}
 	})
@@ -1401,6 +1427,33 @@ func TestMigrateMergeRequests_SavedSuccessGetsRenamedTrunkAsBase(t *testing.T) {
 			t.Errorf("results = %+v, want MR !3 failed at the base change", results)
 		}
 		wantSavedSuccess(t, saved)
+	})
+}
+
+func TestMigrateMergeRequests_ArchivedRepoErrorNamesUnarchiveFlag(t *testing.T) {
+	t.Run("base change of a saved pull request", func(t *testing.T) {
+		results, _, _, _ := resumeWithSavedSuccess(t, "opened", "master", "main", openPullRequest("master"), http.StatusForbidden, false)
+		if len(results) != 1 || results[0].Status != StatusFailed {
+			t.Fatalf("results = %+v, want MR !3 failed", results)
+		}
+		if !strings.Contains(results[0].Error, "changing base branch") || !strings.Contains(results[0].Error, archivedHint) {
+			t.Errorf("error %q, want the base change error with the hint %q", results[0].Error, archivedHint)
+		}
+	})
+
+	t.Run("edit of an existing pull request", func(t *testing.T) {
+		p, _, _ := existingPullRequestProject(t, "opened", openPullRequest("master"), http.StatusForbidden, "Repository was archived so is read-only.")
+
+		results, err := p.migrateMergeRequests(context.Background())
+		if err != nil {
+			t.Fatalf("migrateMergeRequests: %v", err)
+		}
+		if len(results) != 1 || results[0].Status != StatusFailed {
+			t.Fatalf("results = %+v, want MR !3 failed", results)
+		}
+		if !strings.Contains(results[0].Error, "403") || !strings.Contains(results[0].Error, archivedHint) {
+			t.Errorf("error %q, want the 403 and the hint %q", results[0].Error, archivedHint)
+		}
 	})
 }
 
