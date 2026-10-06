@@ -1606,8 +1606,15 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 // prNumber exists: with -pull-requests-only by API, else by a push to the
 // remote "github" of the local clone. A branch that does not exist is not an
 // error, for example when a run before deleted it already. A failure is only
-// logged: the branches stay and do no harm.
+// logged: the branches stay and do no harm. When the run was stopped, nothing
+// is tried: no request can work with the cancelled ctx, and the next run finds
+// the pull request and deletes the branches then.
 func (p *project) deleteTempBranches(ctx context.Context, prNumber int, sourceBranch, targetBranch string) {
+	if ctx.Err() != nil {
+		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
+		return
+	}
+
 	if p.m.cfg.PullRequestsOnly {
 		p.log.Debug("deleting temporary branches for closed pull request via API", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "source_branch", sourceBranch, "target_branch", targetBranch)
 		p.deleteTempBranchViaAPI(ctx, sourceBranch)

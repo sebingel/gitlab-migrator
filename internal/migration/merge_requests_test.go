@@ -1271,10 +1271,36 @@ func repoWithGitHubRemote(t *testing.T, branches ...string) (*git.Repository, st
 // log of the migration.
 func resumeFoundPullRequest(t *testing.T, setup func(p *project, ghMux *http.ServeMux)) string {
 	t.Helper()
+	logs, result, err := runFoundPullRequest(t, context.Background(), nil, setup)
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSuccess || result.GitHubPRNumber == nil || *result.GitHubPRNumber != 5 {
+		t.Fatalf("result = %+v, want pull request 5 migrated", result)
+	}
+	return logs
+}
+
+// runFoundPullRequest runs the migration of resumeFoundPullRequest with ctx.
+// The GitLab test server calls onNotes, when it is not nil, when the notes of
+// MR !3 are listed. It returns the log, the result and the error of the
+// migration.
+func runFoundPullRequest(t *testing.T, ctx context.Context, onNotes func(), setup func(p *project, ghMux *http.ServeMux)) (string, MergeRequestResult, error) {
+	t.Helper()
 	mux := http.NewServeMux()
 	var calls atomic.Int32
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
-	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
+	if onNotes == nil {
+		servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
+	} else {
+		mux.HandleFunc("GET /api/v4/projects/1/merge_requests/3/notes", func(w http.ResponseWriter, r *http.Request) {
+			onNotes()
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := fmt.Fprint(w, `[]`); err != nil {
+				t.Errorf("writing the notes: %v", err)
+			}
+		})
+	}
 	p := newGitLabTestProject(t, mux)
 	var logs strings.Builder
 	p.log = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace})
@@ -1310,16 +1336,10 @@ func resumeFoundPullRequest(t *testing.T, setup func(p *project, ghMux *http.Ser
 	setup(p, ghMux)
 	useGitHubMux(t, p, ghMux)
 
-	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+	result, err := p.migrateMergeRequest(ctx, &gogitlab.BasicMergeRequest{
 		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
 	})
-	if err != nil {
-		t.Fatalf("migrateMergeRequest: %v", err)
-	}
-	if result.Status != StatusSuccess || result.GitHubPRNumber == nil || *result.GitHubPRNumber != 5 {
-		t.Fatalf("result = %+v, want pull request 5 migrated", result)
-	}
-	return logs.String()
+	return logs.String(), result, err
 }
 
 func TestMigrateMergeRequest_FoundPullRequestDeletesPushedTemporaryBranches(t *testing.T) {
@@ -1332,6 +1352,39 @@ func TestMigrateMergeRequest_FoundPullRequestDeletesPushedTemporaryBranches(t *t
 	})
 	if got, want := remoteBranches(t, remoteDir), []string{"main"}; !slices.Equal(got, want) {
 		t.Errorf("remote branches after the migration = %v, want %v", got, want)
+	}
+}
+
+func TestMigrateMergeRequest_InterruptedFoundPullRequestKeepsTemporaryBranches(t *testing.T) {
+	// The run is stopped while it lists the notes of MR !3, after it updated
+	// the found pull request. The deletion of the temporary branches cannot
+	// work with the cancelled context, so it is not tried and logs no error or
+	// warning. The next run deletes them.
+	for _, pullRequestsOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pull requests only %t", pullRequestsOnly), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			branches := []string{"main", "migration-source-3/feature", "migration-target-3/main"}
+			var remoteDir string
+			logs, _, err := runFoundPullRequest(t, ctx, cancel, func(p *project, ghMux *http.ServeMux) {
+				p.m.cfg.PullRequestsOnly = pullRequestsOnly
+				p.repo, remoteDir = repoWithGitHubRemote(t, branches...)
+				ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("deletion of %s requested, want none after the run was stopped", r.PathValue("ref"))
+					w.WriteHeader(http.StatusNoContent)
+				})
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("migrateMergeRequest error = %v, want %v", err, context.Canceled)
+			}
+			wantNoErrorOrWarning(t, logs)
+			if !strings.Contains(logs, "keeping temporary branches for closed pull request because the run was stopped") {
+				t.Errorf("log = %q, want the kept temporary branches", logs)
+			}
+			if got := remoteBranches(t, remoteDir); !slices.Equal(got, branches) {
+				t.Errorf("remote branches after the migration = %v, want %v", got, branches)
+			}
+		})
 	}
 }
 
