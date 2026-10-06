@@ -934,16 +934,26 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				return result, nil
 			}
 		} else {
+			startHash := plumbing.NewHash(mergeRequestCommits[0].ID)
+			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
+			fetchErr := p.fetchMissingCommits(ctx, mergeRequest.IID, endHash, startHash)
+			if fetchErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(fetchErr, ctxErr) {
+					return result, fmt.Errorf("fetching the commits of the merge request from GitLab: %w", fetchErr)
+				}
+				p.log.Warn("could not fetch the commits of the merge request that the clone does not have", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "error", fetchErr)
+			}
+
 			p.log.Trace("inspecting start commit", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
-			startCommit, err := object.GetCommit(p.repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
+			startCommit, err := object.GetCommit(p.repo.Storer, startHash)
 			if err != nil {
 				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as start commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[0].ShortID, "error", err)
 					result.Status = StatusSkipped
-					result.SkipReason = "start commit does not exist"
+					result.SkipReason = missingCommitSkipReason("start commit", err, fetchErr)
 					return result, nil
 				}
-				return result, fmt.Errorf("loading start commit %s: %w", mergeRequestCommits[0].ShortID, err)
+				return result, fmt.Errorf("loading start commit %s: %w%s", mergeRequestCommits[0].ShortID, err, missingCommitHint(err, fetchErr))
 			}
 
 			if startCommit.NumParents() == 0 {
@@ -977,17 +987,16 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 				}
 			}
 
-			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
 			p.log.Trace("creating source branch for merged/closed merge request", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
 
 			if _, err = object.GetCommit(p.repo.Storer, endHash); err != nil {
 				if p.m.cfg.SkipInvalidMergeRequests {
 					p.log.Info("skipping invalid merge request as end commit does not exist", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequest.IID, "missing_commit", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, "error", err)
 					result.Status = StatusSkipped
-					result.SkipReason = "end commit does not exist"
+					result.SkipReason = missingCommitSkipReason("end commit", err, fetchErr)
 					return result, nil
 				}
-				return result, fmt.Errorf("loading end commit %s: %w", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err)
+				return result, fmt.Errorf("loading end commit %s: %w%s", mergeRequestCommits[len(mergeRequestCommits)-1].ShortID, err, missingCommitHint(err, fetchErr))
 			}
 
 			if err = p.createLocalBranch(plumbing.NewBranchReferenceName(mergeRequest.SourceBranch), endHash); err != nil {
@@ -1423,6 +1432,76 @@ func (p *project) createLocalBranch(name plumbing.ReferenceName, hash plumbing.H
 		return err
 	}
 	return p.repo.Storer.SetReference(plumbing.NewHashReference(name, hash))
+}
+
+// fetchedCommitRefPrefix is the namespace of the local references that keep
+// the commits that fetchMissingCommits fetched. pushToGitHub pushes only
+// branches and tags, so these references never reach GitHub.
+const fetchedCommitRefPrefix = "refs/gitlab-migrator/fetched/"
+
+// fetchMissingCommits fetches the commits of hashes that the local clone does
+// not have from the remote "gitlab", by their SHA. The mirror clone has all
+// references that GitLab advertises, also refs/merge-requests/<iid>/head. But
+// the commits of a closed or merged merge request whose source branch was
+// deleted can be reachable only from references that GitLab hides, for
+// example refs/keep-around/..., and then the clone lacks them (issue #137). The
+// fetch works only when the server serves commits that it does not advertise
+// (uploadpack.allowAnySHA1InWant, or allowTipSHA1InWant for hidden refs);
+// otherwise it returns an error, and go-git returns
+// git.ErrExactSHA1NotSupported when the server does not offer it at all.
+//
+// The commits are fetched one by one, in the order of hashes, and a commit
+// that an earlier fetch brought as an ancestor is not fetched again. So the
+// caller passes the end commit first: its fetch brings the start commit too.
+// A server with only allowTipSHA1InWant serves the end commit, the tip of the
+// hidden ref, but would refuse a request that also names the start commit. A
+// fetched commit gets a reference under fetchedCommitRefPrefix.
+func (p *project) fetchMissingCommits(ctx context.Context, mergeRequestIID int64, hashes ...plumbing.Hash) error {
+	for _, hash := range hashes {
+		if _, err := p.repo.Storer.EncodedObject(plumbing.CommitObject, hash); err == nil {
+			continue
+		} else if !errors.Is(err, plumbing.ErrObjectNotFound) {
+			return fmt.Errorf("looking up commit %s: %w", hash, err)
+		}
+
+		p.log.Info("fetching a commit of the merge request that the clone does not have, its source branch was probably deleted", "name", p.gitlabPath[1], "group", p.gitlabPath[0], "project_id", p.project.ID, "merge_request_id", mergeRequestIID, "sha", hash)
+		err := p.repo.FetchContext(ctx, &git.FetchOptions{
+			RemoteName: "gitlab",
+			RefSpecs:   []gitconfig.RefSpec{gitconfig.RefSpec(fmt.Sprintf("+%[1]s:%[2]s%[1]s", hash, fetchedCommitRefPrefix))},
+			Tags:       git.NoTags,
+		})
+		if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+			return err
+		}
+	}
+	return nil
+}
+
+// missingCommitHint explains a failed lookup of a commit of a closed or merged
+// merge request. lookupErr is the error of the lookup, fetchErr the error of
+// fetchMissingCommits. It returns "" when the commit exists but cannot be read.
+func missingCommitHint(lookupErr, fetchErr error) string {
+	if !errors.Is(lookupErr, plumbing.ErrObjectNotFound) {
+		return ""
+	}
+	fetchResult := "fetching it from GitLab by its SHA did not get it"
+	if fetchErr != nil {
+		fetchResult = fmt.Sprintf("fetching it from GitLab by its SHA failed: %v", fetchErr)
+	}
+	return fmt.Sprintf(" (no ref that GitLab shows has the commit, for example because the source branch was deleted, and %s; use -skip-invalid-merge-requests to skip such merge requests)", fetchResult)
+}
+
+// missingCommitSkipReason is the skip reason for a commit of a closed or
+// merged merge request that the lookup did not find. name is "start commit"
+// or "end commit"; lookupErr and fetchErr are as for missingCommitHint.
+func missingCommitSkipReason(name string, lookupErr, fetchErr error) string {
+	if !errors.Is(lookupErr, plumbing.ErrObjectNotFound) {
+		return name + " does not exist"
+	}
+	if fetchErr != nil {
+		return fmt.Sprintf("%s is not in the clone and fetching it from GitLab failed: %v", name, fetchErr)
+	}
+	return name + " is not in the clone and fetching it from GitLab did not get it"
 }
 
 // editPullRequest edits a pull request and retries on 404. The result goes to a

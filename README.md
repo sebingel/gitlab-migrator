@@ -142,6 +142,8 @@ If you have a large number of merge requests, or projects with a long history sp
 
 Similarly, you can specify a maximum age for merge requests to migrate with the `-merge-requests-max-age` argument, which is useful for 'topping off' projects that are already migrated.
 
+The clone of a GitLab repository contains all refs that GitLab shows, also `refs/merge-requests/<iid>/head`. The commits of a closed or merged merge request whose source branch was deleted can still be missing, when GitLab keeps them only under refs that it hides. The tool then fetches the missing commits from GitLab by their SHA. This works only if the GitLab server allows to fetch commits that it does not show. If the fetch fails, the merge request fails with an error that names the cause, or it is skipped with `-skip-invalid-merge-requests`. The fetched commits are only used for the temporary branches of the merge request. No other new ref is pushed to GitHub.
+
 Use `-skip-open-merge-requests` to only migrate closed/merged MRs, skipping any that are still open.
 
 If the repository is already on GitHub and you only need to backfill pull requests (e.g. after a prior migration), use `-pull-requests-only`. This skips the git clone/push step entirely (the repo must already exist on GitHub) and only migrates closed/merged merge requests.
