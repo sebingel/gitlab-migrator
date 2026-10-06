@@ -1616,8 +1616,11 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 // GitHub repository has. A branch that does not exist is not an error, for
 // example when a run before deleted it already. A failure is only logged: the
 // branches stay and do no harm. When the run was stopped, nothing is tried: no
-// request can work with the cancelled ctx, and the next run finds the pull
-// request and deletes the branches then.
+// request can work with the cancelled ctx. The next run that migrates the merge
+// request again finds the pull request and deletes the branches then. With
+// -state-dir, a merge request that this run still recorded as a success (for
+// example when only the list of the pull request comments failed) is not
+// migrated again, so its branches stay.
 func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) {
 	if ctx.Err() != nil {
 		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
