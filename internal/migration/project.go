@@ -763,6 +763,9 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 	// merge request when its pull request exists, or when GitHub refused the
 	// pull request because the branches have no commits between them: then no
 	// pull request will ever use them. After other errors the branches stay.
+	// With -pull-requests-only, createTempBranchesViaAPI deletes the branches
+	// it created itself when it fails or skips the merge request, because the
+	// deferred cleanup is not registered then.
 	noCommitsBetween := false
 	keepTempBranches := func() bool {
 		return pullRequest == nil && !noCommitsBetween
@@ -1508,11 +1511,28 @@ func (p *project) retargetSavedPullRequest(ctx context.Context, mergeRequest *go
 	return nil
 }
 
-func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (bool, error) {
+// createTempBranchesViaAPI creates the temporary target and source branches of
+// the closed merge request mr on GitHub. It reports true when it skips the
+// merge request. When it skips the merge request or fails, it deletes the
+// branches that it created itself, because the caller only cleans up after a
+// success. A branch that already existed, for example from an earlier run, is
+// not deleted then: this call did not create it.
+func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest, commits []*gogitlab.Commit, result *MergeRequestResult) (skipped bool, err error) {
 	owner := p.githubPath[0]
 	repo := p.githubPath[1]
 	startShortID := commits[0].ShortID
 	endShortID := commits[len(commits)-1].ShortID
+
+	var created []string
+	defer func() {
+		if !skipped && err == nil {
+			return
+		}
+		for _, branch := range created {
+			p.log.Debug("deleting temporary branch via API as the merge request was not migrated", "owner", owner, "repo", repo, "merge_request_id", mr.IID, "branch", branch)
+			p.deleteTempBranchViaAPI(ctx, branch)
+		}
+	}()
 
 	// No retry on GetCommit: a 404 here means the commit genuinely does not exist on GitHub
 	// (e.g. force-pushed away), not an eventual-consistency delay. The mirror push completes
@@ -1549,7 +1569,9 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 		_, _, createErr := p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.TargetBranch, SHA: parentSHA})
 		return createErr
 	})
-	if err != nil {
+	if err == nil {
+		created = append(created, mr.TargetBranch)
+	} else {
 		if isAlreadyExistsError(err) {
 			p.log.Trace("temporary target branch already exists on GitHub", "branch", mr.TargetBranch)
 		} else if isReferenceUpdateFailedError(err) && p.m.cfg.SkipInvalidMergeRequests {
@@ -1583,7 +1605,9 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 		_, _, createErr := p.m.gh.Git.CreateRef(ctx, owner, repo, gogithub.CreateRef{Ref: "refs/heads/" + mr.SourceBranch, SHA: endSHA})
 		return createErr
 	})
-	if err != nil {
+	if err == nil {
+		created = append(created, mr.SourceBranch)
+	} else {
 		if isAlreadyExistsError(err) {
 			p.log.Trace("temporary source branch already exists on GitHub", "branch", mr.SourceBranch)
 		} else {
@@ -1597,13 +1621,15 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 }
 
 func (p *project) deleteTempBranchesViaAPI(ctx context.Context, mr *gogitlab.BasicMergeRequest) {
-	owner := p.githubPath[0]
-	repo := p.githubPath[1]
-	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.SourceBranch); err != nil {
-		p.log.Warn("failed to delete temporary source branch via API", "branch", mr.SourceBranch, "error", err)
-	}
-	if _, err := p.m.gh.Git.DeleteRef(ctx, owner, repo, "refs/heads/"+mr.TargetBranch); err != nil {
-		p.log.Warn("failed to delete temporary target branch via API", "branch", mr.TargetBranch, "error", err)
+	p.deleteTempBranchViaAPI(ctx, mr.SourceBranch)
+	p.deleteTempBranchViaAPI(ctx, mr.TargetBranch)
+}
+
+// deleteTempBranchViaAPI deletes the temporary branch on GitHub. A failure is
+// only logged: the branch stays and does no harm.
+func (p *project) deleteTempBranchViaAPI(ctx context.Context, branch string) {
+	if _, err := p.m.gh.Git.DeleteRef(ctx, p.githubPath[0], p.githubPath[1], "refs/heads/"+branch); err != nil {
+		p.log.Warn("failed to delete temporary branch via API", "branch", branch, "error", err)
 	}
 }
 

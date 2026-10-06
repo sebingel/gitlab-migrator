@@ -971,6 +971,142 @@ func TestMigrateMergeRequest_FailedPullRequestKeepsTemporaryBranchesViaAPI(t *te
 	}
 }
 
+// tempBranchFailure says how GitHub fails while the temporary branches of
+// MR !3 are created by API. A status of 0 means the call succeeds.
+type tempBranchFailure struct {
+	skipInvalid     bool // -skip-invalid-merge-requests
+	targetRefExists bool // the target branch exists from an earlier run
+	endCommitStatus int  // status of the lookup of the end commit
+	sourceRefStatus int  // status of the creation of the source branch
+}
+
+// migrateWithFailingTempBranchesViaAPI migrates the merged MR !3 with
+// -pull-requests-only while GitHub fails as f says. GitHub must not get a
+// request to create the pull request. It returns the result, the branches
+// that were deleted and the error.
+func migrateWithFailingTempBranchesViaAPI(t *testing.T, f tempBranchFailure) (MergeRequestResult, []string, error) {
+	t.Helper()
+	const startSHA = "1111111111111111111111111111111111111111"
+	const endSHA = "2222222222222222222222222222222222222222"
+
+	mux := http.NewServeMux()
+	var calls atomic.Int32
+	// GitLab lists the newest commit first.
+	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/commits", []*gogitlab.Commit{
+		{ID: endSHA, ShortID: endSHA[:8]},
+		{ID: startSHA, ShortID: startSHA[:8]},
+	}, &calls)
+	p := newGitLabTestProject(t, mux)
+	p.m.cfg.PullRequestsOnly = true
+	p.m.cfg.SkipInvalidMergeRequests = f.skipInvalid
+	p.m.ghClient = &searchGitHub{}
+
+	ghMux := http.NewServeMux()
+	ghMux.HandleFunc("GET /repos/owner/repo/git/commits/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("sha") == endSHA && f.endCommitStatus != 0 {
+			w.WriteHeader(f.endCommitStatus)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := fmt.Fprintf(w, `{"sha":%q,"parents":[{"sha":"0000000000000000000000000000000000000000"}]}`, r.PathValue("sha")); err != nil {
+			t.Errorf("writing the commit: %v", err)
+		}
+	})
+	var deleted []string
+	ghMux.HandleFunc("POST /repos/owner/repo/git/refs", func(w http.ResponseWriter, r *http.Request) {
+		var ref gogithub.CreateRef
+		if err := json.NewDecoder(r.Body).Decode(&ref); err != nil {
+			t.Errorf("decoding the created reference: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case ref.Ref == "refs/heads/migration-target-3/main" && f.targetRefExists:
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			if _, err := fmt.Fprint(w, `{"message":"Reference already exists"}`); err != nil {
+				t.Errorf("writing the reference error: %v", err)
+			}
+		case ref.Ref == "refs/heads/migration-source-3/feature" && f.sourceRefStatus != 0:
+			w.WriteHeader(f.sourceRefStatus)
+		default:
+			w.WriteHeader(http.StatusCreated)
+			if _, err := fmt.Fprintf(w, `{"ref":%q}`, ref.Ref); err != nil {
+				t.Errorf("writing the created reference: %v", err)
+			}
+		}
+	})
+	ghMux.HandleFunc("DELETE /repos/owner/repo/git/refs/{ref...}", func(w http.ResponseWriter, r *http.Request) {
+		deleted = append(deleted, "refs/"+r.PathValue("ref"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ghMux.HandleFunc("POST /repos/owner/repo/pulls", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the pull request was created, want no pull request")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	useGitHubMux(t, p, ghMux)
+
+	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
+		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
+	})
+	slices.Sort(deleted)
+	return result, deleted, err
+}
+
+func TestMigrateMergeRequest_SkippedEndCommitDeletesTemporaryTargetBranchViaAPI(t *testing.T) {
+	// The end commit is missing on GitHub and -skip-invalid-merge-requests
+	// skips the merge request after the target branch was created, so the
+	// target branch must be deleted again (issue #138).
+	result, deleted, err := migrateWithFailingTempBranchesViaAPI(t, tempBranchFailure{skipInvalid: true, endCommitStatus: http.StatusNotFound})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSkipped || result.SkipReason != "end commit does not exist on GitHub" {
+		t.Fatalf("result = %+v, want skipped because the end commit does not exist", result)
+	}
+	if want := []string{"refs/heads/migration-target-3/main"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted branches = %v, want %v", deleted, want)
+	}
+}
+
+func TestMigrateMergeRequest_MissingEndCommitDeletesTemporaryTargetBranchViaAPI(t *testing.T) {
+	// Without -skip-invalid-merge-requests the missing end commit fails the
+	// merge request after the target branch was created, so the target branch
+	// must be deleted again.
+	result, deleted, err := migrateWithFailingTempBranchesViaAPI(t, tempBranchFailure{endCommitStatus: http.StatusNotFound})
+	if err == nil || !strings.Contains(err.Error(), "loading end commit") {
+		t.Fatalf("migrateMergeRequest = %+v, %v, want the failed lookup of the end commit", result, err)
+	}
+	if want := []string{"refs/heads/migration-target-3/main"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted branches = %v, want %v", deleted, want)
+	}
+}
+
+func TestMigrateMergeRequest_FailedSourceBranchDeletesTemporaryTargetBranchViaAPI(t *testing.T) {
+	// GitHub fails to create the source branch after the target branch was
+	// created, so the target branch must be deleted again.
+	result, deleted, err := migrateWithFailingTempBranchesViaAPI(t, tempBranchFailure{sourceRefStatus: http.StatusInternalServerError})
+	if err == nil || !strings.Contains(err.Error(), "creating temporary source branch") {
+		t.Fatalf("migrateMergeRequest = %+v, %v, want the failed creation of the source branch", result, err)
+	}
+	if want := []string{"refs/heads/migration-target-3/main"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted branches = %v, want %v", deleted, want)
+	}
+}
+
+func TestMigrateMergeRequest_SkippedEndCommitKeepsExistingTemporaryTargetBranchViaAPI(t *testing.T) {
+	// The target branch exists from an earlier run, so this run did not
+	// create it and does not delete it when it skips the merge request.
+	result, deleted, err := migrateWithFailingTempBranchesViaAPI(t, tempBranchFailure{skipInvalid: true, targetRefExists: true, endCommitStatus: http.StatusNotFound})
+	if err != nil {
+		t.Fatalf("migrateMergeRequest: %v", err)
+	}
+	if result.Status != StatusSkipped || result.SkipReason != "end commit does not exist on GitHub" {
+		t.Fatalf("result = %+v, want skipped because the end commit does not exist", result)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("deleted branches = %v, want none", deleted)
+	}
+}
+
 // remoteBranches returns the sorted branch names of the repository at dir. It
 // reports errors with t.Errorf, so an HTTP handler of a test may call it.
 func remoteBranches(t *testing.T, dir string) []string {
