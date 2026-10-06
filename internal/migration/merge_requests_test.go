@@ -788,6 +788,8 @@ func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/award_emoji", []*gogitlab.AwardEmoji{}, &calls)
 	servePages(t, mux, "/api/v4/projects/1/merge_requests/3/notes", []*gogitlab.Note{}, &calls)
 	p := newGitLabTestProject(t, mux)
+	var logs strings.Builder
+	p.log = hclog.New(&hclog.LoggerOptions{Output: &logs, Level: hclog.Trace})
 	p.m.ghClient = &searchGitHub{
 		issues: []*gogithub.Issue{{
 			Number:           Pointer(5),
@@ -800,6 +802,8 @@ func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
 			Body:   Pointer("> | **GitLab MR Number** | 3 |"),
 			Draft:  Pointer(false),
 		}},
+		// GitHub lists no temporary branch of MR !3, so no deletion is sent.
+		branches: githubBranches("main"),
 	}
 
 	var editedBody string
@@ -830,8 +834,6 @@ func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
 	}
 	gh.BaseURL = baseURL
 	p.m.gh = gh
-	// The local clone gets the deletion of the temporary branches.
-	p.repo, _ = repoWithGitHubRemote(t)
 
 	result, err := p.migrateMergeRequest(context.Background(), &gogitlab.BasicMergeRequest{
 		IID: 3, Title: "some work", State: "merged", SourceBranch: "feature", TargetBranch: "main",
@@ -845,6 +847,7 @@ func TestMigrateMergeRequest_MergeRequestWithoutCreationDate(t *testing.T) {
 	if want := "> | **Date Originally Opened** | " + unknownDate + " |"; !strings.Contains(editedBody, want) {
 		t.Errorf("pull request body = %q, want it to contain %q", editedBody, want)
 	}
+	wantNoErrorOrWarning(t, logs.String())
 }
 
 // useGitHubMux points the GitHub API client of p to a test server for ghMux.
