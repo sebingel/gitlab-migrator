@@ -171,6 +171,38 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// Warnings returns one message for each flag that is set but has no effect
+// because pull requests are not migrated. They are not errors: the run can go
+// on, but the user should know that the flag does nothing. -pull-requests-only
+// implies -migrate-pull-requests. With -report, -skip-open-merge-requests and
+// -merge-requests-max-age change the count, so they get no warning then. The
+// report reads neither -skip-invalid-merge-requests nor -state-dir, also with
+// -migrate-pull-requests, so with -report their warning names -report.
+func (c *Config) Warnings() []string {
+	suffix := " has no effect without -migrate-pull-requests"
+	if c.Report {
+		suffix = " has no effect with -report"
+	} else if c.EnablePullRequests || c.PullRequestsOnly {
+		return nil
+	}
+
+	var warnings []string
+	if c.SkipInvalidMergeRequests {
+		warnings = append(warnings, "-skip-invalid-merge-requests"+suffix)
+	}
+	if c.SkipOpenMergeRequests && !c.Report {
+		warnings = append(warnings, "-skip-open-merge-requests"+suffix)
+	}
+	if c.StateDir != "" {
+		warnings = append(warnings, "-state-dir"+suffix)
+	}
+	// 0 or less means no limit, so such a value changes nothing anyway.
+	if c.MergeRequestsAge > 0 && !c.Report {
+		warnings = append(warnings, "-merge-requests-max-age"+suffix)
+	}
+	return warnings
+}
+
 // ValidatePrepare checks that prepare-mode configuration is consistent.
 func (c *Config) ValidatePrepare() error {
 	if err := c.validateLogDirectory(); err != nil {
