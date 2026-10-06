@@ -868,21 +868,31 @@ func (p *project) migrateMergeRequest(ctx context.Context, mergeRequest *gogitla
 		// request that this run created does not use it.
 		//
 		// When the run is stopped before the branches are deleted, they stay. A
-		// success is never migrated again with -state-dir, so a success becomes
-		// partial: the next run migrates the merge request again and deletes the
-		// branches then. The defer changes the named result for that, because it
-		// runs after the return statement.
+		// success or a skip is never migrated again with -state-dir, so a
+		// success becomes partial, and the skip of "no commits between" becomes
+		// a failure (it has no pull request, so it is not counted as migrated):
+		// the next run migrates the merge request again and deletes the branches
+		// then. The defer changes the named result for that, because it runs
+		// after the return statement.
 		foundPullRequest := pullRequest != nil
 		defer func() {
 			if keepTempBranches() {
 				return
 			}
 			stopped := p.deleteTempBranches(ctx, pullRequest.GetNumber(), foundPullRequest, sourceBranchForClosedMergeRequest, targetBranchForClosedMergeRequest)
-			if stopped && finalErr == nil && (finalResult.Status == StatusSuccess || finalResult.Status == StatusPartial) {
+			if !stopped || finalErr != nil {
+				return
+			}
+			const stoppedError = "the run was stopped before the temporary branches were deleted"
+			switch finalResult.Status {
+			case StatusSuccess, StatusPartial:
 				finalResult.Status = StatusPartial
 				if finalResult.Error == "" {
-					finalResult.Error = "the run was stopped before the temporary branches were deleted"
+					finalResult.Error = stoppedError
 				}
+			case StatusSkipped:
+				finalResult.Status = StatusFailed
+				finalResult.Error = stoppedError
 			}
 		}()
 	}
@@ -1634,7 +1644,7 @@ func (p *project) createTempBranchesViaAPI(ctx context.Context, mr *gogitlab.Bas
 // cancelled ctx. Then deleteTempBranches returns true. The next run that
 // migrates the merge request again finds the pull request and deletes the
 // branches then: a stopped run that still finishes the merge request records
-// it as partial, so -state-dir does not skip it.
+// it as partial (as failed when it was skipped), so -state-dir does not skip it.
 func (p *project) deleteTempBranches(ctx context.Context, prNumber int, onlyListed bool, branches ...string) (stopped bool) {
 	keep := func() bool {
 		p.log.Debug("keeping temporary branches for closed pull request because the run was stopped", "owner", p.githubPath[0], "repo", p.githubPath[1], "pr_number", prNumber, "branches", branches)
