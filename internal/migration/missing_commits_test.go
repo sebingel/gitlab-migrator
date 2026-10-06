@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -277,13 +278,22 @@ func TestMigrateMergeRequest_UnfetchableMissingCommitNamesTheCause(t *testing.T)
 
 func TestMigrateMergeRequest_UnfetchableMissingCommitIsSkipped(t *testing.T) {
 	// With -skip-invalid-merge-requests the merge request whose commits cannot
-	// be fetched is skipped, and the skip reason names the failed fetch.
-	run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{skipInvalid: true})
-	if run.err != nil {
-		t.Fatalf("migrateMergeRequest: %v", run.err)
-	}
-	if run.result.Status != StatusSkipped || !strings.HasPrefix(run.result.SkipReason, "start commit is not in the clone and fetching it from GitLab failed: ") {
-		t.Fatalf("result = %+v, want skipped because the start commit could not be fetched", run.result)
+	// be fetched is skipped, and the skip reason names the failed fetch. Over
+	// HTTP, the refusal of the server must not count as an error that a later
+	// run can get past.
+	for name, handler := range map[string]func(context.CancelFunc, http.Handler) http.HandlerFunc{
+		"file": nil,
+		"http": func(_ context.CancelFunc, backend http.Handler) http.HandlerFunc { return backend.ServeHTTP },
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{skipInvalid: true, fetchHandler: handler})
+			if run.err != nil {
+				t.Fatalf("migrateMergeRequest: %v", run.err)
+			}
+			if run.result.Status != StatusSkipped || !strings.HasPrefix(run.result.SkipReason, "start commit is not in the clone and fetching it from GitLab failed: ") {
+				t.Fatalf("result = %+v, want skipped because the start commit could not be fetched", run.result)
+			}
+		})
 	}
 }
 
@@ -309,6 +319,42 @@ func TestMigrateMergeRequest_StopDuringFetchOfMissingCommitIsNotSkipped(t *testi
 	})
 	if run.err == nil || run.result.Status == StatusSkipped {
 		t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
+	}
+}
+
+func TestMigrateMergeRequest_CutPackDuringFetchOfMissingCommitIsNotSkipped(t *testing.T) {
+	// A proxy in front of GitLab closes the connection while the pack with the
+	// commits of MR !3 is downloaded: the response declares its full length,
+	// but only half of it arrives. The body then ends with an unexpected EOF,
+	// which is no net.Error and no HTTP status. That can work in the next run,
+	// so with -skip-invalid-merge-requests the merge request must fail and not
+	// be skipped: with -state-dir a skip is never migrated again.
+	run := migrateWithHiddenMergeRequestCommits(t, hiddenCommitsSetup{
+		wantOption:  "allowAnySHA1InWant",
+		skipInvalid: true,
+		fetchHandler: func(cancel context.CancelFunc, backend http.Handler) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					backend.ServeHTTP(w, r)
+					return
+				}
+				rec := httptest.NewRecorder()
+				backend.ServeHTTP(rec, r)
+				body := rec.Body.Bytes()
+				for name, values := range rec.Header() {
+					w.Header()[name] = values
+				}
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				w.WriteHeader(rec.Code)
+				_, _ = w.Write(body[:len(body)/2])
+			}
+		},
+	})
+	if run.err == nil || run.result.Status == StatusSkipped {
+		t.Fatalf("migrateMergeRequest = %+v, %v, want an error and no skip", run.result, run.err)
+	}
+	if !strings.Contains(run.err.Error(), "a later run can try again") {
+		t.Errorf("error = %q, want it to say that a later run can try again", run.err)
 	}
 }
 
