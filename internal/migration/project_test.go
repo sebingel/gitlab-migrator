@@ -13,8 +13,6 @@ import (
 )
 
 func TestNewProject_RenameMasterToMainWarnsWhenDefaultBranchIsNotMaster(t *testing.T) {
-	const warning = `-rename-master-to-main: the default branch of the GitLab project is "develop", not "master"; it will be renamed to "main"`
-
 	tests := []struct {
 		name          string
 		defaultBranch string
@@ -25,6 +23,7 @@ func TestNewProject_RenameMasterToMainWarnsWhenDefaultBranchIsNotMaster(t *testi
 	}{
 		{name: "flag and default branch develop", defaultBranch: "develop", renameMaster: true, wantWarning: true, wantBranch: "main"},
 		{name: "flag and default branch master", defaultBranch: "master", renameMaster: true, wantWarning: false, wantBranch: "main"},
+		{name: "flag and default branch main", defaultBranch: "main", renameMaster: true, wantWarning: false, wantBranch: "main"},
 		{name: "flag and no default branch", defaultBranch: "", renameMaster: true, wantWarning: false, wantBranch: "main"},
 		{name: "no flag and default branch develop", defaultBranch: "develop", wantWarning: false, wantBranch: "develop"},
 		{name: "trunk branch and default branch develop", defaultBranch: "develop", renameTrunk: "trunk", wantWarning: false, wantBranch: "trunk"},
@@ -32,6 +31,7 @@ func TestNewProject_RenameMasterToMainWarnsWhenDefaultBranchIsNotMaster(t *testi
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			warning := fmt.Sprintf(`-rename-master-to-main: the default branch of the GitLab project is %q, not "master"; it will be renamed to "main"`, tt.defaultBranch)
 			mux := http.NewServeMux()
 			mux.HandleFunc("GET /api/v4/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
