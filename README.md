@@ -4,7 +4,7 @@ This tool can migrate projects from GitLab to repositories on GitHub. It current
 
 * migrating the git repository with full history
 * migrating merge requests and translating them into pull requests, including closed/merged ones
-* renaming the `master` branch to `main` along the way
+* renaming the default branch (for example `master`) to `main` along the way
 
 It does not support migrating issues, wikis or any other primitive at this time. PRs welcome! (Although please don't waste your time suggesting swathing changes by an LLM)
 
