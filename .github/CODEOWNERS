@@ -1,0 +1,5 @@
+# GitHub asks the code owner for a review when a pull request is opened. This
+# is how Dependabot pull requests notify the maintainer. GitHub skips the
+# author of a pull request, so it does nothing for pull requests that
+# sebingel opens.
+* @sebingel
