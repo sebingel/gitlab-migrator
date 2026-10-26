@@ -175,3 +175,19 @@ jobs:
         run: |
           gh pr create --repo "$REPO" --base main --head "$BRANCH" \
             --title "$(cat "$RUNNER_TEMP/pr-title.txt")" --body-file "$RUNNER_TEMP/pr-body.md"
+
+      # With GO_TOOLCHAIN_TOKEN the owner is the author of the pull request.
+      # GitHub sends no notification for your own actions, and it does not
+      # accept a review request for the author. A comment from the
+      # github-actions[bot] account with a mention does notify the owner. This
+      # step uses github.token on purpose, not GO_TOOLCHAIN_TOKEN.
+      - name: Notify the owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+          OWNER: ${{ github.repository_owner }}
+          TARGET: ${{ needs.check.outputs.target }}
+        run: |
+          gh pr comment "$BRANCH" --repo "$REPO" \
+            --body "@$OWNER the Go toolchain update to $TARGET is ready for review."
